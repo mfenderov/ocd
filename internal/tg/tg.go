@@ -114,6 +114,9 @@ func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	for _, r := range rows {
 		ts := time.Unix(r.At, 0).Format("15:04:05")
 		fmt.Fprintf(&sb, "<code>%s</code> %s <code>%s</code> %s\n", ts, esc(r.Action), esc(r.Device), esc(r.Result))
+		if r.UA != "" {
+			fmt.Fprintf(&sb, "<code>%s</code>\n", esc(r.UA))
+		}
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
 }

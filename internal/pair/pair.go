@@ -60,7 +60,7 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := who(r)
 		if !authorized(r) {
-			st.Audit("web:"+ip, "tap_denied", "", ip, "no-jwt")
+			st.AuditUA("web:"+ip, "tap_denied", "", ip, "no-jwt", r.Header.Get("User-Agent"))
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -71,14 +71,14 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 		}
 		device, ok := st.ConsumeLink(tok)
 		if !ok {
-			st.Audit("web:"+ip, "tap_denied", "", ip, "used-or-expired")
+			st.AuditUA("web:"+ip, "tap_denied", "", ip, "used-or-expired", r.Header.Get("User-Agent"))
 			http.Error(w, "link already used or expired", http.StatusGone)
 			return
 		}
-		st.Audit("web:"+ip, "tapped", device, ip, "ok")
+		st.AuditUA("web:"+ip, "tapped", device, ip, "ok", r.Header.Get("User-Agent"))
 		link, err := mint.Mint(st, exec, device, "web")
 		if err != nil {
-			st.Audit("web:"+ip, "mint_failed", device, ip, err.Error())
+			st.AuditUA("web:"+ip, "mint_failed", device, ip, err.Error(), r.Header.Get("User-Agent"))
 			if err == mint.ErrRateLimited {
 				http.Error(w, "wait a bit before next link", http.StatusTooManyRequests)
 				return
@@ -86,7 +86,7 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 			http.Error(w, "mint failed", http.StatusBadGateway)
 			return
 		}
-		st.Audit("web:"+ip, "consumed", device, ip, "ok")
+		st.AuditUA("web:"+ip, "consumed", device, ip, "ok", r.Header.Get("User-Agent"))
 		http.Redirect(w, r, link, http.StatusFound)
 		fmt.Fprint(w, link)
 	})

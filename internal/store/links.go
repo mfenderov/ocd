@@ -2,7 +2,9 @@ package store
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"strings"
 	"time"
 )
 
@@ -15,12 +17,19 @@ type AuditRow struct {
 	Device string
 	IP     string
 	Result string
+	UA     string
 }
 
 func (s *Store) migrateLinks() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS link_tokens(token TEXT PRIMARY KEY, device TEXT, via TEXT, created_at INTEGER, used_at INTEGER);
 CREATE TABLE IF NOT EXISTS audit(at INTEGER, actor TEXT, action TEXT, device TEXT, ip TEXT, result TEXT);`)
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE audit ADD COLUMN ua TEXT DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 func newToken() (string, error) {
@@ -60,7 +69,18 @@ func (s *Store) ConsumeLink(tok string) (string, bool) {
 }
 
 func (s *Store) Audit(actor, action, device, ip, result string) {
-	_, _ = s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result) VALUES(strftime('%s','now'),?,?,?,?,?)`, actor, action, device, ip, result)
+	s.AuditUA(actor, action, device, ip, result, "")
+}
+
+func truncateUA(ua string) string {
+	if len(ua) > 300 {
+		return ua[:300]
+	}
+	return ua
+}
+
+func (s *Store) AuditUA(actor, action, device, ip, result, ua string) {
+	_, _ = s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
 	go s.prune()
 }
 
@@ -70,7 +90,7 @@ func (s *Store) prune() {
 }
 
 func (s *Store) RecentAudit(n int) []AuditRow {
-	rows, err := s.db.Query(`SELECT at, actor, action, device, ip, result FROM audit ORDER BY at DESC LIMIT ?`, n)
+	rows, err := s.db.Query(`SELECT at, actor, action, device, ip, result, ua FROM audit ORDER BY at DESC LIMIT ?`, n)
 	if err != nil {
 		return nil
 	}
@@ -78,7 +98,9 @@ func (s *Store) RecentAudit(n int) []AuditRow {
 	var out []AuditRow
 	for rows.Next() {
 		var r AuditRow
-		if err := rows.Scan(&r.At, &r.Actor, &r.Action, &r.Device, &r.IP, &r.Result); err == nil {
+		var ua sql.NullString
+		if err := rows.Scan(&r.At, &r.Actor, &r.Action, &r.Device, &r.IP, &r.Result, &ua); err == nil {
+			r.UA = ua.String
 			out = append(out, r)
 		}
 	}
