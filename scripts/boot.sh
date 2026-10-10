@@ -14,7 +14,7 @@ log() { echo "$(date -u +%FT%TZ) [$1] $2" >>"$LOG"; }
 
 if [ -f "$HOME/.ocd/env" ]; then
   # shellcheck disable=SC1091
-  . "$HOME/.ocd/env" || log WARN "env file failed to source, continuing with defaults"
+  set -a; . "$HOME/.ocd/env"; set +a || log WARN "env file failed to source, continuing with defaults"
 else
   log WARN "no ~/.ocd/env, daemon stage will be skipped"
 fi
