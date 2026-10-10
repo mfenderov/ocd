@@ -52,17 +52,9 @@ func esc(s string) string {
 	return r
 }
 
-func resolveDevice(st *store.Store, device string) string {
-	if device == "oneshot" {
-		if names := st.ListDevices(); len(names) == 1 {
-			return names[0]
-		}
-	}
-	return device
-}
-
 func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store, device string) {
-	device = resolveDevice(st, device)
+	// Links stay unbound: the tapping client identifies itself at tap time.
+	// Entry names are only a manual checklist in /devices, never auto-attached.
 	tok, err := st.IssueLink(device, "telegram")
 	if err != nil {
 		st.Audit("tg:owner", "link_failed", device, "", err.Error())
@@ -74,7 +66,7 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             chatID,
 		ParseMode:          "HTML",
-		Text:               "<b>Tap to log in</b> · " + esc(device) + " · one tap · 10 min\n" + publicBase() + "?t=" + tok,
+		Text:               "<b>Tap to log in</b> · one tap · 10 min\n" + publicBase() + "?t=" + tok,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &previewOff},
 	})
 	if err == nil {
@@ -226,7 +218,7 @@ func Start(ctx context.Context, st *store.Store) error {
 					text := "expired — " + p.Device + " (/login for a fresh one)"
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
-						text = "used — " + p.Device + " · " + pair.DeviceHint(p.UsedUA) + " · " + when
+						text = "used · " + pair.DeviceHint(p.UsedUA) + " · " + when
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
 							text += "\n" + ua
 						}
