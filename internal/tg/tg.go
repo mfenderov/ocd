@@ -58,7 +58,7 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 	tok, err := st.IssueLink(device, "telegram")
 	if err != nil {
 		st.Audit("tg:owner", "link_failed", device, "", err.Error())
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "could not issue link"})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "⚠️ <b>Couldn't issue a link</b> — try again in a moment."})
 		return
 	}
 	st.Audit("tg:owner", "link_issued", device, "", "ok")
@@ -66,7 +66,7 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             chatID,
 		ParseMode:          "HTML",
-		Text:               "<b>Tap to log in</b> · one tap · 10 min\n" + publicBase() + "?t=" + tok,
+		Text:               "🔑 <b>Tap to log in</b>\none tap · expires in 10 min\n" + publicBase() + "?t=" + tok,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &previewOff},
 	})
 	if err == nil {
@@ -77,11 +77,11 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	names := st.ListDevices()
 	if len(names) == 0 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "no devices yet"})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "📭 <b>No devices yet.</b>"})
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("<b>Devices</b>\n")
+	sb.WriteString("📱 <b>Devices</b>\n")
 	now := time.Now().Unix()
 	for _, n := range names {
 		d, _ := st.GetDevice(n)
@@ -99,11 +99,11 @@ func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store)
 func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	rows := st.RecentAudit(15)
 	if len(rows) == 0 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "audit empty"})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "📭 <b>Trail is empty.</b>"})
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("<b>Trail</b>\n")
+	sb.WriteString("🧾 <b>Trail</b> · last 15\n")
 	for _, r := range rows {
 		ts := time.Unix(r.At, 0).Format("15:04:05")
 		fmt.Fprintf(&sb, "<code>%s</code> %s <code>%s</code> %s\n", ts, esc(r.Action), esc(r.Device), esc(r.Result))
@@ -193,16 +193,16 @@ func Start(ctx context.Context, st *store.Store) error {
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 					ChatID:    chatID,
 					ParseMode: "HTML",
-					Text:      "Kills <b>every session everywhere</b>, including yours. Confirm: <code>/revoke YES</code>",
+					Text:      "☠️ <b>Kills every session everywhere</b>, including yours.\nConfirm: <code>/revoke YES</code>",
 				})
 				return
 			}
 			if err := admin.Revoke(st, realExec); err != nil {
 				st.Audit("tg:owner", "revoke_failed", "", "", err.Error())
-				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "revoke failed: " + err.Error()})
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "⚠️ <b>Revoke failed:</b> " + esc(err.Error())})
 				return
 			}
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "All sessions dead. <code>/login</code> fresh on each device."})
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "💀 <b>All sessions dead.</b>\n<code>/login</code> fresh on each device."})
 		})
 	// Sweeper rewrites spent link messages so chat history stays clean
 	// and holds no live links.
@@ -215,11 +215,11 @@ func Start(ctx context.Context, st *store.Store) error {
 				return
 			case <-tick.C:
 				for _, p := range st.PendingEdits() {
-					text := "<b>Expired</b> · never tapped\n/login for a fresh one"
+					text := "⌛️ <b>Expired</b> · never tapped\n/login for a fresh one"
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
 						var sb strings.Builder
-						fmt.Fprintf(&sb, "<b>Logged in · %s</b>\n<code>%s · %s</code>", esc(pair.DeviceHint(p.UsedUA)), esc(when), esc(p.UsedIP))
+						fmt.Fprintf(&sb, "✅ <b>Logged in · %s</b>\n<code>%s · %s</code>", esc(pair.DeviceHint(p.UsedUA)), esc(when), esc(p.UsedIP))
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
 							fmt.Fprintf(&sb, "\n<code>%s</code>", esc(ua))
 						}

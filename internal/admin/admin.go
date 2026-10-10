@@ -63,7 +63,7 @@ func StatusHTML(st *store.Store, exec execFunc) string {
 		svc = "DOWN: " + err.Error()
 	}
 	remote, _ := exec("opencode", "service", "get", "remote")
-	return fmt.Sprintf("<b>Status</b>\n• service <code>%s</code>\n• relay <code>%s</code>\n• devices <code>%d</code>\n• mints 24h <code>%d</code>",
+	return fmt.Sprintf("📊 <b>Status</b>\n• service <code>%s</code>\n• relay <code>%s</code>\n• devices <code>%d</code>\n• mints 24h <code>%d</code>",
 		svc, firstLine(remote), len(st.ListDevices()),
 		st.CountRecentMints("", 24*time.Hour))
 }
