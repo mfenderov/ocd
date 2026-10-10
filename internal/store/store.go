@@ -48,6 +48,22 @@ func (s *Store) GetDevice(name string) (Device, bool) {
 	return d, err == nil
 }
 
+func (s *Store) ListDevices() []string {
+	rows, err := s.db.Query(`SELECT name FROM devices ORDER BY name`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func (s *Store) TouchMint(device, via string) error {
 	_, err := s.db.Exec(`INSERT INTO mints(device, via, at) VALUES(?,?,strftime('%s','now'))`, device, via)
 	return err
