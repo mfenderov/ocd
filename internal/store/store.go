@@ -37,6 +37,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateSeen(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -128,6 +132,23 @@ func (s *Store) SeenClients() []SeenClient {
 		}
 	}
 	return out
+}
+
+func (s *Store) migrateSeen() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS seen_updates(id INTEGER PRIMARY KEY, at INTEGER);`)
+	return err
+}
+
+// SeenUpdate records a processed Telegram update ID for replay dedup.
+func (s *Store) SeenUpdate(id int64) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM seen_updates WHERE id=?`, id).Scan(&n)
+	if n > 0 {
+		return true
+	}
+	_, _ = s.db.Exec(`INSERT INTO seen_updates(id, at) VALUES(?,strftime('%s','now'))`, id)
+	_, _ = s.db.Exec(`DELETE FROM seen_updates WHERE at<strftime('%s','now')-?`, int64((24 * 60 * 60)))
+	return false
 }
 
 func FmtAgo(s int64) string {
