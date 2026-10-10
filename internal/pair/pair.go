@@ -7,9 +7,18 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mfenderov/ocd/internal/geo"
 	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/store"
 )
+
+func stripPort(s string) string {
+	s = strings.TrimSpace(strings.Split(s, ",")[0])
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return s
+}
 
 func authorized(r *http.Request) bool {
 	if os.Getenv("OCD_PAIR_OPEN") == "1" {
@@ -29,31 +38,8 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// DeviceHint reduces a User-Agent to a one-word client family for audit.
-func DeviceHint(ua string) string {
-	l := strings.ToLower(ua)
-	switch {
-	case strings.Contains(l, "iphone"):
-		return "iphone"
-	case strings.Contains(l, "ipad"):
-		return "ipad"
-	case strings.Contains(l, "android"):
-		return "android"
-	case strings.Contains(l, "macintosh") || strings.Contains(l, "mac os"):
-		return "mac"
-	case strings.Contains(l, "windows"):
-		return "windows"
-	case strings.Contains(l, "linux"):
-		return "linux"
-	case strings.Contains(l, "curl"):
-		return "curl"
-	default:
-		return "other"
-	}
-}
-
 func who(r *http.Request) string {
-	return clientIP(r) + " · " + DeviceHint(r.Header.Get("User-Agent"))
+	return clientIP(r)
 }
 
 func Handler(st *store.Store, exec func() (string, error)) http.Handler {
@@ -87,7 +73,12 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 			http.Error(w, "mint failed", http.StatusBadGateway)
 			return
 		}
-		st.AuditUA("web:"+ip, "consumed", device, ip, "ok", r.Header.Get("User-Agent"))
+		rowID := st.AuditUA("web:"+ip, "consumed", device, ip, "ok", r.Header.Get("User-Agent"))
+		go func() {
+			if city := geo.Lookup(stripPort(ip)); city != "" {
+				st.SetResultExtra(rowID, city)
+			}
+		}()
 		http.Redirect(w, r, link, http.StatusFound)
 		fmt.Fprint(w, link)
 	})

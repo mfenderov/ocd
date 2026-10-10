@@ -79,9 +79,18 @@ func truncateUA(ua string) string {
 	return ua
 }
 
-func (s *Store) AuditUA(actor, action, device, ip, result, ua string) {
-	_, _ = s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
+func (s *Store) AuditUA(actor, action, device, ip, result, ua string) int64 {
+	res, _ := s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
 	go s.prune()
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func (s *Store) SetResultExtra(id int64, extra string) {
+	if extra == "" {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE audit SET result=result||? WHERE rowid=?`, " · "+extra, id)
 }
 
 func (s *Store) prune() {

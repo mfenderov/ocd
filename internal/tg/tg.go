@@ -13,7 +13,6 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/mfenderov/ocd/internal/admin"
-	"github.com/mfenderov/ocd/internal/pair"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -219,7 +218,7 @@ func Start(ctx context.Context, st *store.Store) error {
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
 						var sb strings.Builder
-						fmt.Fprintf(&sb, "✅ <b>Logged in · %s</b>\n<code>%s · %s</code>", esc(pair.DeviceHint(p.UsedUA)), esc(when), esc(p.UsedIP))
+						fmt.Fprintf(&sb, "✅ <b>Logged in</b> · %s\n<code>%s</code>", esc(when), esc(p.UsedIP))
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
 							fmt.Fprintf(&sb, "\n<code>%s</code>", esc(ua))
 						}
