@@ -74,6 +74,7 @@ func Start(ctx context.Context, st *store.Store) error {
 			}
 			link, err := mint.Mint(st, execPair, device, "telegram")
 			msg := link
+			noPreview := true
 			if err != nil {
 				if err == mint.ErrRateLimited {
 					msg = "wait a bit before next link"
@@ -84,6 +85,9 @@ func Start(ctx context.Context, st *store.Store) error {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
 				Text:   msg,
+				// Pair links die on first open: a Telegram link preview
+				// fetch would spend the code before the owner copies it.
+				LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &noPreview},
 			})
 		})
 	b.Start(ctx)
