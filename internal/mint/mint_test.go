@@ -26,3 +26,18 @@ func TestMintRateCap(t *testing.T) {
 		t.Fatalf("want 5 exec calls, got %d", calls)
 	}
 }
+
+func TestParseLinkStripsQR(t *testing.T) {
+	raw := "\n  Open a link to connect. Links work once and expire in 5 minutes.\n\n  https://oc.buyallmemes.com/auth/connect/4k5uObGFoxt0380Xydaq9Q\n\n  ███████\n  ██ QR JUNK ██\n"
+	got := mint.ParseLink(raw)
+	want := "https://oc.buyallmemes.com/auth/connect/4k5uObGFoxt0380Xydaq9Q"
+	if got != want {
+		t.Fatalf("want %q, got %q", want, got)
+	}
+}
+
+func TestParseLinkEmpty(t *testing.T) {
+	if got := mint.ParseLink("no url here"); got != "" {
+		t.Fatalf("want empty, got %q", got)
+	}
+}
