@@ -23,7 +23,7 @@ func publicBase() string {
 	if u := os.Getenv("OCD_PUBLIC_URL"); u != "" {
 		return u
 	}
-	return "https://oc.buyallmemes.com/pair"
+	return "https://tap.oc.buyallmemes.com/pair"
 }
 
 // HandleLogin is the pure decision core: empty string means silent drop.
