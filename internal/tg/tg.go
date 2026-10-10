@@ -61,11 +61,14 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 	}
 	st.Audit("tg:owner", "link_issued", device, "", "ok")
 	previewOff := true
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             chatID,
 		Text:               "tap to log in (" + device + ", one tap, 10 min):\n" + publicBase() + "?t=" + tok,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &previewOff},
 	})
+	if err == nil {
+		_ = st.SetLinkMessage(tok, chatID, sent.ID)
+	}
 }
 
 func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
@@ -154,6 +157,31 @@ func Start(ctx context.Context, st *store.Store) error {
 			}
 			sendAudit(ctx, b, chatID, st)
 		})
+	// Sweeper rewrites spent link messages so chat history stays clean
+	// and holds no live links.
+	go func() {
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				for _, p := range st.PendingEdits() {
+					text := "used — " + p.Device
+					if p.Note == "expired" {
+						text = "expired — " + p.Device + " (/login for a fresh one)"
+					}
+					_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+						ChatID:    p.ChatID,
+						MessageID: p.MessageID,
+						Text:      text,
+					})
+					st.MarkEdited(p.Token)
+				}
+			}
+		}
+	}()
 	b.Start(ctx)
 	return nil
 }
