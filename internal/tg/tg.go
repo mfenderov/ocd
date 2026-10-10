@@ -44,6 +44,13 @@ func HandleLogin(senderID int64, text string, owner int64) string {
 	return "mint:" + device
 }
 
+func esc(s string) string {
+	r := strings.ReplaceAll(s, "&", "&amp;")
+	r = strings.ReplaceAll(r, "<", "&lt;")
+	r = strings.ReplaceAll(r, ">", "&gt;")
+	return r
+}
+
 func resolveDevice(st *store.Store, device string) string {
 	if device == "oneshot" {
 		if names := st.ListDevices(); len(names) == 1 {
@@ -65,7 +72,8 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 	previewOff := true
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:             chatID,
-		Text:               "tap to log in (" + device + ", one tap, 10 min):\n" + publicBase() + "?t=" + tok,
+		ParseMode:          "HTML",
+		Text:               "<b>Tap to log in</b> · " + esc(device) + " · one tap · 10 min\n" + publicBase() + "?t=" + tok,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &previewOff},
 	})
 	if err == nil {
@@ -80,17 +88,18 @@ func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store)
 		return
 	}
 	var sb strings.Builder
+	sb.WriteString("<b>Devices</b>\n")
 	now := time.Now().Unix()
 	for _, n := range names {
 		d, _ := st.GetDevice(n)
 		left := d.ExpiresAt - now
-		state := "EXPIRED"
+		state := "expired"
 		if left > 0 {
 			state = fmt.Sprintf("%dd %dh left", left/86400, (left%86400)/3600)
 		}
-		fmt.Fprintf(&sb, "%s (%s): %s\n", d.Name, d.Platform, state)
+		fmt.Fprintf(&sb, "• <code>%s</code> %s — %s\n", esc(d.Name), esc(d.Platform), state)
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: sb.String()})
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
 }
 
 func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
@@ -100,11 +109,12 @@ func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 		return
 	}
 	var sb strings.Builder
+	sb.WriteString("<b>Trail</b>\n")
 	for _, r := range rows {
 		ts := time.Unix(r.At, 0).Format("15:04:05")
-		fmt.Fprintf(&sb, "%s %s %s %s\n", ts, r.Action, r.Device, r.Result)
+		fmt.Fprintf(&sb, "<code>%s</code> %s <code>%s</code> %s\n", ts, esc(r.Action), esc(r.Device), esc(r.Result))
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: sb.String()})
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
 }
 
 func realExec(name string, args ...string) (string, error) {
@@ -171,8 +181,9 @@ func Start(ctx context.Context, st *store.Store) error {
 				return
 			}
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: chatID,
-				Text:   admin.Status(st, realExec),
+				ChatID:    chatID,
+				ParseMode: "HTML",
+				Text:      admin.StatusHTML(st, realExec),
 			})
 		})
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/revoke", bot.MatchTypePrefix,
@@ -183,8 +194,9 @@ func Start(ctx context.Context, st *store.Store) error {
 			}
 			if !strings.HasSuffix(update.Message.Text, " YES") {
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID: chatID,
-					Text:   "kills every session everywhere, including yours. confirm: /revoke YES",
+					ChatID:    chatID,
+					ParseMode: "HTML",
+					Text:      "Kills <b>every session everywhere</b>, including yours. Confirm: <code>/revoke YES</code>",
 				})
 				return
 			}
@@ -193,7 +205,7 @@ func Start(ctx context.Context, st *store.Store) error {
 				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "revoke failed: " + err.Error()})
 				return
 			}
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "all sessions dead. /login fresh on each device."})
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "All sessions dead. <code>/login</code> fresh on each device."})
 		})
 	// Sweeper rewrites spent link messages so chat history stays clean
 	// and holds no live links.
