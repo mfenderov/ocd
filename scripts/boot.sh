@@ -61,4 +61,16 @@ else
 fi
 
 log BOOT "=== boot done ==="
+
+# Verify: each stage must answer. A started-but-deaf process is FAIL, not OK.
+if command -v curl >/dev/null 2>&1 && [ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:49400/healthz 2>/dev/null)" = "200" ]; then
+  log OK "daemon answers /healthz"
+else
+  log FAIL "daemon does not answer /healthz (check log above)"
+fi
+if [ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:49374/ 2>/dev/null)" = "200" ]; then
+  log OK "opencode answers locally"
+else
+  log FAIL "opencode does not answer locally"
+fi
 exit 0

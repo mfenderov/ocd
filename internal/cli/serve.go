@@ -13,6 +13,12 @@ import (
 )
 
 func RunServe(w io.Writer) error {
+	if os.Getenv("OCD_TG_TOKEN") == "" {
+		return fmt.Errorf("OCD_TG_TOKEN unset: refusing to run deaf (bot would silently ignore everything)")
+	}
+	if os.Getenv("OCD_OWNER_ID") == "" {
+		return fmt.Errorf("OCD_OWNER_ID unset: refusing to run deaf")
+	}
 	st, err := openStore()
 	if err != nil {
 		return err
@@ -37,6 +43,9 @@ func RunServe(w io.Writer) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/pair", pair.Handler(st, execPair))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
 	addr := "127.0.0.1:49400"
 	fmt.Fprintln(w, "ocd serve on http://"+addr+" (telegram polling + /pair)")
 	return http.ListenAndServe(addr, mux)

@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mfenderov/ocd/internal/cli"
@@ -31,5 +32,14 @@ func TestRootHasMintDevicesStatus(t *testing.T) {
 		if !ok {
 			t.Fatalf("want %s subcommand", name)
 		}
+	}
+}
+
+func TestServeRefusesWithoutToken(t *testing.T) {
+	t.Setenv("OCD_TG_TOKEN", "")
+	t.Setenv("OCD_OWNER_ID", "")
+	var sb strings.Builder
+	if err := cli.RunServe(&sb); err == nil {
+		t.Fatal("want refusal without token")
 	}
 }
