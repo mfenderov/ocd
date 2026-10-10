@@ -102,16 +102,32 @@ func (s *Store) ExpireDevice(name string) error {
 	return err
 }
 
-// TapStats reports tap count in the window and seconds since last tap (or -1).
-func (s *Store) TapStats(device string, d time.Duration) (count int, sinceLast int64) {
-	since := time.Now().Add(-d).Unix()
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM link_tokens WHERE device=? AND used_at IS NOT NULL AND used_at>=?`, device, since).Scan(&count)
-	var last sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MAX(used_at) FROM link_tokens WHERE device=? AND used_at IS NOT NULL`, device).Scan(&last)
-	if !last.Valid {
-		return count, -1
+type SeenClient struct {
+	IP    string
+	UA    string
+	Count int
+	Last  int64
+}
+
+// SeenClients lists real tapping clients from the audit trail: distinct
+// IP + UA pairs with tap counts. Ground truth, no manual entries.
+func (s *Store) SeenClients() []SeenClient {
+	rows, err := s.db.Query(`SELECT ip, ua, COUNT(*), MAX(at) FROM audit
+		WHERE action IN ('tapped','consumed') GROUP BY ip, ua ORDER BY MAX(at) DESC`)
+	if err != nil {
+		return nil
 	}
-	return count, time.Now().Unix() - last.Int64
+	defer rows.Close()
+	var out []SeenClient
+	for rows.Next() {
+		var c SeenClient
+		var ua sql.NullString
+		if err := rows.Scan(&c.IP, &ua, &c.Count, &c.Last); err == nil {
+			c.UA = ua.String
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func FmtAgo(s int64) string {

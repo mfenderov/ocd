@@ -74,23 +74,18 @@ func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Stor
 }
 
 func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
-	names := st.ListDevices()
-	if len(names) == 0 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "📭 <b>No devices yet.</b>"})
+	clients := st.SeenClients()
+	if len(clients) == 0 {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "📭 <b>No taps yet.</b>"})
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("📱 <b>Devices</b>\n")
-	now := time.Now().Unix()
-	for _, n := range names {
-		d, _ := st.GetDevice(n)
-		left := d.ExpiresAt - now
-		state := "expired"
-		if left > 0 {
-			state = fmt.Sprintf("%dd %dh left", left/86400, (left%86400)/3600)
+	sb.WriteString("📱 <b>Seen clients</b>\n")
+	for _, c := range clients {
+		fmt.Fprintf(&sb, "• <code>%s</code> · %d taps · %s\n", esc(c.IP), c.Count, esc(store.FmtAgo(time.Now().Unix()-c.Last)))
+		if c.UA != "" {
+			fmt.Fprintf(&sb, "<code>%s</code>\n", esc(c.UA))
 		}
-		taps, last := st.TapStats(n, 7*24*time.Hour)
-		fmt.Fprintf(&sb, "• <code>%s</code> %s — %s\n  %d taps/7d · last %s\n", esc(d.Name), esc(d.Platform), state, taps, store.FmtAgo(last))
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
 }
@@ -105,7 +100,7 @@ func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	sb.WriteString("🧾 <b>Trail</b> · last 15\n")
 	for _, r := range rows {
 		ts := time.Unix(r.At, 0).Format("15:04:05")
-		fmt.Fprintf(&sb, "<code>%s</code> %s <code>%s</code> %s\n", ts, esc(r.Action), esc(r.Device), esc(r.Result))
+		fmt.Fprintf(&sb, "<code>%s</code> %s · %s · %s\n", ts, esc(r.Action), esc(r.IP), esc(r.Result))
 		if r.UA != "" {
 			fmt.Fprintf(&sb, "<code>%s</code>\n", esc(r.UA))
 		}
@@ -137,7 +132,11 @@ func Start(ctx context.Context, st *store.Store) error {
 			return 0, false
 		}
 		if update.Message.From.ID != owner || owner == 0 {
-			st.Audit("tg:stranger", "stranger_denied", "", "", update.Message.Text)
+			text := update.Message.Text
+			if len(text) > 80 {
+				text = text[:80]
+			}
+			st.Audit("tg:stranger", "stranger_denied", "", "", text)
 			return 0, false
 		}
 		return update.Message.Chat.ID, true
