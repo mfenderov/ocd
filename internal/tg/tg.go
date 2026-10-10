@@ -123,6 +123,14 @@ func Start(ctx context.Context, st *store.Store) error {
 	if err != nil {
 		return err
 	}
+	// Boot ping: silence is the alarm. Best effort, never blocks startup.
+	if owner != 0 {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    owner,
+			ParseMode: "HTML",
+			Text:      "🟢 <b>ocd back online.</b>",
+		})
+	}
 	gate := func(update *models.Update) (int64, bool) {
 		if update.Message == nil {
 			return 0, false
