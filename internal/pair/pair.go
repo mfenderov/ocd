@@ -75,6 +75,7 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 			http.Error(w, "link already used or expired", http.StatusGone)
 			return
 		}
+		st.SetUsedUA(tok, r.Header.Get("User-Agent"))
 		st.AuditUA("web:"+ip, "tapped", device, ip, "ok", r.Header.Get("User-Agent"))
 		link, err := mint.Mint(st, exec, device, "web")
 		if err != nil {
