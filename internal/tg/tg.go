@@ -67,6 +67,11 @@ func Start(ctx context.Context, st *store.Store) error {
 				return
 			}
 			device := strings.TrimPrefix(reply, "mint:")
+			if device == "oneshot" {
+				if names := st.ListDevices(); len(names) == 1 {
+					device = names[0]
+				}
+			}
 			link, err := mint.Mint(st, execPair, device, "telegram")
 			msg := link
 			if err != nil {
