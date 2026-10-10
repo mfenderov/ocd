@@ -95,3 +95,8 @@ func (s *Store) RefreshExpiry(name string, d time.Duration) error {
 	_, err := s.db.Exec(`UPDATE devices SET last_cookie_at=strftime('%s','now'), expires_at=strftime('%s','now')+? WHERE name=?`, int64(d.Seconds()), name)
 	return err
 }
+
+func (s *Store) ExpireDevice(name string) error {
+	_, err := s.db.Exec(`UPDATE devices SET last_cookie_at=0, expires_at=0 WHERE name=?`, name)
+	return err
+}

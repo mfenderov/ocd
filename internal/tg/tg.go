@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/mfenderov/ocd/internal/admin"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -105,6 +107,11 @@ func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: sb.String()})
 }
 
+func realExec(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).Output()
+	return string(out), err
+}
+
 func Start(ctx context.Context, st *store.Store) error {
 	token := os.Getenv("OCD_TG_TOKEN")
 	if token == "" {
@@ -156,6 +163,37 @@ func Start(ctx context.Context, st *store.Store) error {
 				return
 			}
 			sendAudit(ctx, b, chatID, st)
+		})
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypeExact,
+		func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			chatID, ok := gate(update)
+			if !ok {
+				return
+			}
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: chatID,
+				Text:   admin.Status(st, realExec),
+			})
+		})
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/revoke", bot.MatchTypePrefix,
+		func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			chatID, ok := gate(update)
+			if !ok {
+				return
+			}
+			if !strings.HasSuffix(update.Message.Text, " YES") {
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID: chatID,
+					Text:   "kills every session everywhere, including yours. confirm: /revoke YES",
+				})
+				return
+			}
+			if err := admin.Revoke(st, realExec); err != nil {
+				st.Audit("tg:owner", "revoke_failed", "", "", err.Error())
+				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "revoke failed: " + err.Error()})
+				return
+			}
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "all sessions dead. /login fresh on each device."})
 		})
 	// Sweeper rewrites spent link messages so chat history stays clean
 	// and holds no live links.

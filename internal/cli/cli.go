@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mfenderov/ocd/internal/admin"
 	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/store"
 )
@@ -121,11 +122,38 @@ func Root() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			fmt.Fprintf(cmd.OutOrStdout(), "devices=%d mints24h=%d\n", len(st.ListDevices()), st.CountRecentMints("", 24*60*60*1_000_000_000))
+			out, err := exec.Command("opencode", "service", "status").Output()
+			_ = out
+			_ = err
+			fmt.Fprint(cmd.OutOrStdout(), admin.Status(st, func(name string, args ...string) (string, error) {
+				o, e := exec.Command(name, args...).Output()
+				return string(o), e
+			}))
 			return nil
 		},
 	}
 
-	root.AddCommand(serve, mintCmd, devices, status)
+	var revokeYes bool
+	revoke := &cobra.Command{
+		Use:   "revoke",
+		Short: "Rotate password, kill all sessions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !revokeYes {
+				return fmt.Errorf("confirm with --yes (logs you out everywhere)")
+			}
+			st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			return admin.Revoke(st, func(name string, args ...string) (string, error) {
+				o, e := exec.Command(name, args...).Output()
+				return string(o), e
+			})
+		},
+	}
+	revoke.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
+
+	root.AddCommand(serve, mintCmd, devices, status, revoke)
 	return root
 }
