@@ -226,11 +226,15 @@ func Start(ctx context.Context, st *store.Store) error {
 					if p.Note == "expired" {
 						text = "expired — " + p.Device + " (/login for a fresh one)"
 					}
-					_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+					_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 						ChatID:    p.ChatID,
 						MessageID: p.MessageID,
 						Text:      text,
 					})
+					if editErr != nil {
+						st.Audit("tg:owner", "edit_failed", p.Device, "", editErr.Error())
+						continue
+					}
 					st.MarkEdited(p.Token)
 				}
 			}
