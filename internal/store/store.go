@@ -20,6 +20,9 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Single connection: :memory: databases are per-connection, and the
+	// check-then-claim in ConsumeLink must not interleave.
+	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
