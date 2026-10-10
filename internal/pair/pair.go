@@ -29,8 +29,8 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// deviceHint reduces a User-Agent to a one-word client family for audit.
-func deviceHint(ua string) string {
+// DeviceHint reduces a User-Agent to a one-word client family for audit.
+func DeviceHint(ua string) string {
 	l := strings.ToLower(ua)
 	switch {
 	case strings.Contains(l, "iphone"):
@@ -53,7 +53,7 @@ func deviceHint(ua string) string {
 }
 
 func who(r *http.Request) string {
-	return clientIP(r) + " · " + deviceHint(r.Header.Get("User-Agent"))
+	return clientIP(r) + " · " + DeviceHint(r.Header.Get("User-Agent"))
 }
 
 func Handler(st *store.Store, exec func() (string, error)) http.Handler {

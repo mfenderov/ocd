@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/mfenderov/ocd/internal/admin"
+	"github.com/mfenderov/ocd/internal/pair"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -225,7 +226,7 @@ func Start(ctx context.Context, st *store.Store) error {
 					text := "expired — " + p.Device + " (/login for a fresh one)"
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
-						text = "used — " + p.Device + " · " + when
+						text = "used — " + p.Device + " · " + pair.DeviceHint(p.UsedUA) + " · " + when
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
 							text += "\n" + ua
 						}
