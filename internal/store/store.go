@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -99,4 +100,32 @@ func (s *Store) RefreshExpiry(name string, d time.Duration) error {
 func (s *Store) ExpireDevice(name string) error {
 	_, err := s.db.Exec(`UPDATE devices SET last_cookie_at=0, expires_at=0 WHERE name=?`, name)
 	return err
+}
+
+// TapStats reports tap count in the window and seconds since last tap (or -1).
+func (s *Store) TapStats(device string, d time.Duration) (count int, sinceLast int64) {
+	since := time.Now().Add(-d).Unix()
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM link_tokens WHERE device=? AND used_at IS NOT NULL AND used_at>=?`, device, since).Scan(&count)
+	var last sql.NullInt64
+	_ = s.db.QueryRow(`SELECT MAX(used_at) FROM link_tokens WHERE device=? AND used_at IS NOT NULL`, device).Scan(&last)
+	if !last.Valid {
+		return count, -1
+	}
+	return count, time.Now().Unix() - last.Int64
+}
+
+func FmtAgo(s int64) string {
+	if s < 0 {
+		return "never"
+	}
+	if s < 90 {
+		return "just now"
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm ago", s/60)
+	}
+	if s < 86400 {
+		return fmt.Sprintf("%dh ago", s/3600)
+	}
+	return fmt.Sprintf("%dd ago", s/86400)
 }

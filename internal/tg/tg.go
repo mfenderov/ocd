@@ -97,7 +97,8 @@ func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store)
 		if left > 0 {
 			state = fmt.Sprintf("%dd %dh left", left/86400, (left%86400)/3600)
 		}
-		fmt.Fprintf(&sb, "• <code>%s</code> %s — %s\n", esc(d.Name), esc(d.Platform), state)
+		taps, last := st.TapStats(n, 7*24*time.Hour)
+		fmt.Fprintf(&sb, "• <code>%s</code> %s — %s\n  %d taps/7d · last %s\n", esc(d.Name), esc(d.Platform), state, taps, store.FmtAgo(last))
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
 }
