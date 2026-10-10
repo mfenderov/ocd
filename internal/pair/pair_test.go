@@ -61,6 +61,33 @@ func TestTapMintsAndRedirectsOnce(t *testing.T) {
 	}
 }
 
+func TestDeviceHint(t *testing.T) {
+	t.Setenv("OCD_PAIR_OPEN", "1")
+	cases := map[string]string{
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)": "iphone",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)":        "mac",
+		"curl/8.0": "curl",
+		"":         "other",
+	}
+	for ua, want := range cases {
+		st := openStore(t)
+		tok, _ := st.IssueLink("mac", "telegram")
+		h := pair.Handler(st, func() (string, error) { return "https://x/y", nil })
+		r := httptest.NewRequest("GET", "/pair?t="+tok, nil)
+		r.Header.Set("User-Agent", ua)
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		found := false
+		for _, row := range st.RecentAudit(3) {
+			if row.Action == "consumed" && row.IP == "192.0.2.1 · "+want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("ua %q: want consumed row tagged %q, got %+v", ua, want, st.RecentAudit(3))
+		}
+	}
+}
+
 func TestMissingTokenIs400(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	st := openStore(t)

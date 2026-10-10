@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/store"
@@ -28,9 +29,36 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// deviceHint reduces a User-Agent to a one-word client family for audit.
+func deviceHint(ua string) string {
+	l := strings.ToLower(ua)
+	switch {
+	case strings.Contains(l, "iphone"):
+		return "iphone"
+	case strings.Contains(l, "ipad"):
+		return "ipad"
+	case strings.Contains(l, "android"):
+		return "android"
+	case strings.Contains(l, "macintosh") || strings.Contains(l, "mac os"):
+		return "mac"
+	case strings.Contains(l, "windows"):
+		return "windows"
+	case strings.Contains(l, "linux"):
+		return "linux"
+	case strings.Contains(l, "curl"):
+		return "curl"
+	default:
+		return "other"
+	}
+}
+
+func who(r *http.Request) string {
+	return clientIP(r) + " · " + deviceHint(r.Header.Get("User-Agent"))
+}
+
 func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
+		ip := who(r)
 		if !authorized(r) {
 			st.Audit("web:"+ip, "tap_denied", "", ip, "no-jwt")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
