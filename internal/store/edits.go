@@ -13,6 +13,7 @@ type PendingEdit struct {
 	Note      string
 	UsedAt    int64
 	UsedUA    string
+	UsedIP    string
 }
 
 func (s *Store) migrateEdits() error {
@@ -21,6 +22,7 @@ func (s *Store) migrateEdits() error {
 		`ALTER TABLE link_tokens ADD COLUMN message_id INTEGER DEFAULT 0`,
 		`ALTER TABLE link_tokens ADD COLUMN edited INTEGER DEFAULT 0`,
 		`ALTER TABLE link_tokens ADD COLUMN used_ua TEXT DEFAULT ''`,
+		`ALTER TABLE link_tokens ADD COLUMN used_ip TEXT DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
@@ -54,20 +56,25 @@ func (s *Store) PendingEdits() []PendingEdit {
 			out = append(out, p)
 		}
 	}
-	// Attach the consuming client's UA to used edits.
+	// Attach the consuming client's IP and UA to used edits.
 	for i, p := range out {
 		if p.Note != "used" {
 			continue
 		}
-		var ua sql.NullString
-		_ = s.db.QueryRow(`SELECT used_ua FROM link_tokens WHERE token=?`, p.Token).Scan(&ua)
+		var ua, ip sql.NullString
+		_ = s.db.QueryRow(`SELECT used_ua, used_ip FROM link_tokens WHERE token=?`, p.Token).Scan(&ua, &ip)
 		out[i].UsedUA = ua.String
+		out[i].UsedIP = ip.String
 	}
 	return out
 }
 
 func (s *Store) SetUsedUA(tok, ua string) {
-	_, _ = s.db.Exec(`UPDATE link_tokens SET used_ua=? WHERE token=?`, truncateUA(ua), tok)
+	s.SetUsedMeta(tok, "", ua)
+}
+
+func (s *Store) SetUsedMeta(tok, ip, ua string) {
+	_, _ = s.db.Exec(`UPDATE link_tokens SET used_ua=?, used_ip=? WHERE token=?`, truncateUA(ua), ip, tok)
 }
 
 func (s *Store) MarkEdited(tok string) {

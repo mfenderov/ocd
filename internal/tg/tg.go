@@ -215,17 +215,20 @@ func Start(ctx context.Context, st *store.Store) error {
 				return
 			case <-tick.C:
 				for _, p := range st.PendingEdits() {
-					text := "expired — " + p.Device + " (/login for a fresh one)"
+					text := "<b>Expired</b> · never tapped\n/login for a fresh one"
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
-						text = "used · " + pair.DeviceHint(p.UsedUA) + " · " + when
+						var sb strings.Builder
+						fmt.Fprintf(&sb, "<b>Logged in · %s</b>\n<code>%s · %s</code>", esc(pair.DeviceHint(p.UsedUA)), esc(when), esc(p.UsedIP))
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
-							text += "\n" + ua
+							fmt.Fprintf(&sb, "\n<code>%s</code>", esc(ua))
 						}
+						text = sb.String()
 					}
 					_, editErr := b.EditMessageText(ctx, &bot.EditMessageTextParams{
 						ChatID:    p.ChatID,
 						MessageID: p.MessageID,
+						ParseMode: "HTML",
 						Text:      text,
 					})
 					if editErr != nil {

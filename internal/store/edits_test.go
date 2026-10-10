@@ -20,7 +20,7 @@ func TestLinkMessageTracking(t *testing.T) {
 	if _, ok := st.ConsumeLink(tok); !ok {
 		t.Fatal("consume must succeed")
 	}
-	st.SetUsedUA(tok, "Mozilla/5.0 (iPhone)")
+	st.SetUsedMeta(tok, "192.0.2.1", "Mozilla/5.0 (iPhone)")
 	pending = st.PendingEdits()
 	if len(pending) != 1 || pending[0].MessageID != 456 || pending[0].Note != "used" || pending[0].UsedUA == "" {
 		t.Fatalf("want 1 used edit with UA, got %+v", pending)
