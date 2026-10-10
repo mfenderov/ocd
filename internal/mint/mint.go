@@ -2,6 +2,7 @@ package mint
 
 import (
 	"errors"
+	"os"
 	"regexp"
 	"time"
 
@@ -19,11 +20,13 @@ func ParseLink(raw string) string {
 }
 
 func Mint(st *store.Store, exec func() (string, error), device, via string) (string, error) {
-	if st.CountRecentMints(device, time.Hour) >= 5 {
-		return "", ErrRateLimited
-	}
-	if st.CountRecentMints("", 24*time.Hour) >= 20 {
-		return "", ErrRateLimited
+	if os.Getenv("OCD_NO_CAP") != "1" {
+		if st.CountRecentMints(device, time.Hour) >= 5 {
+			return "", ErrRateLimited
+		}
+		if st.CountRecentMints("", 24*time.Hour) >= 20 {
+			return "", ErrRateLimited
+		}
 	}
 	link, err := exec()
 	if err != nil {
