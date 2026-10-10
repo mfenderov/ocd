@@ -70,7 +70,11 @@ func Start(ctx context.Context, st *store.Store) error {
 			link, err := mint.Mint(st, execPair, device, "telegram")
 			msg := link
 			if err != nil {
-				msg = "wait a bit before next link"
+				if err == mint.ErrRateLimited {
+					msg = "wait a bit before next link"
+				} else {
+					msg = "mint failed on this box (no opencode here yet)"
+				}
 			}
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
