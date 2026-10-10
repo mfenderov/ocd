@@ -29,7 +29,7 @@ func updateJSON(t *testing.T, text string) []byte {
 func TestBadSecretGets403AndNoDBWrite(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
-	h := hook.Handler(st, "s3cr3t", func(updateID int64) bool { return false }, func(text string) {})
+	h := hook.Handler(st, "s3cr3t", func(updateID int64) bool { return false }, func(chatID, fromID int64, chatType, text string) {})
 	req := httptest.NewRequest("POST", "/webhook", bytes.NewReader(updateJSON(t, "/login")))
 	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "wrong")
 	rec := httptest.NewRecorder()
@@ -46,7 +46,7 @@ func TestReplayProcessedOnce(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
 	done := make(chan string, 2)
-	h := hook.Handler(st, "s3cr3t", st.SeenUpdate, func(text string) { done <- text })
+	h := hook.Handler(st, "s3cr3t", st.SeenUpdate, func(chatID, fromID int64, chatType, text string) { done <- text })
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest("POST", "/webhook", bytes.NewReader(updateJSON(t, "/login")))
 		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "s3cr3t")

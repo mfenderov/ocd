@@ -13,11 +13,11 @@ import (
 
 const maxBody = 64 * 1024
 
-type update struct {
-	UpdateID int64 `json:"update_id"`
-}
+// ProcessFunc handles one verified update. Telegram retries on failure,
+// so work must be idempotent (dedup by update ID happens before this).
+type ProcessFunc func(chatID, fromID int64, chatType, text string)
 
-func Handler(st *store.Store, secret string, seen func(updateID int64) bool, process func(text string)) http.Handler {
+func Handler(st *store.Store, secret string, seen func(updateID int64) bool, process ProcessFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -37,6 +37,14 @@ func Handler(st *store.Store, secret string, seen func(updateID int64) bool, pro
 		var u struct {
 			UpdateID int64 `json:"update_id"`
 			Message  *struct {
+				MessageID int `json:"message_id"`
+				Chat      *struct {
+					ID   int64  `json:"id"`
+					Type string `json:"type"`
+				} `json:"chat"`
+				From *struct {
+					ID int64 `json:"id"`
+				} `json:"from"`
 				Text string `json:"text"`
 			} `json:"message"`
 		}
@@ -48,11 +56,18 @@ func Handler(st *store.Store, secret string, seen func(updateID int64) bool, pro
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		text := ""
+		var chatID, fromID int64
+		var chatType, text string
 		if u.Message != nil {
 			text = u.Message.Text
+			if u.Message.Chat != nil {
+				chatID, chatType = u.Message.Chat.ID, u.Message.Chat.Type
+			}
+			if u.Message.From != nil {
+				fromID = u.Message.From.ID
+			}
 		}
-		go process(text)
+		go process(chatID, fromID, chatType, text)
 		w.WriteHeader(http.StatusOK)
 	})
 }
