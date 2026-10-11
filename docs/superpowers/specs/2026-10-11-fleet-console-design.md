@@ -62,8 +62,13 @@ every box keeps working standalone if the console is down.)
   receipt time (box clocks skew), offline boxes omitted with an explicit
   marker row. Pagination is per-request `n`, no cursors.
 - Revoke confirm is enforced server-side, not just in UI/CLI.
+- Global nuke is fail-fast (owner decision): per-box results reported,
+  offline boxes marked untouched, operator re-runs. No queued kill orders.
+- Enrollment is instant-join (owner decision): first heartbeat with a valid
+  token registers the box. Allowlist deferred until a token ever leaks.
 - Web console behind Cloudflare Access (Google login). CLI uses scoped
   per-client API tokens, OS-keychain stored, one-command rotation.
+- Access allowlist email: owner to supply before deploy (open item).
 
 ## API sketch (decided)
 
