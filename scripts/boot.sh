@@ -52,7 +52,10 @@ elif pgrep -f "ocd serve" >/dev/null 2>&1; then
 else
   export OCD_DB="${OCD_DB:-$HOME/.ocd/ocd.db}" OCD_PAIR_URL="${OCD_PAIR_URL:-https://oc.buyallmemes.com}" \
     OCD_PUBLIC_URL="${OCD_PUBLIC_URL:-https://oc-tap.buyallmemes.com/pair}" \
-    OCD_NO_CAP="${OCD_NO_CAP:-}" OCD_PAIR_OPEN="${OCD_PAIR_OPEN:-}"
+    OCD_NO_CAP="${OCD_NO_CAP:-}" OCD_PAIR_OPEN="${OCD_PAIR_OPEN:-}" \
+    OCD_ADMIN_TOKEN="${OCD_ADMIN_TOKEN:-}" OCD_WORKER_URL="${OCD_WORKER_URL:-}" \
+    OCD_HEARTBEAT_TOKEN="${OCD_HEARTBEAT_TOKEN:-}" OCD_ENROLL_TOKEN="${OCD_ENROLL_TOKEN:-}" \
+    OCD_BOX_ID="${OCD_BOX_ID:-}"
   if nohup "$HOME/.local/bin/ocd" serve >>"$LOG" 2>&1 & then
     log OK "daemon started pid $!"
   else
@@ -61,6 +64,20 @@ else
 fi
 
 log BOOT "=== boot done ==="
+
+# Fleet admin + heartbeat: the daemon logs its own on/off lines above, but
+# echo config presence here too so the boot log always shows the state even
+# when the daemon stage was skipped. Values are never logged.
+if [ -n "${OCD_ADMIN_TOKEN:-}" ]; then
+  log OK "admin on"
+else
+  log OK "admin off (OCD_ADMIN_TOKEN unset)"
+fi
+if [ -n "${OCD_WORKER_URL:-}" ]; then
+  log OK "heartbeat on"
+else
+  log OK "heartbeat off (OCD_WORKER_URL unset)"
+fi
 
 # Verify: each stage must answer. A started-but-deaf process is FAIL, not OK.
 # The daemon registers its webhook before listening, so allow it time.

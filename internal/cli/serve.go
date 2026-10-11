@@ -6,15 +6,103 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
+	"github.com/mfenderov/ocd/internal/boxadmin"
+	"github.com/mfenderov/ocd/internal/boxagent"
 	"github.com/mfenderov/ocd/internal/hook"
 	"github.com/mfenderov/ocd/internal/pair"
 	"github.com/mfenderov/ocd/internal/store"
 	"github.com/mfenderov/ocd/internal/tg"
 )
+
+// boxVersion is the fleet protocol version sent in heartbeats.
+// It mirrors boxadmin.ocdVersion (unexported there); keep the two in sync.
+const boxVersion = "0.3.0"
+
+// heartbeatInterval paces box→Worker heartbeats (spec default).
+const heartbeatInterval = 30 * time.Second
+
+// serveAddr is the loopback listener for the daemon. OCD_SERVE_ADDR exists
+// only so tests can bind a free port; production always uses the default.
+func serveAddr() string {
+	if a := os.Getenv("OCD_SERVE_ADDR"); a != "" {
+		return a
+	}
+	return "127.0.0.1:49400"
+}
+
+// mountAdmin puts /admin/* behind Bearer auth when OCD_ADMIN_TOKEN is set.
+// An unset token skips mounting cleanly: the daemon stays healthy without
+// an admin listener, and the skip is logged for the boot log.
+func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func() (string, error)) {
+	token := os.Getenv("OCD_ADMIN_TOKEN")
+	if token == "" {
+		fmt.Fprintln(w, "admin off (OCD_ADMIN_TOKEN unset)")
+		return
+	}
+	publicBase := os.Getenv("OCD_PUBLIC_URL")
+	if publicBase == "" {
+		publicBase = "https://oc-tap.buyallmemes.com/pair"
+	}
+	execService := func(name string, args ...string) (string, error) {
+		out, err := exec.Command(name, args...).Output()
+		return string(out), err
+	}
+	mux.Handle("/admin/mint", boxadmin.RequireAdmin(st, token, boxadmin.MintHandler(st, execPair, publicBase)))
+	mux.Handle("/admin/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
+	mux.Handle("/admin/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
+	mux.Handle("/admin/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
+	fmt.Fprintln(w, "admin on (/admin/* behind Bearer auth)")
+}
+
+// startHeartbeat POSTs one box heartbeat to the Worker every heartbeatInterval
+// when OCD_WORKER_URL is set, with an immediate first beat so the fleet sees
+// the box without waiting out the interval. An unset URL skips cleanly with
+// a log line and no goroutine. The bearer is OCD_HEARTBEAT_TOKEN and
+// OCD_ENROLL_TOKEN rides along until the Worker replies enrolled; neither
+// secret is ever logged. workerURL is posted verbatim (full endpoint).
+func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
+	workerURL := os.Getenv("OCD_WORKER_URL")
+	if workerURL == "" {
+		fmt.Fprintln(w, "heartbeat off (OCD_WORKER_URL unset)")
+		return
+	}
+	fmt.Fprintln(w, "heartbeat on (every 30s)")
+	client := &http.Client{} // dedicated: SendOnce clones it, never shares or mutates
+	go func() {
+		tick := time.NewTicker(heartbeatInterval)
+		defer tick.Stop()
+		enrolled := false
+		send := func() {
+			enrollToken := ""
+			if !enrolled {
+				enrollToken = os.Getenv("OCD_ENROLL_TOKEN")
+			}
+			ok, err := boxagent.SendOnce(st, client, workerURL, os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"), enrollToken, boxVersion)
+			if err != nil {
+				fmt.Fprintln(w, "heartbeat failed:", err)
+				return
+			}
+			if ok {
+				enrolled = true
+			}
+		}
+		send()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				send()
+			}
+		}
+	}()
+}
 
 func RunServe(w io.Writer) error {
 	if os.Getenv("OCD_TG_TOKEN") == "" {
@@ -53,6 +141,8 @@ func RunServe(w io.Writer) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	})
+	mountAdmin(mux, w, st, execPair)
+	startHeartbeat(ctx, w, st)
 
 	if poll {
 		fmt.Fprintln(w, "mode: polling")
@@ -64,9 +154,13 @@ func RunServe(w io.Writer) error {
 		fmt.Fprintln(w, "mode: webhook (polling off)")
 	}
 
-	addr := "127.0.0.1:49400"
-	fmt.Fprintln(w, "ocd serve on http://"+addr)
-	return http.ListenAndServe(addr, mux)
+	addr := serveAddr()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "ocd serve on http://"+ln.Addr().String())
+	return http.Serve(ln, mux)
 }
 
 func newSecret() (string, error) {
