@@ -42,8 +42,12 @@ func MintHandler(st *store.Store, exec func() (string, error), publicBase string
 				// place (mint.Mint); the tap-time flow mints the
 				// delivered session. The parsed link itself is not
 				// served: the console deals in one-tap proxy URLs only.
+				ua := r.Header.Get("User-Agent")
+				ip := clientIP(r)
 				if _, err := mint.Mint(st, exec, "admin", "admin"); err != nil {
 					st.ReleaseIdem(key, tok)
+					st.ConsumeLink(tok)
+					st.AuditUA("admin", "mint_failed", "admin", ip, err.Error(), ua)
 					if errors.Is(err, mint.ErrRateLimited) {
 						http.Error(w, "wait a bit before next link", http.StatusTooManyRequests)
 						return
@@ -51,6 +55,7 @@ func MintHandler(st *store.Store, exec func() (string, error), publicBase string
 					http.Error(w, "mint failed", http.StatusBadGateway)
 					return
 				}
+				st.AuditUA("admin", "link_issued", "admin", ip, "ok", ua)
 				fmt.Fprint(w, publicBase+"?t="+tok)
 				return
 			}
