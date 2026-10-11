@@ -24,6 +24,9 @@ every box keeps working standalone if the console is down.)
 - Execution stays on the boxes. The console never runs prompts or tools.
 - No multi-user, no teams, no roles. Single owner, same as today.
 - No replacement for box-level auth (pair links, owner-gated bots).
+- No Docker packaging yet. Native installs first, containers are the
+  intended uniform packaging later: same image on home PC, Mac, cloud
+  box, one tunnel per host fanning out to container ports.
 
 ## Anti-goals
 
