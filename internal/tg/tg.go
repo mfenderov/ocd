@@ -65,7 +65,15 @@ func AllowedChat(chatType models.ChatType, chatID, groupID int64) bool {
 	if chatType == "private" {
 		return true
 	}
+	if chatType != "group" && chatType != "supergroup" {
+		return false
+	}
 	return groupID != 0 && chatID == groupID
+}
+
+// IsOwner is the single ownership predicate shared by every entry point.
+func IsOwner(fromID, owner int64) bool {
+	return owner != 0 && fromID == owner
 }
 
 // NormalizeCommand strips an @botsuffix and enforces addressing: in a
@@ -97,7 +105,7 @@ func publicBase() string {
 
 // HandleLogin is the pure decision core: empty string means silent drop.
 func HandleLogin(senderID int64, text string, owner int64) string {
-	if senderID != owner || owner == 0 {
+	if !IsOwner(senderID, owner) {
 		return ""
 	}
 	fields := strings.Fields(text)
@@ -186,7 +194,7 @@ func checkGate(st *store.Store, owner int64, update *models.Update) (int64, bool
 		st.Audit("tg:stranger", "group_denied", "", "", string(update.Message.Chat.Type))
 		return 0, false
 	}
-	if update.Message.From.ID != owner || owner == 0 {
+	if !IsOwner(update.Message.From.ID, owner) {
 		text := update.Message.Text
 		if len(text) > 80 {
 			text = text[:80]
@@ -198,6 +206,10 @@ func checkGate(st *store.Store, owner int64, update *models.Update) (int64, bool
 }
 
 func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, chatID int64, fromID int64, text string) {
+	if !IsOwner(fromID, owner) {
+		st.Audit("tg:stranger", "stranger_denied", "", "", "handleText")
+		return
+	}
 	switch {
 	case strings.HasPrefix(text, "/login"):
 		reply := HandleLogin(fromID, text, owner)
@@ -246,7 +258,7 @@ func Dispatch(ctx context.Context, st *store.Store, chatID, fromID int64, chatTy
 		st.Audit("tg:stranger", "group_denied", "", "", chatType)
 		return
 	}
-	if fromID != owner || owner == 0 {
+	if !IsOwner(fromID, owner) {
 		t := text
 		if len(t) > 80 {
 			t = t[:80]

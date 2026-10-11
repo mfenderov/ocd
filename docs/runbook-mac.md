@@ -94,4 +94,5 @@ sudo systemsetup -setcomputersleep Never   # on adapter, lid open
 Create the solo-member Telegram group, invite both bots. In the group,
 addressed commands only: `/login@ocd_bambot`, `/login@ocd_mac`. Bare
 `/login` in the group is ignored by design (avoids double fire); DMs
-keep working bare. Never invite anyone else.
+keep working bare (a suffixed command pasted into a DM is dropped —
+retype it bare). Never invite anyone else.

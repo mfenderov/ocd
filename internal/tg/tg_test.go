@@ -54,3 +54,24 @@ func TestAddressedCommandsRouteToOwnBot(t *testing.T) {
 		t.Fatalf("args must survive normalize, got %q %v", cmd, ok)
 	}
 }
+
+func TestOwnerPredicate(t *testing.T) {
+	if !tg.IsOwner(1, 1) {
+		t.Fatal("owner must own")
+	}
+	if tg.IsOwner(999, 1) {
+		t.Fatal("stranger must not own")
+	}
+	if tg.IsOwner(1, 0) {
+		t.Fatal("zero owner must own nothing")
+	}
+}
+
+func TestAllowedChatEnumeratesGroupTypes(t *testing.T) {
+	if tg.AllowedChat("channel", -100123, -100123) {
+		t.Fatal("future chat types must not sneak in by ID match")
+	}
+	if !tg.AllowedChat("group", -100123, -100123) {
+		t.Fatal("group must stay allowed")
+	}
+}
