@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
@@ -125,5 +126,40 @@ func TestAuditSnakeCaseKeys(t *testing.T) {
 	}
 	if rows[0]["actor"] != "web:1.2.3.4" || rows[0]["action"] != "tapped" || rows[0]["ua"] != "curl/8" {
 		t.Fatalf("want seeded values, got %v", rows[0])
+	}
+}
+
+func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.AuditHandler(st))
+	get := func(target string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", target, nil)
+		req.Header.Set("Authorization", "Bearer s3cr3t")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	// Empty audit encodes as [], never null.
+	if code, body := get("/admin/audit"); code != http.StatusOK || strings.TrimSpace(body) != "[]" {
+		t.Fatalf("want 200 with [], got %d %q", code, body)
+	}
+	for i := range 60 {
+		st.Audit(fmt.Sprintf("actor-%d", i), "tapped", "", "127.0.0.1", "ok")
+	}
+	// Invalid, zero, and negative n all fall back to the default 50.
+	for _, target := range []string{"/admin/audit?n=abc", "/admin/audit?n=0", "/admin/audit?n=-5"} {
+		code, body := get(target)
+		if code != http.StatusOK {
+			t.Fatalf("want 200, got %d for %s", code, target)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(body), &rows); err != nil {
+			t.Fatalf("decode audit for %s: %v", target, err)
+		}
+		if len(rows) != 50 {
+			t.Fatalf("want default 50 rows for %s, got %d", target, len(rows))
+		}
 	}
 }
