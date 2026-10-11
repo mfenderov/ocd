@@ -68,6 +68,15 @@ func (s *Store) BumpEpoch() int {
 	return s.PasswordEpoch()
 }
 
+// NextHeartbeatSeq increments the persisted heartbeat sequence and returns it.
+// Starts at 1, +1 per call.
+func (s *Store) NextHeartbeatSeq() int64 {
+	_, _ = s.db.Exec(`INSERT INTO meta(k,v) VALUES('heartbeat_seq',1) ON CONFLICT(k) DO UPDATE SET v=v+1`)
+	var v int64
+	_ = s.db.QueryRow(`SELECT v FROM meta WHERE k='heartbeat_seq'`).Scan(&v)
+	return v
+}
+
 func (s *Store) AddDevice(name, platform string) error {
 	_, err := s.db.Exec(`INSERT INTO devices(name, platform, last_cookie_at, expires_at) VALUES(?,?,0,0)
 	ON CONFLICT(name) DO UPDATE SET platform=excluded.platform`, name, platform)
