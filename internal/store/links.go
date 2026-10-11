@@ -11,13 +11,13 @@ import (
 const linkTTL = 10 * time.Minute
 
 type AuditRow struct {
-	At     int64
-	Actor  string
-	Action string
-	Device string
-	IP     string
-	Result string
-	UA     string
+	At     int64  `json:"at"`
+	Actor  string `json:"actor"`
+	Action string `json:"action"`
+	Device string `json:"device"`
+	IP     string `json:"ip"`
+	Result string `json:"result"`
+	UA     string `json:"ua"`
 }
 
 func (s *Store) migrateLinks() error {
@@ -94,8 +94,8 @@ func (s *Store) SetResultExtra(id int64, extra string) {
 }
 
 func (s *Store) prune() {
-	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<strftime('%s','now')-?`, int64((90*24*time.Hour).Seconds()))
-	_, _ = s.db.Exec(`DELETE FROM link_tokens WHERE created_at<strftime('%s','now')-?`, int64((24*time.Hour).Seconds()))
+	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<strftime('%s','now')-?`, int64((90 * 24 * time.Hour).Seconds()))
+	_, _ = s.db.Exec(`DELETE FROM link_tokens WHERE created_at<strftime('%s','now')-?`, int64((24 * time.Hour).Seconds()))
 }
 
 func (s *Store) RecentAudit(n int) []AuditRow {
