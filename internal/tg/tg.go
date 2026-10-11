@@ -48,6 +48,54 @@ func ownerID() int64 {
 	return id
 }
 
+// allowedGroupID is the shared owner-only group where every box bot may
+// answer addressed commands. Zero means no group is allowed.
+func allowedGroupID() int64 {
+	id, _ := strconv.ParseInt(os.Getenv("OCD_GROUP_ID"), 10, 64)
+	return id
+}
+
+func botName() string {
+	return os.Getenv("OCD_BOT_NAME")
+}
+
+// AllowedChat reports whether chatID may talk to this bot: DMs always,
+// groups only when they are the configured shared group.
+func AllowedChat(chatType models.ChatType, chatID, groupID int64) bool {
+	if chatType == "private" {
+		return true
+	}
+	if chatType != "group" && chatType != "supergroup" {
+		return false
+	}
+	return groupID != 0 && chatID == groupID
+}
+
+// IsOwner is the single ownership predicate shared by every entry point.
+func IsOwner(fromID, owner int64) bool {
+	return owner != 0 && fromID == owner
+}
+
+// NormalizeCommand strips an @botsuffix and enforces addressing: in a
+// group a command must name this bot (bare commands would fire every
+// bot in the shared group); in DMs bare commands pass through.
+func NormalizeCommand(text, name string, isGroup bool) (string, bool) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return "", false
+	}
+	cmd := fields[0]
+	if i := strings.Index(cmd, "@"); i >= 0 {
+		if name == "" || cmd[i+1:] != name {
+			return "", false
+		}
+		cmd = cmd[:i]
+	} else if isGroup {
+		return "", false
+	}
+	return strings.Join(append([]string{cmd}, fields[1:]...), " "), true
+}
+
 func publicBase() string {
 	if u := os.Getenv("OCD_PUBLIC_URL"); u != "" {
 		return u
@@ -57,7 +105,7 @@ func publicBase() string {
 
 // HandleLogin is the pure decision core: empty string means silent drop.
 func HandleLogin(senderID int64, text string, owner int64) string {
-	if senderID != owner || owner == 0 {
+	if !IsOwner(senderID, owner) {
 		return ""
 	}
 	fields := strings.Fields(text)
@@ -142,11 +190,11 @@ func checkGate(st *store.Store, owner int64, update *models.Update) (int64, bool
 	if update.Message == nil {
 		return 0, false
 	}
-	if update.Message.Chat.Type != "private" {
+	if !AllowedChat(update.Message.Chat.Type, update.Message.Chat.ID, allowedGroupID()) {
 		st.Audit("tg:stranger", "group_denied", "", "", string(update.Message.Chat.Type))
 		return 0, false
 	}
-	if update.Message.From.ID != owner || owner == 0 {
+	if !IsOwner(update.Message.From.ID, owner) {
 		text := update.Message.Text
 		if len(text) > 80 {
 			text = text[:80]
@@ -158,6 +206,10 @@ func checkGate(st *store.Store, owner int64, update *models.Update) (int64, bool
 }
 
 func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, chatID int64, fromID int64, text string) {
+	if !IsOwner(fromID, owner) {
+		st.Audit("tg:stranger", "stranger_denied", "", "", "handleText")
+		return
+	}
 	switch {
 	case strings.HasPrefix(text, "/login"):
 		reply := HandleLogin(fromID, text, owner)
@@ -202,16 +254,20 @@ func handleRevoke(ctx context.Context, b *bot.Bot, st *store.Store, chatID int64
 // a bad sender gets the same silent drop plus audit row.
 func Dispatch(ctx context.Context, st *store.Store, chatID, fromID int64, chatType, text string) {
 	owner := ownerID()
-	if chatType != "private" {
+	if !AllowedChat(models.ChatType(chatType), chatID, allowedGroupID()) {
 		st.Audit("tg:stranger", "group_denied", "", "", chatType)
 		return
 	}
-	if fromID != owner || owner == 0 {
+	if !IsOwner(fromID, owner) {
 		t := text
 		if len(t) > 80 {
 			t = t[:80]
 		}
 		st.Audit("tg:stranger", "stranger_denied", "", "", t)
+		return
+	}
+	text, ok := NormalizeCommand(text, botName(), chatType != "private")
+	if !ok {
 		return
 	}
 	b, err := senderBot()
@@ -259,7 +315,11 @@ func Start(ctx context.Context, st *store.Store, poll bool) error {
 			if !ok {
 				return
 			}
-			handleText(ctx, b, st, owner, chatID, update.Message.From.ID, update.Message.Text)
+			text, ok := NormalizeCommand(update.Message.Text, botName(), update.Message.Chat.Type != "private")
+			if !ok {
+				return
+			}
+			handleText(ctx, b, st, owner, chatID, update.Message.From.ID, text)
 		})
 	// Sweeper rewrites spent link messages so chat history stays clean
 	// and holds no live links. Runs in both poll and webhook mode.
