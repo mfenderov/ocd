@@ -62,10 +62,22 @@ every box keeps working standalone if the console is down.)
   receipt time (box clocks skew), offline boxes omitted with an explicit
   marker row. Pagination is per-request `n`, no cursors.
 - Revoke confirm is enforced server-side, not just in UI/CLI.
-- Global nuke is fail-fast (owner decision): per-box results reported,
-  offline boxes marked untouched, operator re-runs. No queued kill orders.
-- Enrollment is instant-join (owner decision): first heartbeat with a valid
-  token registers the box. Allowlist deferred until a token ever leaks.
+- Global nuke is sticky (owner decision, overruling earlier fail-fast):
+  per-box results reported, but offline boxes get a pending-revoke
+  tombstone in the Worker. A box whose heartbeat carries a stale password
+  epoch reads "tainted, revoke pending" until it confirms rotation, and
+  Worker-to-box calls to it are refused. No silent comebacks.
+- Enrollment is approve-on-first-sight (owner decision): a new box ID or a
+  known ID on a new token pauses as "pending" and pings Telegram with
+  approve/deny buttons. Approve binds token→id permanently (kills the
+  cloned-.env accident class); deny + audit row. Nothing joins silently.
+- Worker pins box hostnames (SSRF fix): heartbeat-supplied URLs are never
+  fetched; only enrolled, pinned hostnames are called.
+- Heartbeats carry seq + box timestamp; replays rejected. Heartbeat and
+  admin credentials are distinct tokens with separate rotation.
+- Worker→box fan-out uses per-box deadlines with allSettled semantics, a
+  circuit breaker over recently-failing boxes, and documented timeout
+  budgets. Mint calls carry idempotency keys; a retry never mints twice.
 - Web console behind Cloudflare Access (Google login). CLI uses scoped
   per-client API tokens, OS-keychain stored, one-command rotation.
 - Access allowlist email: owner to supply before deploy (open item).
@@ -75,9 +87,14 @@ every box keeps working standalone if the console is down.)
 - `GET /api/backends` — id, online, last seen, last tap, version.
 - `POST /api/backends/:id/link` — returns tap-link (Worker relays box mint).
 - `POST /api/backends/:id/revoke` — box-local password rotation.
-- `POST /api/revoke-all` — every box, with explicit confirm flag.
-- `GET /api/audit?box=&n=` — merged trail, boxes authoritative.
-- `POST /api/heartbeat` — box-to-Worker, service-token authed.
+- `POST /api/revoke-all` — every box, explicit confirm flag, tombstones
+  for offline boxes (sticky until each confirms).
+- `GET /api/audit?box=&n=` — merged trail by box event time with
+  per-box watermarks; offline boxes show last-synced markers, never
+  silent gaps.
+- `POST /api/heartbeat` — box-to-Worker, service-token authed, seq +
+  timestamp, password epoch included for tombstone checks.
+- `POST /api/enroll/approve|deny` — owner resolves pending enrollments.
 
 ## Left to the builder
 
