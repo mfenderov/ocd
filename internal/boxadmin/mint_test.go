@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
@@ -88,5 +90,36 @@ func TestClaimedKeyMintsFresh(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("want 2 exec, got %d", calls)
+	}
+}
+
+func TestConcurrentSameKeyMintsOnce(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	var calls atomic.Int64
+	exec := func() (string, error) {
+		calls.Add(1)
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	}
+	const n = 8
+	urls := make([]string, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Fresh handler per goroutine: no shared in-memory state.
+			h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
+			urls[i] = postMint(t, h, "key-race")
+		}()
+	}
+	wg.Wait()
+	for i := 1; i < n; i++ {
+		if urls[i] != urls[0] {
+			t.Fatalf("want same URL, got %q vs %q", urls[0], urls[i])
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("want 1 exec, got %d", got)
 	}
 }

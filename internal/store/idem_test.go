@@ -14,12 +14,16 @@ func TestIdemLookupUnknownKey(t *testing.T) {
 	}
 }
 
-func TestIdemRoundTrip(t *testing.T) {
+func TestIdemClaimAndLookup(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
 	tok, _ := st.IssueLink("mac", "admin")
-	if err := st.RecordIdem("key-1", tok); err != nil {
-		t.Fatalf("record: %v", err)
+	if !st.ClaimIdem("key-1", tok) {
+		t.Fatal("fresh key must claim")
+	}
+	other, _ := st.IssueLink("mac", "admin")
+	if st.ClaimIdem("key-1", other) {
+		t.Fatal("live key must resist second claim")
 	}
 	got, ok := st.LookupIdem("key-1")
 	if !ok || got != tok {
@@ -27,16 +31,26 @@ func TestIdemRoundTrip(t *testing.T) {
 	}
 }
 
-func TestIdemRejectsClaimedToken(t *testing.T) {
+func TestIdemTakeoverAfterClaim(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
 	tok, _ := st.IssueLink("mac", "admin")
-	_ = st.RecordIdem("key-1", tok)
+	if !st.ClaimIdem("key-1", tok) {
+		t.Fatal("setup: fresh key must claim")
+	}
 	if _, ok := st.ConsumeLink(tok); !ok {
 		t.Fatal("setup: token must consume")
 	}
 	if _, ok := st.LookupIdem("key-1"); ok {
 		t.Fatal("claimed token must miss")
+	}
+	fresh, _ := st.IssueLink("mac", "admin")
+	if !st.ClaimIdem("key-1", fresh) {
+		t.Fatal("dead key must allow takeover")
+	}
+	got, ok := st.LookupIdem("key-1")
+	if !ok || got != fresh {
+		t.Fatalf("want %q live, got %q %v", fresh, got, ok)
 	}
 }
 
@@ -44,7 +58,9 @@ func TestIdemPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := store.Open(dir + "/i.db")
 	tok, _ := st.IssueLink("mac", "admin")
-	_ = st.RecordIdem("key-1", tok)
+	if !st.ClaimIdem("key-1", tok) {
+		t.Fatal("setup: fresh key must claim")
+	}
 	st.Close()
 	st2, _ := store.Open(dir + "/i.db")
 	defer st2.Close()
