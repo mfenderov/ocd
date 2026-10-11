@@ -181,3 +181,38 @@ func TestHeartbeatNon200IsError(t *testing.T) {
 		t.Fatal("want error on 500, got nil")
 	}
 }
+
+func TestSendOnceLeavesCallerClientUntouched(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enrolled":true}`))
+	}))
+	defer srv.Close()
+
+	// NOTE: srv.Client() may return a shared instance, so build independent
+	// clients on the server's transport.
+	tr := srv.Client().Transport
+
+	custom := &http.Client{Transport: tr}
+	custom.Timeout = 42 * time.Second
+	if _, err := boxagent.SendOnce(st, custom, srv.URL, "box-1", "tok", "", "v"); err != nil {
+		t.Fatalf("SendOnce: %v", err)
+	}
+	if custom.Timeout != 42*time.Second {
+		t.Fatalf("want caller Timeout still 42s, got %v", custom.Timeout)
+	}
+
+	zero := &http.Client{Transport: tr}
+	if _, err := boxagent.SendOnce(st, zero, srv.URL, "box-1", "tok", "", "v"); err != nil {
+		t.Fatalf("SendOnce: %v", err)
+	}
+	if zero.Timeout != 0 {
+		t.Fatalf("want caller Timeout still 0, got %v", zero.Timeout)
+	}
+}

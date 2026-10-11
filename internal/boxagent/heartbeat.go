@@ -60,13 +60,14 @@ func heartbeatBody(st *store.Store, boxID, enrollToken, version string) ([]byte,
 }
 
 func withTimeout(client *http.Client) *http.Client {
-	if client == nil {
-		return &http.Client{Timeout: heartbeatTimeout}
+	out := &http.Client{Timeout: heartbeatTimeout}
+	if client != nil {
+		*out = *client
+		if out.Timeout == 0 {
+			out.Timeout = heartbeatTimeout
+		}
 	}
-	if client.Timeout == 0 {
-		client.Timeout = heartbeatTimeout
-	}
-	return client
+	return out
 }
 
 func postHeartbeat(client *http.Client, workerURL, token string, payload []byte) (bool, error) {
