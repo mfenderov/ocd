@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
@@ -101,5 +102,43 @@ func TestRevokeExecFailureDoesNotBumpEpoch(t *testing.T) {
 	}
 	if got := st.PasswordEpoch(); got != 0 {
 		t.Fatalf("want epoch 0, got %d", got)
+	}
+}
+
+func TestRevokeNonTrueConfirmGets400(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"string yes (brief snippet value)", `{"confirm": "yes"}`},
+		{"explicit false", `{"confirm": false}`},
+		{"malformed JSON", `{"confirm":`},
+		{"empty body", ``},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := store.Open(":memory:")
+			defer st.Close()
+			calls := 0
+			exec := func(name string, args ...string) (string, error) {
+				calls++
+				return "", nil
+			}
+			h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
+			req := httptest.NewRequest("POST", "/admin/revoke", strings.NewReader(tc.raw))
+			req.Header.Set("Authorization", "Bearer s3cr3t")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if calls != 0 {
+				t.Fatalf("want 0 exec calls, got %d", calls)
+			}
+			if got := st.PasswordEpoch(); got != 0 {
+				t.Fatalf("want epoch 0, got %d", got)
+			}
+		})
 	}
 }
