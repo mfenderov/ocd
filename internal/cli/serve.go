@@ -20,12 +20,22 @@ import (
 	"github.com/mfenderov/ocd/internal/tg"
 )
 
-// boxVersion is the fleet protocol version sent in heartbeats.
-// It mirrors boxadmin.ocdVersion (unexported there); keep the two in sync.
-const boxVersion = "0.3.0"
-
 // heartbeatInterval paces box→Worker heartbeats (spec default).
-const heartbeatInterval = 30 * time.Second
+const defaultHeartbeatInterval = 30 * time.Second
+
+// heartbeatInterval resolves the box→Worker heartbeat pace.
+// OCD_HEARTBEAT_INTERVAL overrides the 30s spec default with a Go duration
+// string (e.g. "50ms"); it exists only so tests can tick fast, alongside
+// OCD_SERVE_ADDR. Empty, unparsable, or non-positive values fall back to
+// the default.
+func heartbeatInterval() time.Duration {
+	if raw := os.Getenv("OCD_HEARTBEAT_INTERVAL"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultHeartbeatInterval
+}
 
 // serveAddr is the loopback listener for the daemon. OCD_SERVE_ADDR exists
 // only so tests can bind a free port; production always uses the default.
@@ -72,10 +82,11 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 		fmt.Fprintln(w, "heartbeat off (OCD_WORKER_URL unset)")
 		return
 	}
-	fmt.Fprintln(w, "heartbeat on (every 30s)")
+	interval := heartbeatInterval()
+	fmt.Fprintln(w, "heartbeat on (every "+interval.String()+")")
 	client := &http.Client{} // dedicated: SendOnce clones it, never shares or mutates
 	go func() {
-		tick := time.NewTicker(heartbeatInterval)
+		tick := time.NewTicker(interval)
 		defer tick.Stop()
 		enrolled := false
 		send := func() {
@@ -83,7 +94,7 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 			if !enrolled {
 				enrollToken = os.Getenv("OCD_ENROLL_TOKEN")
 			}
-			ok, err := boxagent.SendOnce(st, client, workerURL, os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"), enrollToken, boxVersion)
+			ok, err := boxagent.SendOnce(st, client, workerURL, os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"), enrollToken, boxadmin.Version)
 			if err != nil {
 				fmt.Fprintln(w, "heartbeat failed:", err)
 				return

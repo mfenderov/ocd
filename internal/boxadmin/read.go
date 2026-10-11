@@ -10,8 +10,10 @@ import (
 	"github.com/mfenderov/ocd/internal/store"
 )
 
-// ocdVersion is the box software version reported by the presence endpoint.
-const ocdVersion = "0.3.0"
+// Version is the single canonical box software version reported by the
+// presence endpoint and sent in heartbeats. Callers (e.g. the serve
+// heartbeat wiring) must use this, never a copy, so a bump lands once.
+const Version = "0.3.0"
 
 // AuditHandler serves recent audit rows as a JSON array. Query param n
 // sets the row count (default 50, capped at 200). Nothing from the
@@ -44,7 +46,7 @@ func PresenceHandler(st *store.Store) http.Handler {
 		resp := map[string]any{
 			"id":       os.Getenv("OCD_BOX_ID"),
 			"epoch":    st.PasswordEpoch(),
-			"version":  ocdVersion,
+			"version":  Version,
 			"taps_24h": st.CountRecentMints("", 24*time.Hour),
 		}
 		w.Header().Set("Content-Type", "application/json")

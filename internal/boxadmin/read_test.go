@@ -163,3 +163,26 @@ func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
 		}
 	}
 }
+
+func TestPresenceVersionIsCanonical(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	if boxadmin.Version != "0.3.0" {
+		t.Fatalf("canonical version moved without review: %q", boxadmin.Version)
+	}
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.PresenceHandler(st))
+	req := httptest.NewRequest("GET", "/admin/presence", nil)
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode presence: %v", err)
+	}
+	if body["version"] != boxadmin.Version {
+		t.Fatalf("want presence version == boxadmin.Version %q, got %v", boxadmin.Version, body["version"])
+	}
+}
