@@ -70,3 +70,23 @@ func TestNewIdempotencyKeyMintsFresh(t *testing.T) {
 		t.Fatalf("want 2 exec, got %d", calls)
 	}
 }
+
+func TestClaimedKeyMintsFresh(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	calls := 0
+	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
+	first := postMint(t, h, "key-1")
+	tok := strings.TrimPrefix(first, "https://oc-tap.buyallmemes.com/pair?t=")
+	if _, ok := st.ConsumeLink(tok); !ok {
+		t.Fatalf("setup: first token must be consumable")
+	}
+	second := postMint(t, h, "key-1")
+	if first == second {
+		t.Fatalf("want fresh URL after claim, got same %q", first)
+	}
+	if calls != 2 {
+		t.Fatalf("want 2 exec, got %d", calls)
+	}
+}

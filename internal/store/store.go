@@ -33,6 +33,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateIdem(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.migrateEdits(); err != nil {
 		db.Close()
 		return nil, err
