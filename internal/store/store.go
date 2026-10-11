@@ -33,6 +33,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateIdem(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.migrateEdits(); err != nil {
 		db.Close()
 		return nil, err
@@ -48,8 +52,33 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS devices(name TEXT PRIMARY KEY, platform TEXT, last_cookie_at INTEGER, expires_at INTEGER);
-CREATE TABLE IF NOT EXISTS mints(id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT, via TEXT, at INTEGER);`)
+CREATE TABLE IF NOT EXISTS mints(id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT, via TEXT, at INTEGER);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL DEFAULT 0);`)
 	return err
+}
+
+// PasswordEpoch returns the persisted password-epoch counter, 0 if unset.
+func (s *Store) PasswordEpoch() int {
+	var v int
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='password_epoch'`).Scan(&v); err != nil {
+		return 0
+	}
+	return v
+}
+
+// BumpEpoch increments the persisted password-epoch counter and returns it.
+func (s *Store) BumpEpoch() int {
+	_, _ = s.db.Exec(`INSERT INTO meta(k,v) VALUES('password_epoch',1) ON CONFLICT(k) DO UPDATE SET v=v+1`)
+	return s.PasswordEpoch()
+}
+
+// NextHeartbeatSeq increments the persisted heartbeat sequence and returns it.
+// Starts at 1, +1 per call.
+func (s *Store) NextHeartbeatSeq() int64 {
+	_, _ = s.db.Exec(`INSERT INTO meta(k,v) VALUES('heartbeat_seq',1) ON CONFLICT(k) DO UPDATE SET v=v+1`)
+	var v int64
+	_ = s.db.QueryRow(`SELECT v FROM meta WHERE k='heartbeat_seq'`).Scan(&v)
+	return v
 }
 
 func (s *Store) AddDevice(name, platform string) error {
