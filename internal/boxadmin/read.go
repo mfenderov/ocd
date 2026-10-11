@@ -13,6 +13,18 @@ import (
 // ocdVersion is the box software version reported by the presence endpoint.
 const ocdVersion = "0.3.0"
 
+// auditJSON is the wire shape for one audit row. Keys are snake_case for
+// the Worker consumer; the store type is left untouched.
+type auditJSON struct {
+	At     int64  `json:"at"`
+	Actor  string `json:"actor"`
+	Action string `json:"action"`
+	Device string `json:"device"`
+	IP     string `json:"ip"`
+	Result string `json:"result"`
+	UA     string `json:"ua"`
+}
+
 // AuditHandler serves recent audit rows as a JSON array. Query param n
 // sets the row count (default 50, capped at 200). Nothing from the
 // request reaches a shell: n is parsed as an integer only.
@@ -28,11 +40,20 @@ func AuditHandler(st *store.Store) http.Handler {
 			n = 200
 		}
 		rows := st.RecentAudit(n)
-		if rows == nil {
-			rows = []store.AuditRow{}
+		out := make([]auditJSON, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, auditJSON{
+				At:     row.At,
+				Actor:  row.Actor,
+				Action: row.Action,
+				Device: row.Device,
+				IP:     row.IP,
+				Result: row.Result,
+				UA:     row.UA,
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(rows)
+		_ = json.NewEncoder(w).Encode(out)
 	})
 }
 

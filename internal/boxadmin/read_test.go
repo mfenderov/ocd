@@ -27,9 +27,13 @@ func TestPresenceShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode presence: %v", err)
 	}
-	for _, key := range []string{"id", "epoch", "version", "taps_24h"} {
-		if _, ok := body[key]; !ok {
-			t.Fatalf("want key %q present, got %v", key, body)
+	wantKeys := map[string]bool{"id": true, "epoch": true, "version": true, "taps_24h": true}
+	if len(body) != len(wantKeys) {
+		t.Fatalf("want exact keys %v, got %v", wantKeys, body)
+	}
+	for key := range body {
+		if !wantKeys[key] {
+			t.Fatalf("want exact keys %v, got %v", wantKeys, body)
 		}
 	}
 	if body["id"] != "box-7" {
@@ -88,5 +92,38 @@ func TestAuditCapsN(t *testing.T) {
 	}
 	if len(defaultRows) != 50 {
 		t.Fatalf("want default 50 rows, got %d", len(defaultRows))
+	}
+}
+
+func TestAuditSnakeCaseKeys(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	st.AuditUA("web:1.2.3.4", "tapped", "dev", "1.2.3.4", "ok", "curl/8")
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.AuditHandler(st))
+	req := httptest.NewRequest("GET", "/admin/audit?n=5", nil)
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	wantKeys := map[string]bool{"at": true, "actor": true, "action": true, "device": true, "ip": true, "result": true, "ua": true}
+	if len(rows[0]) != len(wantKeys) {
+		t.Fatalf("want exact keys %v, got %v", wantKeys, rows[0])
+	}
+	for key := range rows[0] {
+		if !wantKeys[key] {
+			t.Fatalf("want exact keys %v, got %v", wantKeys, rows[0])
+		}
+	}
+	if rows[0]["actor"] != "web:1.2.3.4" || rows[0]["action"] != "tapped" || rows[0]["ua"] != "curl/8" {
+		t.Fatalf("want seeded values, got %v", rows[0])
 	}
 }

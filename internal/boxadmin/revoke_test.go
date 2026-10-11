@@ -68,6 +68,33 @@ func TestRevokeBumpsEpochAndFixedArgv(t *testing.T) {
 	}
 }
 
+func TestRevokeBodyIsSnakeCaseEpoch(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	exec := func(name string, args ...string) (string, error) {
+		return "", nil
+	}
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
+	rec := postAdmin(t, h, "/admin/revoke", map[string]bool{"confirm": true})
+	if rec.Code != 200 {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode revoke: %v", err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("want exact keys {epoch}, got %v", body)
+	}
+	epoch, ok := body["epoch"]
+	if !ok {
+		t.Fatalf("want exact keys {epoch}, got %v", body)
+	}
+	if epoch != float64(1) {
+		t.Fatalf("want epoch 1, got %v", body)
+	}
+}
+
 func TestRevokeMissingConfirmGets400(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
