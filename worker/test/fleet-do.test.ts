@@ -9,6 +9,7 @@ const BOX: BoxRow = {
   admin_token_hash: "admin-hash",
   epoch: 1,
   last_seq: 7,
+  last_ts: 0,
   last_seen: 1700000000,
   enrolled: 1,
 };
