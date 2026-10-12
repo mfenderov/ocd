@@ -312,10 +312,28 @@ export async function requestEnrollment(
   notify: NotifyFn,
   nowSec: () => number = defaultNowSec,
   config: EnrollConfig = {},
-): Promise<{ status: EnrollStatus; id: string }> {
+): Promise<{ status: EnrollStatus; id: string; rotated: boolean }> {
   const known = store.getBox(body.id);
   if (known && (await tokenMatches(body.enroll_token, known.heartbeat_token_hash))) {
-    return { status: "enrolled", id: body.id };
+    // Bound-token fast path. A supplied admin_token is a rotation, never a
+    // drop: seal + store it, or fail loud when sealing is unconfigured.
+    if (body.admin_token === undefined) {
+      return { status: "enrolled", id: body.id, rotated: false };
+    }
+    if (!config.sealKey) {
+      throw new Error("enroll: seal key not configured");
+    }
+    let current: string | null = null;
+    try {
+      current = await unsealAdminToken(config.sealKey, known.admin_token_sealed);
+    } catch {
+      current = null; // unreadable binding counts as different: rotation heals it
+    }
+    if (current === body.admin_token) {
+      return { status: "enrolled", id: body.id, rotated: false };
+    }
+    store.putBox({ ...known, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+    return { status: "enrolled", id: body.id, rotated: true };
   }
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
@@ -354,7 +372,7 @@ export async function requestEnrollment(
     console.error("enroll: public base URL not configured; ping carries relative links");
   }
   await notify(enrollPingText(body, { approve, deny }, exp));
-  return { status: "pending", id: body.id };
+  return { status: "pending", id: body.id, rotated: false };
 }
 
 export async function approveEnrollment(store: EnrollStore, id: string): Promise<BoxRow | null> {
@@ -413,7 +431,12 @@ export async function handleEnrollRequest(
   }
   try {
     const result = await requestEnrollment(store, body, notify, nowSec, config);
-    return Response.json({ status: result.status, id: result.id, enrolled: result.status === "enrolled" });
+    return Response.json({
+      status: result.status,
+      id: result.id,
+      enrolled: result.status === "enrolled",
+      rotated: result.rotated,
+    });
   } catch (err) {
     console.error(err instanceof Error ? err.message : "enroll: misconfigured");
     return Response.json({ error: "misconfigured" }, { status: 500 });

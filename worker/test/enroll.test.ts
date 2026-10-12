@@ -108,7 +108,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       () => 1700000100,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
-    expect(result).toEqual({ status: "pending", id: "nb-1" });
+    expect(result).toEqual({ status: "pending", id: "nb-1", rotated: false });
     const row = store.getPending("nb-1");
     expect(row).toMatchObject({ id: "nb-1", hostname: "nb-1.example.com", first_seen: 1700000100 });
     expect(row?.heartbeat_token_hash).toBe(await hashToken(NEW_TOKEN));
@@ -130,7 +130,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       { id: "bound-1", hostname: "bound-1.example.com", enroll_token: KNOWN_TOKEN },
       rec.notify,
     );
-    expect(result).toEqual({ status: "enrolled", id: "bound-1" });
+    expect(result).toEqual({ status: "enrolled", id: "bound-1", rotated: false });
     expect(store.getPending("bound-1")).toBeUndefined();
     expect(rec.texts).toHaveLength(0);
   });
@@ -146,7 +146,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
-    expect(result).toEqual({ status: "pending", id: "clone-1" });
+    expect(result).toEqual({ status: "pending", id: "clone-1", rotated: false });
     expect(store.getPending("clone-1")?.heartbeat_token_hash).toBe(await hashToken(CLONE_TOKEN));
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).not.toContain(CLONE_TOKEN);
@@ -605,7 +605,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
       fixedNow,
       { capSecret: CAP_TEST_KEY },
     );
-    expect(result).toEqual({ status: "pending", id: "seal-none" });
+    expect(result).toEqual({ status: "pending", id: "seal-none", rotated: false });
     expect(store.getPending("seal-none")?.admin_token_sealed).toBe("");
     const row = await approveEnrollment(store, "seal-none");
     expect(row?.admin_token_sealed).toBe("");
@@ -641,5 +641,86 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     const rotated = await approveEnrollment(store, "seal-re");
     expect(rotated?.admin_token_sealed).not.toBe(first?.admin_token_sealed);
     expect(await unsealAdminToken(SEAL_KEY, rotated?.admin_token_sealed ?? "")).toBe("rotated-admin-plain-8");
+  });
+});
+
+describe("enrolled fast-path admin rotation", () => {
+  it("rotate-ok: bound token + new admin_token seals, stores, reports rotated:true, no ping", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "rot-1");
+    const rec = recorder();
+    const result = await requestEnrollment(
+      store,
+      { id: "rot-1", hostname: "rot-1.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(result).toEqual({ status: "enrolled", id: "rot-1", rotated: true });
+    expect(rec.texts).toHaveLength(0);
+    expect(store.getPending("rot-1")).toBeUndefined();
+    const row = store.getBox("rot-1");
+    expect(row?.admin_token_sealed).not.toContain("fresh-admin-rotation-1");
+    expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe("fresh-admin-rotation-1");
+    expect(row).toMatchObject({ last_seq: 11, last_ts: 5000, enrolled: 1 });
+    const again = await requestEnrollment(
+      store,
+      { id: "rot-1", hostname: "rot-1.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(again).toEqual({ status: "enrolled", id: "rot-1", rotated: false });
+    expect(rec.texts).toHaveLength(0);
+  });
+
+  it("rotation overwrites a previously bound admin token", async () => {
+    const store = new MemStore();
+    const box = await seedEnrolled(store, "rot-2");
+    store.putBox({ ...box, admin_token_sealed: await sealAdminToken(SEAL_KEY, "old-admin-1") });
+    const result = await requestEnrollment(
+      store,
+      { id: "rot-2", hostname: "rot-2.example.com", enroll_token: KNOWN_TOKEN, admin_token: "new-admin-2" },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(result).toEqual({ status: "enrolled", id: "rot-2", rotated: true });
+    expect(await unsealAdminToken(SEAL_KEY, store.getBox("rot-2")?.admin_token_sealed ?? "")).toBe("new-admin-2");
+  });
+
+  it("rotate-without-seal-key fails loud, row untouched, nothing pending", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "rot-3");
+    await expect(
+      requestEnrollment(
+        store,
+        { id: "rot-3", hostname: "rot-3.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+        async () => {},
+        fixedNow,
+        { capSecret: CAP_TEST_KEY },
+      ),
+    ).rejects.toThrow("seal key");
+    expect(store.getBox("rot-3")?.admin_token_sealed).toBe("");
+    expect(store.getPending("rot-3")).toBeUndefined();
+  });
+
+  it("handler reports the rotated flag in JSON", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "rot-4");
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "rot-4",
+        hostname: "rot-4.example.com",
+        enroll_token: KNOWN_TOKEN,
+        admin_token: "fresh-admin-rotation-2",
+      }),
+      store,
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "enrolled", id: "rot-4", enrolled: true, rotated: true });
   });
 });
