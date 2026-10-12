@@ -41,6 +41,21 @@ export class FleetState implements DurableObject {
     return cursor.toArray() as unknown as BoxRow[];
   }
 
+  putBox(box: BoxRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, epoch, last_seq, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      box.id,
+      box.hostname,
+      box.heartbeat_token_hash,
+      box.admin_token_hash,
+      box.epoch,
+      box.last_seq,
+      box.last_seen,
+      box.enrolled,
+    );
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/backends") {
