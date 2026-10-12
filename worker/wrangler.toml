@@ -10,6 +10,14 @@ class_name = "FleetState"
 tag = "v1"
 new_sqlite_classes = ["FleetState"]
 
+# Task 3 console page: the static root ships with the Worker. Binding form
+# (no automatic serving): /console is served by the Worker route from the
+# bundled import so the Access gate cannot be bypassed via a direct asset
+# path; the binding reserves explicit asset fetches for later.
+[assets]
+directory = "./static"
+binding = "ASSETS"
+
 [vars]
 ENROLL_BASE_URL = "https://ocd-fleet.fenderovlol.workers.dev"
 # Cloudflare Access browser bypass (Task 2): local-test defaults so the

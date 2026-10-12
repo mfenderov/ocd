@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Console</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 12px; font-family: system-ui, sans-serif; background: #111; color: #eee; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 1.3rem; margin: 8px 0; }
+  h2 { font-size: 1.05rem; margin: 20px 0 8px; color: #aaa; }
+  .card { background: #1c1c1c; border: 1px solid #333; border-radius: 12px; padding: 14px; margin: 10px 0; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; }
+  .dot.on { background: #3c3; }
+  .dot.off { background: #777; }
+  .dot.pending { background: #e80; }
+  .name { font-weight: 700; font-size: 1.05rem; overflow-wrap: anywhere; }
+  .sub { color: #999; font-size: 0.85rem; margin-top: 2px; }
+  .last-synced { color: #999; font-size: 0.85rem; }
+  .badge { display: inline-block; background: #e80; color: #111; font-weight: 700; font-size: 0.8rem; border-radius: 6px; padding: 2px 8px; margin-top: 6px; }
+  button { font-size: 1rem; border: 0; border-radius: 10px; padding: 14px 16px; margin-top: 10px; min-height: 52px; }
+  .login { background: #2a6; color: #041; font-weight: 800; width: 100%; font-size: 1.2rem; }
+  .danger { background: #422; color: #f88; width: 100%; }
+  .ghost { background: #2a2a2a; color: #eee; }
+  .note { color: #999; font-size: 0.85rem; margin-top: 8px; overflow-wrap: anywhere; }
+  .err { color: #f88; }
+  select { font-size: 1rem; padding: 12px; border-radius: 10px; background: #2a2a2a; color: #eee; border: 1px solid #444; max-width: 100%; }
+  .audit-row { border-top: 1px solid #333; padding: 8px 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+  .audit-row .meta { color: #999; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<h1>Fleet Console</h1>
+<div class="row">
+  <button class="ghost" id="refresh" type="button">Refresh</button>
+  <button class="danger" id="nuke" type="button">Revoke all</button>
+</div>
+<div class="note" id="board-err"></div>
+<h2>Boxes</h2>
+<main id="board"></main>
+<h2>Audit</h2>
+<div class="row">
+  <select id="audit-box" aria-label="Filter audit by box"></select>
+  <button class="ghost" id="audit-go" type="button">Load</button>
+</div>
+<div class="note" id="audit-err"></div>
+<section id="audit"></section>
+<script>
+"use strict";
+// Phone-first fleet board. Same-origin fetches ride the browser Access
+// session (cookies); this page holds no tokens and sends no credential
+// headers. Only public box fields are rendered — extra response fields are
+// dropped by pickBox, never trusted.
+
+// A box is offline when it has not checked in for 5 minutes (heartbeats run
+// far more often than that; a quiet box is a dead or cut-off box).
+var OFFLINE_AFTER_SEC = 300;
+// Boxes flagged tainted by the API (link 409 / audit rows) render as
+// actionable "revoke pending", never just red.
+var taintedBoxes = {};
+
+function el(tag, text, cls) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  n.textContent = text;
+  return n;
+}
+
+function ago(sec) {
+  var d = Math.floor(Date.now() / 1000) - sec;
+  if (d < 0) d = 0;
+  if (d < 60) return d + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m ago";
+  return Math.floor(d / 3600) + "h ago";
+}
+
+function pickBox(raw) {
+  return {
+    id: String(raw.id || ""),
+    hostname: String(raw.hostname || ""),
+    epoch: Number(raw.epoch || 0),
+    last_seen: Number(raw.last_seen || 0),
+    enrolled: Number(raw.enrolled || 0),
+  };
+}
+
+function boxState(box) {
+  if (taintedBoxes[box.id]) return "pending";
+  if (Math.floor(Date.now() / 1000) - box.last_seen > OFFLINE_AFTER_SEC) return "off";
+  return "on";
+}
+
+async function api(path, opts) {
+  var res = await fetch(path, opts);
+  if (res.status === 401) throw new Error("session expired — reload to sign in again");
+  return res;
+}
+
+function setBoardErr(msg) {
+  var n = document.getElementById("board-err");
+  n.textContent = msg || "";
+  n.className = msg ? "note err" : "note";
+}
+
+async function loadBoard() {
+  setBoardErr("");
+  var board = document.getElementById("board");
+  board.replaceChildren(el("div", "Loading…", "note"));
+  var res;
+  try {
+    res = await api("/api/backends");
+  } catch (e) {
+    board.replaceChildren();
+    setBoardErr(String(e.message || e));
+    return;
+  }
+  if (!res.ok) {
+    board.replaceChildren();
+    setBoardErr("board failed: HTTP " + res.status);
+    return;
+  }
+  var list = await res.json();
+  var boxes = (Array.isArray(list) ? list : []).map(pickBox).filter(function (b) { return b.id; });
+  renderBoard(board, boxes);
+  fillAuditFilter(boxes);
+}
+
+function renderBoard(board, boxes) {
+  board.replaceChildren();
+  if (!boxes.length) {
+    board.appendChild(el("div", "No boxes enrolled yet.", "note"));
+    return;
+  }
+  boxes.forEach(function (box) {
+    var state = boxState(box);
+    var card = el("div", "", "card");
+    var top = el("div", "", "row");
+    top.appendChild(el("span", "", "dot " + state));
+    var names = el("div", "");
+    names.appendChild(el("div", box.hostname || box.id, "name"));
+    names.appendChild(el("div", box.id + " · epoch " + box.epoch, "sub"));
+    top.appendChild(names);
+    card.appendChild(top);
+    var status = el("div", "", "last-synced");
+    if (state === "on") status.textContent = "online · last synced " + ago(box.last_seen);
+    else if (state === "pending") status.textContent = "offline · last synced " + ago(box.last_seen);
+    else status.textContent = "offline · last synced " + ago(box.last_seen);
+    card.appendChild(status);
+    if (state === "pending") card.appendChild(el("span", "revoke pending — tap REVOKE below", "badge"));
+    var msg = el("div", "", "note");
+    card.appendChild(msg);
+
+    var login = el("button", "LOGIN", "login");
+    login.type = "button";
+    login.addEventListener("click", async function () {
+      login.disabled = true;
+      msg.className = "note";
+      msg.textContent = "minting tap link…";
+      try {
+        var res = await api("/api/backends/" + encodeURIComponent(box.id) + "/link", { method: "POST" });
+        if (res.status === 409) {
+          taintedBoxes[box.id] = true;
+          renderBoard(board, boxes);
+          return;
+        }
+        if (res.status === 404) { msg.textContent = "unknown box"; return; }
+        if (!res.ok) { msg.textContent = "link failed: HTTP " + res.status; return; }
+        // Direct navigation to the tap URL: no copy-paste, no token shown.
+        window.location.href = (await res.text()).trim();
+      } catch (e) {
+        msg.className = "note err";
+        msg.textContent = String(e.message || e);
+      } finally {
+        login.disabled = false;
+      }
+    });
+    card.appendChild(login);
+
+    var revoke = el("button", "REVOKE", "danger");
+    revoke.type = "button";
+    revoke.addEventListener("click", async function () {
+      if (!window.confirm("Revoke box " + box.id + "? Its credentials rotate; offline boxes stay blocked until they return.")) return;
+      revoke.disabled = true;
+      msg.className = "note";
+      msg.textContent = "revoking…";
+      try {
+        var res = await api("/api/backends/" + encodeURIComponent(box.id) + "/revoke", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true }),
+        });
+        var body = await res.json().catch(function () { return {}; });
+        if (res.ok && body.status === "revoked") { msg.textContent = "revoked at epoch " + body.epoch; }
+        else if (res.ok && body.status === "tombstoned") {
+          taintedBoxes[box.id] = true;
+          msg.textContent = "box offline — blocked at epoch " + body.epoch + " until it returns";
+          renderBoard(board, boxes);
+          return;
+        }
+        else { msg.className = "note err"; msg.textContent = "revoke: " + (body.status || body.error || res.status); }
+      } catch (e) {
+        msg.className = "note err";
+        msg.textContent = String(e.message || e);
+      } finally {
+        revoke.disabled = false;
+      }
+    });
+    card.appendChild(revoke);
+    board.appendChild(card);
+  });
+}
+
+// Revoke-all is a deliberate two-step: the first tap arms, the second tap
+// (within 10s) sends. A single tap can never nuke the fleet.
+var nukeArmed = 0;
+function wireNuke() {
+  var btn = document.getElementById("nuke");
+  btn.addEventListener("click", async function () {
+    var now = Date.now();
+    if (now - nukeArmed > 10000) {
+      nukeArmed = now;
+      btn.textContent = "Tap again to confirm revoke-all";
+      return;
+    }
+    nukeArmed = 0;
+    btn.textContent = "Revoke all";
+    btn.disabled = true;
+    try {
+      var res = await api("/api/revoke-all", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      var body = await res.json().catch(function () { return {}; });
+      var results = Array.isArray(body.results) ? body.results : [];
+      var blocked = results.filter(function (r) { return r.status === "tombstoned"; }).map(function (r) { return r.id; });
+      blocked.forEach(function (id) { taintedBoxes[id] = true; });
+      setBoardErr(results.length ? "revoke-all: " + results.length + " box(es), " + blocked.length + " offline-blocked" : "revoke-all failed: HTTP " + res.status);
+      loadBoard();
+    } catch (e) {
+      setBoardErr(String(e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function fillAuditFilter(boxes) {
+  var sel = document.getElementById("audit-box");
+  sel.replaceChildren();
+  sel.appendChild(el("option", "All boxes", ""));
+  sel.lastChild.value = "";
+  boxes.forEach(function (box) {
+    var opt = el("option", box.hostname || box.id, "");
+    opt.value = box.id;
+    sel.appendChild(opt);
+  });
+}
+
+function setAuditErr(msg) {
+  var n = document.getElementById("audit-err");
+  n.textContent = msg || "";
+  n.className = msg ? "note err" : "note";
+}
+
+function fmtTime(at) {
+  return new Date(at * 1000).toLocaleString();
+}
+
+async function loadAudit() {
+  setAuditErr("");
+  var sec = document.getElementById("audit");
+  sec.replaceChildren(el("div", "Loading…", "note"));
+  var box = document.getElementById("audit-box").value;
+  var path = "/api/audit?n=50" + (box ? "&box=" + encodeURIComponent(box) : "");
+  var res;
+  try {
+    res = await api(path);
+  } catch (e) {
+    sec.replaceChildren();
+    setAuditErr(String(e.message || e));
+    return;
+  }
+  if (res.status === 404) { sec.replaceChildren(); setAuditErr("unknown box"); return; }
+  if (!res.ok) { sec.replaceChildren(); setAuditErr("audit failed: HTTP " + res.status); return; }
+  var body = await res.json().catch(function () { return {}; });
+  var rows = Array.isArray(body.rows) ? body.rows : [];
+  sec.replaceChildren();
+  if (!rows.length) {
+    sec.appendChild(el("div", "No audit rows.", "note"));
+    return;
+  }
+  var changed = false;
+  rows.forEach(function (r) {
+    if (r && r.tainted && r.box && !taintedBoxes[r.box]) { taintedBoxes[r.box] = true; changed = true; }
+    var div = el("div", "", "audit-row");
+    if (r && r.error) {
+      div.appendChild(el("div", String(r.box) + " · " + String(r.error), "err"));
+      div.appendChild(el("div", "last synced " + ago(Number(r.last_seen || 0)), "meta last-synced"));
+      if (r.detail) div.appendChild(el("div", String(r.detail), "meta"));
+    } else {
+      div.appendChild(el("div", String(r.action || "?") + " · " + String(r.actor || "?") + " @ " + String(r.box || "?"), ""));
+      div.appendChild(el("div", fmtTime(Number(r.at || 0)) + " · " + String(r.result || "") + " · " + String(r.device || "") + " " + String(r.ip || ""), "meta"));
+      if (r.tainted) div.appendChild(el("span", "revoke pending", "badge"));
+    }
+    sec.appendChild(div);
+  });
+  // Newly tainted boxes from audit rows refresh the board badges.
+  if (changed) loadBoardQuiet();
+}
+
+async function loadBoardQuiet() {
+  try {
+    var res = await api("/api/backends");
+    if (!res.ok) return;
+    var list = await res.json();
+    var boxes = (Array.isArray(list) ? list : []).map(pickBox).filter(function (b) { return b.id; });
+    renderBoard(document.getElementById("board"), boxes);
+  } catch (e) { /* board keeps its current state */ }
+}
+
+document.getElementById("refresh").addEventListener("click", loadBoard);
+document.getElementById("audit-go").addEventListener("click", loadAudit);
+wireNuke();
+loadBoard();
+</script>
+</body>
+</html>
