@@ -1,3 +1,4 @@
+import { handleAudit } from "./audit";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
@@ -203,6 +204,9 @@ export class FleetState implements DurableObject {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/backends") {
       return Response.json(this.listBackends());
+    }
+    if (request.method === "GET" && url.pathname === "/audit") {
+      return handleAudit(request, this, { sealKey: this.sealKey });
     }
     if (request.method === "POST" && url.pathname === "/heartbeat") {
       const notify = this.notifier();

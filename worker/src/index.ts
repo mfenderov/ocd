@@ -67,11 +67,27 @@ async function handleRevokeApi(request: Request, env: Env | undefined, doPath: s
   return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
+async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  // Preserve the query string: box/n filter params belong to the DO handler.
+  const search = new URL(request.url).search;
+  return await stub.fetch(new Request(`http://do/audit${search}`, request));
+}
+
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/backends") {
       return handleBackends(env);
+    }
+    if (request.method === "GET" && url.pathname === "/api/audit") {
+      return handleAuditApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/revoke-all") {
       return handleRevokeApi(request, env, "/revoke-all");
