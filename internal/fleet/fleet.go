@@ -160,6 +160,42 @@ func checkBoxID(boxID string) (string, error) {
 	return url.PathEscape(boxID), nil
 }
 
+// OfflineAfter is how long a box may go without a heartbeat before the
+// console calls it offline. The Worker exposes no online flag (deferred
+// Plan 2 decision), so the CLI infers it: three missed beats at the 30s
+// fleet heartbeat default (internal/cli/serve.go).
+const OfflineAfter = 90 * time.Second
+
+// BoxState classifies one backend for display: tombstoned (server-side
+// pending-revoke block) wins over staleness, then a box quieter than
+// OfflineAfter reads offline, otherwise ok. Pure in (box, now) so the
+// boundary is unit-testable without clock flakiness.
+func BoxState(b Backend, now time.Time) string {
+	if b.Tombstoned {
+		return "tombstoned"
+	}
+	if now.Unix()-b.LastSeen > int64(OfflineAfter.Seconds()) {
+		return "offline"
+	}
+	return "ok"
+}
+
+// syncAge renders a last_seen timestamp as a short last-synced age.
+func syncAge(lastSeen, now int64) string {
+	d := now - lastSeen
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < 60:
+		return fmt.Sprintf("%ds ago", d)
+	case d < 3600:
+		return fmt.Sprintf("%dm ago", d/60)
+	default:
+		return fmt.Sprintf("%dh ago", d/3600)
+	}
+}
+
 // Backends lists every enrolled box with its tombstone flag.
 func (c *Client) Backends(ctx context.Context) ([]Backend, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/api/backends", nil, nil, nil)

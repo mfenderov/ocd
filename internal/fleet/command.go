@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -41,10 +42,13 @@ func statusCmd() *cobra.Command {
 			}
 			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "ID\tHOSTNAME\tEPOCH\tLAST_SEEN\tSTATE")
+			now := time.Now()
 			for _, b := range backs {
-				state := "ok"
-				if b.Tombstoned {
-					state = "tombstoned"
+				state := BoxState(b, now)
+				// Offline boxes carry their last-synced age inline so a
+				// quiet box is never mistaken for a merely old row.
+				if state == "offline" {
+					state = "offline (synced " + syncAge(b.LastSeen, now.Unix()) + ")"
 				}
 				fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n", b.ID, b.Hostname, b.Epoch, b.LastSeen, state)
 			}
