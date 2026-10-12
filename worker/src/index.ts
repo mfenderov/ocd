@@ -17,7 +17,15 @@ async function handleBackends(env?: Env): Promise<Response> {
   return await stub.fetch("http://do/backends");
 }
 
-async function handleHeartbeatApi(request: Request, env?: Env): Promise<Response> {
+// Single choke point for every plain DO passthrough: binding check, then
+// forward method + mapped path + headers + body verbatim. Routes needing
+// more (query preservation in enroll/audit, id extraction in link, no
+// request at all in backends above) keep their own helpers.
+export async function forwardToDo(
+  request: Request,
+  env: Env | undefined,
+  doPath: string,
+): Promise<Response> {
   if (!env?.FLEET_STATE) {
     console.error("FLEET_STATE binding is not configured");
     return new Response("FLEET_STATE binding is not configured", {
@@ -25,7 +33,7 @@ async function handleHeartbeatApi(request: Request, env?: Env): Promise<Response
     });
   }
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request("http://do/heartbeat", request));
+  return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
 async function handleEnrollApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
@@ -56,28 +64,6 @@ async function handleLinkApi(request: Request, env: Env | undefined): Promise<Re
   );
 }
 
-async function handleRevokeApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request(`http://do${doPath}`, request));
-}
-
-async function handleTokensApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request(`http://do${doPath}`, request));
-}
-
 async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
   if (!env?.FLEET_STATE) {
     console.error("FLEET_STATE binding is not configured");
@@ -101,7 +87,7 @@ export default {
       return handleAuditApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/revoke-all") {
-      return handleRevokeApi(request, env, "/revoke-all");
+      return forwardToDo(request, env, "/revoke-all");
     }
     if (
       request.method === "POST" &&
@@ -110,7 +96,7 @@ export default {
       url.pathname.length > "/api/backends//revoke".length
     ) {
       const id = url.pathname.slice(0, -"/revoke".length).slice("/api/backends/".length);
-      return handleRevokeApi(request, env, `/revoke/${encodeURIComponent(id)}`);
+      return forwardToDo(request, env, `/revoke/${encodeURIComponent(id)}`);
     }
     if (
       request.method === "POST" &&
@@ -121,7 +107,7 @@ export default {
       return handleLinkApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
-      return handleHeartbeatApi(request, env);
+      return forwardToDo(request, env, "/heartbeat");
     }
     if (request.method === "POST" && url.pathname === "/api/enroll") {
       return handleEnrollApi(request, env, "/enroll");
@@ -133,7 +119,7 @@ export default {
       return handleEnrollApi(request, env, "/enroll/deny");
     }
     if (request.method === "POST" && url.pathname === "/api/tokens") {
-      return handleTokensApi(request, env, "/tokens");
+      return forwardToDo(request, env, "/tokens");
     }
     if (
       request.method === "POST" &&
@@ -142,7 +128,7 @@ export default {
       url.pathname.length > "/api/tokens//rotate".length
     ) {
       const id = url.pathname.slice("/api/tokens/".length, -"/rotate".length);
-      return handleTokensApi(request, env, `/tokens/${encodeURIComponent(id)}/rotate`);
+      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}/rotate`);
     }
     if (
       request.method === "DELETE" &&
@@ -151,7 +137,7 @@ export default {
       url.pathname.length > "/api/tokens/".length
     ) {
       const id = url.pathname.slice("/api/tokens/".length);
-      return handleTokensApi(request, env, `/tokens/${encodeURIComponent(id)}`);
+      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}`);
     }
     return new Response("Not Found", { status: 404 });
   },
