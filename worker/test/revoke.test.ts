@@ -156,6 +156,43 @@ describe("revoke single box (unit)", () => {
     expect(store.getTombstone("rev-timeout")).toEqual({ box_id: "rev-timeout", epoch: 3 });
   });
 
+  it("200 with unparseable epoch fails closed: tombstoned with box_bad_epoch", async () => {
+    const bodies = [
+      "ok",
+      JSON.stringify({}),
+      JSON.stringify({ epoch: "2" }),
+      JSON.stringify({ epoch: -1 }),
+      JSON.stringify(null),
+    ];
+    for (const body of bodies) {
+      const store = new MemStore();
+      await seedBox(store, "rev-badepoch", 1);
+      const fetcher = (async () =>
+        new Response(body, { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+      const result = await revokeOneBox("rev-badepoch", store, { sealKey: SEAL_KEY, fetcher });
+      expect(result).toMatchObject({
+        id: "rev-badepoch",
+        status: "tombstoned",
+        epoch: 1,
+        detail: "box_bad_epoch",
+      });
+      expect(store.getTombstone("rev-badepoch")).toEqual({ box_id: "rev-badepoch", epoch: 1 });
+    }
+  });
+
+  it("success never lowers a pre-existing higher tombstone", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-keep", 1);
+    store.putTombstone({ box_id: "rev-keep", epoch: 5 });
+    const calls: FetchCall[] = [];
+    const result = await revokeOneBox("rev-keep", store, {
+      sealKey: SEAL_KEY,
+      fetcher: epochFetcher(2, calls),
+    });
+    expect(result).toMatchObject({ id: "rev-keep", status: "revoked", epoch: 2 });
+    expect(store.getTombstone("rev-keep")).toEqual({ box_id: "rev-keep", epoch: 5 });
+  });
+
   it("unknown box is unknown_box without fetching", async () => {
     const store = new MemStore();
     const calls: FetchCall[] = [];

@@ -134,9 +134,12 @@ export async function revokeOneBox(
       store.putTombstone({ box_id: boxId, epoch: box.epoch });
       return { id: boxId, status: "tombstoned", epoch: box.epoch, detail: "box_bad_epoch" };
     }
-    // Greatest stale epoch: every epoch below the new one is dead; the max
-    // guards a worker row that already runs ahead of the box reply.
-    const stale = Math.max(box.epoch, epoch - 1);
+    // Greatest stale epoch: every epoch below the new one is dead. The max
+    // keeps a pre-existing higher tombstone: only a heartbeat past it proves
+    // healing, never a revoke reply (the box may lag or answer stale). Falls
+    // back to the worker row when no tombstone exists yet.
+    const prior = store.getTombstone(boxId)?.epoch;
+    const stale = Math.max(prior ?? box.epoch, epoch - 1);
     store.putTombstone({ box_id: boxId, epoch: stale });
     return { id: boxId, status: "revoked", epoch };
   }
