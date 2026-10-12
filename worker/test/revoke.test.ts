@@ -6,6 +6,7 @@ import app from "../src/index";
 import {
   handleRevoke,
   handleRevokeAll,
+  raiseTombstone,
   revokeAllBoxes,
   revokeOneBox,
   type RevokeStore,
@@ -111,6 +112,18 @@ describe("revoke confirm gate (unit)", () => {
 });
 
 describe("revoke single box (unit)", () => {
+  it("raiseTombstone writes when absent, raises when higher, keeps otherwise", async () => {
+    const store = new MemStore();
+    raiseTombstone(store, "rt-1", 2);
+    expect(store.getTombstone("rt-1")).toEqual({ box_id: "rt-1", epoch: 2 });
+    raiseTombstone(store, "rt-1", 1);
+    expect(store.getTombstone("rt-1")).toEqual({ box_id: "rt-1", epoch: 2 });
+    raiseTombstone(store, "rt-1", 2);
+    expect(store.getTombstone("rt-1")).toEqual({ box_id: "rt-1", epoch: 2 });
+    raiseTombstone(store, "rt-1", 5);
+    expect(store.getTombstone("rt-1")).toEqual({ box_id: "rt-1", epoch: 5 });
+  });
+
   it("online box: POSTs pinned /admin/revoke with confirm:true, writes greatest-stale tombstone", async () => {
     const store = new MemStore();
     await seedBox(store, "rev-ok", 1);
@@ -191,6 +204,51 @@ describe("revoke single box (unit)", () => {
     });
     expect(result).toMatchObject({ id: "rev-keep", status: "revoked", epoch: 2 });
     expect(store.getTombstone("rev-keep")).toEqual({ box_id: "rev-keep", epoch: 5 });
+  });
+
+  it("offline revoke never lowers a pre-existing higher tombstone", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-keep-off", 1);
+    store.putTombstone({ box_id: "rev-keep-off", epoch: 5 });
+    const result = await revokeOneBox("rev-keep-off", store, {
+      sealKey: SEAL_KEY,
+      fetcher: offlineFetcher,
+    });
+    expect(result).toMatchObject({ id: "rev-keep-off", status: "tombstoned", epoch: 1 });
+    expect(store.getTombstone("rev-keep-off")).toEqual({ box_id: "rev-keep-off", epoch: 5 });
+  });
+
+  it("timeout revoke never lowers a pre-existing higher tombstone", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-keep-timeout", 3);
+    store.putTombstone({ box_id: "rev-keep-timeout", epoch: 7 });
+    const hanging = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Timeout", "TimeoutError")));
+      })) as typeof fetch;
+    const result = await revokeOneBox("rev-keep-timeout", store, {
+      sealKey: SEAL_KEY,
+      fetcher: hanging,
+      deadlineMs: 20,
+    });
+    expect(result).toMatchObject({ id: "rev-keep-timeout", status: "tombstoned", epoch: 3 });
+    expect(store.getTombstone("rev-keep-timeout")).toEqual({ box_id: "rev-keep-timeout", epoch: 7 });
+  });
+
+  it("box_bad_epoch never lowers a pre-existing higher tombstone", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-keep-badepoch", 1);
+    store.putTombstone({ box_id: "rev-keep-badepoch", epoch: 5 });
+    const fetcher = (async () =>
+      new Response("ok", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+    const result = await revokeOneBox("rev-keep-badepoch", store, { sealKey: SEAL_KEY, fetcher });
+    expect(result).toMatchObject({
+      id: "rev-keep-badepoch",
+      status: "tombstoned",
+      epoch: 1,
+      detail: "box_bad_epoch",
+    });
+    expect(store.getTombstone("rev-keep-badepoch")).toEqual({ box_id: "rev-keep-badepoch", epoch: 5 });
   });
 
   it("unknown box is unknown_box without fetching", async () => {

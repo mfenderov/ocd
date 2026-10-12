@@ -28,17 +28,30 @@ export interface RevokeResult {
   detail?: string;
 }
 
-export interface RevokeStore {
-  getBox(id: string): BoxRow | undefined;
-  listBackends(): BoxRow[];
+export interface TombstoneStore {
   getTombstone(boxId: string): TombstoneRow | undefined;
   putTombstone(row: TombstoneRow): void;
+}
+
+export interface RevokeStore extends TombstoneStore {
+  getBox(id: string): BoxRow | undefined;
+  listBackends(): BoxRow[];
 }
 
 export interface RevokeDeps {
   sealKey?: string;
   fetcher?: typeof fetch;
   deadlineMs?: number;
+}
+
+// Single choke point for every tombstone write: tombstones only move up.
+// Only a heartbeat past the stored epoch proves healing and clears the row,
+// so no revoke outcome (success, offline, or garbled reply) may lower it.
+export function raiseTombstone(store: TombstoneStore, boxId: string, epoch: number): void {
+  const prior = store.getTombstone(boxId)?.epoch;
+  if (prior === undefined || epoch > prior) {
+    store.putTombstone({ box_id: boxId, epoch });
+  }
 }
 
 async function readConfirm(request: Request): Promise<boolean> {
@@ -117,7 +130,7 @@ export async function revokeOneBox(
     // Offline (or timed out): sticky tombstone at the last-known epoch so
     // mint stays refused until the box heartbeats back past it. The timeout
     // vs unreachable distinction is diagnostic detail only.
-    store.putTombstone({ box_id: boxId, epoch: box.epoch });
+    raiseTombstone(store, boxId, box.epoch);
     return {
       id: boxId,
       status: "tombstoned",
@@ -131,16 +144,13 @@ export async function revokeOneBox(
       // Box claims success but names no epoch: fail closed at the
       // last-known epoch (a 200 means it likely rotated; taint until a
       // heartbeat proves the new epoch).
-      store.putTombstone({ box_id: boxId, epoch: box.epoch });
+      raiseTombstone(store, boxId, box.epoch);
       return { id: boxId, status: "tombstoned", epoch: box.epoch, detail: "box_bad_epoch" };
     }
-    // Greatest stale epoch: every epoch below the new one is dead. The max
-    // keeps a pre-existing higher tombstone: only a heartbeat past it proves
-    // healing, never a revoke reply (the box may lag or answer stale). Falls
-    // back to the worker row when no tombstone exists yet.
-    const prior = store.getTombstone(boxId)?.epoch;
-    const stale = Math.max(prior ?? box.epoch, epoch - 1);
-    store.putTombstone({ box_id: boxId, epoch: stale });
+    // Greatest stale epoch: every epoch below the new one is dead. The
+    // worker-row max guards a row that already runs ahead of the box reply;
+    // raiseTombstone keeps a pre-existing higher tombstone on top of that.
+    raiseTombstone(store, boxId, Math.max(box.epoch, epoch - 1));
     return { id: boxId, status: "revoked", epoch };
   }
   // Box refused (e.g. 400/401/409): rotation did not happen, so no
