@@ -7,11 +7,14 @@ export interface Env {
 }
 
 async function handleBackends(env?: Env): Promise<Response> {
-  if (env?.FLEET_STATE) {
-    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    return await stub.fetch("http://do/backends");
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
   }
-  return Response.json([]);
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  return await stub.fetch("http://do/backends");
 }
 
 export default {
