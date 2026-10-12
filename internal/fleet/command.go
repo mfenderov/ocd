@@ -2,7 +2,9 @@ package fleet
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -118,6 +120,11 @@ func nukeCmd() *cobra.Command {
 	nuke := &cobra.Command{
 		Use:   "nuke",
 		Short: "Revoke every box",
+		Long: `Revoke every box in the fleet (two-step confirm: --yes plus typing the live box count).
+
+Needs a CLI token with two scopes: "audit" to count boxes via
+GET /api/backends for the typed-count confirm, and "revoke" to
+POST /api/revoke-all. A 401 on either call names the missing scope.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !yes {
 				return fmt.Errorf("fleet nuke: confirm with --yes (revokes every box)")
@@ -128,7 +135,7 @@ func nukeCmd() *cobra.Command {
 			}
 			backs, err := client.Backends(cmd.Context())
 			if err != nil {
-				return err
+				return nukeErr("count boxes", err, "audit")
 			}
 			want := strconv.Itoa(len(backs))
 			fmt.Fprintf(cmd.OutOrStdout(), "nuke will revoke %s box(es). Type %q to confirm: ", want, want)
@@ -141,7 +148,7 @@ func nukeCmd() *cobra.Command {
 			}
 			results, err := client.RevokeAll(cmd.Context())
 			if err != nil {
-				return err
+				return nukeErr("revoke all", err, "revoke")
 			}
 			for _, r := range results {
 				fmt.Fprintln(cmd.OutOrStdout(), formatResult(r))
@@ -151,6 +158,18 @@ func nukeCmd() *cobra.Command {
 	}
 	nuke.Flags().BoolVar(&yes, "yes", false, "confirm fleet-wide revoke")
 	return nuke
+}
+
+// nukeErr annotates a nuke-stage failure with the CLI-token scope that
+// stage needs, so a 401 names the missing scope (and the failed stage)
+// instead of reading as a generic auth failure. Non-401 errors pass
+// through unchanged; the token never appears (see APIError).
+func nukeErr(stage string, err error, scope string) error {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+		return fmt.Errorf("fleet nuke: %s: %w (token needs %q scope)", stage, err, scope)
+	}
+	return err
 }
 
 func auditCmd() *cobra.Command {

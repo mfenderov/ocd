@@ -219,6 +219,96 @@ func TestFleetLinkPrintsURL(t *testing.T) {
 	}
 }
 
+func TestFleetNukeHelpDocumentsScopes(t *testing.T) {
+	stub := newStubWorker(t)
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	// Nuke fans out as two scoped calls (audit to count boxes, revoke to
+	// revoke them): the help must name both so a 401 is actionable.
+	t.Setenv("OCD_WORKER_URL", srv.URL)
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+	root := fleet.NewCommand()
+	found := false
+	help := ""
+	for _, c := range root.Commands() {
+		if c.Name() == "nuke" {
+			found = true
+			help = c.Long + "\n" + c.UsageString()
+		}
+	}
+	if !found {
+		t.Fatalf("fleet tree has no nuke subcommand")
+	}
+	for _, want := range []string{`"audit"`, `"revoke"`} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("want nuke help to document %s scope, got:\n%s", want, help)
+		}
+	}
+}
+
+func TestFleetNukeCountFetch401HintsAuditScope(t *testing.T) {
+	// Token without audit scope: the count-fetch 401 must name audit,
+	// never revoke (the revoke-all call never runs).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	out, err := runFleet(t, srv, "3\n", "nuke", "--yes")
+	if err == nil {
+		t.Fatalf("want error on count-fetch 401, got nil (output %q)", out)
+	}
+	if !strings.Contains(err.Error(), `"audit"`) {
+		t.Fatalf("want count-fetch 401 to name \"audit\" scope, got err=%v output=%q", err, out)
+	}
+	if strings.Contains(err.Error(), `"revoke"`) {
+		t.Fatalf("count-fetch 401 must not name \"revoke\" scope: %v", err)
+	}
+}
+
+func TestFleetNukeRevokeAll401HintsRevokeScope(t *testing.T) {
+	// Token with audit but without revoke: backends lists 3 boxes, the
+	// revoke-all 401 must name revoke, never audit.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/backends":
+			now := time.Now().Unix()
+			_, _ = w.Write([]byte(fmt.Sprintf(`[
+				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,"last_seen":%d,"enrolled":1,"tombstoned":false},
+				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,"last_seen":%d,"enrolled":1,"tombstoned":true},
+				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,"last_seen":%d,"enrolled":1,"tombstoned":false}
+			]`, now, now, now-3600)))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/revoke-all":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"unknown_box"}`))
+		}
+	}))
+	defer srv.Close()
+
+	out, err := runFleet(t, srv, "3\n", "nuke", "--yes")
+	if err == nil {
+		t.Fatalf("want error on revoke-all 401, got nil (output %q)", out)
+	}
+	if !strings.Contains(err.Error(), `"revoke"`) {
+		t.Fatalf("want revoke-all 401 to name \"revoke\" scope, got err=%v output=%q", err, out)
+	}
+	if strings.Contains(err.Error(), `"audit"`) {
+		t.Fatalf("revoke-all 401 must not name \"audit\" scope: %v", err)
+	}
+}
+
 func TestFleetNukeWithoutYesRefuses(t *testing.T) {
 	stub := newStubWorker(t)
 	srv := httptest.NewServer(stub.handler())

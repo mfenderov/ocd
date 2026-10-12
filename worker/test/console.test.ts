@@ -4,8 +4,9 @@ import { ACCESS_ASSERTION_HEADER, clearAccessCache } from "../src/access";
 import app, { type Env } from "../src/index";
 import { generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
 
-// Must match wrangler.toml [vars] (edge reads the Worker env for the
-// /console Access check, same threading as the DO guard in scopes.test.ts).
+// Must match vitest.config.ts miniflare bindings (edge reads the Worker env
+// for the /console Access check, same threading as the DO guard in
+// scopes.test.ts).
 const ACCESS_TEAM = "test-team.cloudflareaccess.com";
 const ACCESS_AUD = "test-access-aud-tag";
 const ACCESS_EMAIL = "owner@example.com";
@@ -88,6 +89,18 @@ describe("console page access (Task 2 story: browser Access session, no CLI toke
   it("forged assertion denies, never serves the page", async () => {
     const res = await app.fetch(consoleRequest("/console", "stale.jwt.here"), consoleEnv());
     expect(res.status).toBe(401);
+  });
+
+  it("production config without ACCESS_* vars denies even a valid JWT (fail-closed)", async () => {
+    // wrangler.toml ships no ACCESS_* defaults: with an empty env (what a
+    // deploy without overrides gets) accessConfig is incomplete and even a
+    // correctly signed allowlisted JWT must 401, never serve the page.
+    const { jwt, jwks } = await craftJwt();
+    await withJwks(jwks, async () => {
+      const res = await app.fetch(consoleRequest("/console", jwt), {} as unknown as Env);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "unauthorized" });
+    });
   });
 });
 

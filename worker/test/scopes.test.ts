@@ -164,8 +164,9 @@ describe("guarded-route exhaustiveness (anonymous must 401 everywhere)", () => {
   });
 });
 
-// Must match wrangler.toml [vars] (the DO under test is constructed with the
-// test env): this is the env threading the valid-JWT test proves end-to-end.
+// Must match vitest.config.ts miniflare bindings (the DO under test is
+// constructed with the test env): this is the env threading the valid-JWT
+// test proves end-to-end.
 const ACCESS_TEAM = "test-team.cloudflareaccess.com";
 const ACCESS_AUD = "test-access-aud-tag";
 const ACCESS_EMAIL = "owner@example.com";
