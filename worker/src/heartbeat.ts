@@ -148,6 +148,7 @@ export async function fetchUrlPinned(
   registry: Map<string, string>,
   url: string,
   init?: RequestInit,
+  fetcher: typeof fetch = fetch,
 ): Promise<Response> {
   let hostname: string;
   try {
@@ -156,7 +157,7 @@ export async function fetchUrlPinned(
     throw new Error("refused: invalid box URL");
   }
   assertPinnedHost(registry, hostname);
-  return fetch(url, init);
+  return fetcher(url, init);
 }
 
 // Choke point for ALL outbound box calls: resolve the pinned hostname,
@@ -166,8 +167,9 @@ export async function fetchBox(
   boxId: string,
   path: string,
   init?: RequestInit,
+  fetcher: typeof fetch = fetch,
 ): Promise<Response> {
-  return fetchUrlPinned(registry, boxUrl(pinnedHostname(registry, boxId), path), init);
+  return fetchUrlPinned(registry, boxUrl(pinnedHostname(registry, boxId), path), init, fetcher);
 }
 
 function defaultNowSec(): number {

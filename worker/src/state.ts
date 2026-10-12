@@ -9,6 +9,7 @@ import {
   type PendingRow,
 } from "./enroll";
 import { handleHeartbeat } from "./heartbeat";
+import { handleMintLink, type TombstoneRow } from "./mint";
 
 export interface BoxRow {
   id: string;
@@ -42,6 +43,10 @@ CREATE TABLE IF NOT EXISTS pending(
   heartbeat_token_hash TEXT NOT NULL,
   admin_token_sealed TEXT NOT NULL DEFAULT '',
   first_seen INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tombstones(
+  box_id TEXT PRIMARY KEY,
+  epoch INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -168,6 +173,31 @@ export class FleetState implements DurableObject {
     this.state.storage.sql.exec("DELETE FROM pending WHERE id = ?", id);
   }
 
+  getTombstone(boxId: string): TombstoneRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT box_id, epoch FROM tombstones WHERE box_id = ? LIMIT 1",
+      boxId,
+    );
+    return cursor.toArray()[0] as unknown as TombstoneRow | undefined;
+  }
+
+  // Task 5 (revoke) writes through here; mint only reads. Epoch invariant is
+  // documented on TombstoneRow in mint.ts.
+  putTombstone(row: TombstoneRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO tombstones (box_id, epoch) VALUES (?, ?)",
+      row.box_id,
+      row.epoch,
+    );
+  }
+
+  deleteTombstone(boxId: string): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/backends") {
@@ -187,6 +217,15 @@ export class FleetState implements DurableObject {
     }
     if (request.method === "GET" && url.pathname === "/enroll/deny") {
       return handleEnrollDeny(request, this, this.enrollConfig());
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/link/")) {
+      const boxId = decodeURIComponent(url.pathname.slice("/link/".length));
+      if (!boxId) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
+        sealKey: this.sealKey,
+      });
     }
     return new Response("Not Found", { status: 404 });
   }

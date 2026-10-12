@@ -41,11 +41,34 @@ async function handleEnrollApi(request: Request, env: Env | undefined, doPath: s
   return await stub.fetch(new Request(`http://do${doPath}${search}`, request));
 }
 
+async function handleLinkApi(request: Request, env: Env | undefined): Promise<Response> {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  const pathname = new URL(request.url).pathname;
+  const id = pathname.slice(0, -"/link".length).slice("/api/backends/".length);
+  return await stub.fetch(
+    new Request(`http://do/link/${encodeURIComponent(id)}`, request),
+  );
+}
+
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/backends") {
       return handleBackends(env);
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/api/backends/") &&
+      url.pathname.endsWith("/link") &&
+      url.pathname.length > "/api/backends//link".length
+    ) {
+      return handleLinkApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
       return handleHeartbeatApi(request, env);
