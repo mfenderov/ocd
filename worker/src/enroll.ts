@@ -519,7 +519,18 @@ export async function approveEnrollment(
   const rotated = !!known && pending.admin_token_sealed !== "" && pending.admin_token_sealed !== known.admin_token_sealed;
   const now = nowSec();
   const row: BoxRow = known
-    ? { ...known, heartbeat_token_hash: pending.heartbeat_token_hash, admin_token_sealed: sealed, enrolled: 1 }
+    ? {
+        ...known,
+        heartbeat_token_hash: pending.heartbeat_token_hash,
+        admin_token_sealed: sealed,
+        // Re-approval rebinds trust: restart the seq counter so a box that
+        // lost its DB (seq reset to 1) is accepted again. Safe because
+        // approval itself is the owner-trusted event and the token still
+        // has to match.
+        last_seq: 0,
+        last_ts: 0,
+        enrolled: 1,
+      }
     : {
         id: pending.id,
         hostname: pending.hostname,

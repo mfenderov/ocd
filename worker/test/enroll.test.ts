@@ -186,7 +186,26 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(await hb.json()).toMatchObject({ id: "fresh-1", enrolled: true });
   });
 
-  it("approve on a known id swaps the heartbeat binding but keeps admin hash and presence", async () => {
+  it("approve resets the seq counter so a DB-lossed box recovers", async () => {
+    const store = new MemStore();
+    const box = await seedEnrolled(store, "seqreset-1");
+    expect(box.last_seq).toBe(11);
+    store.putPending({
+      id: "seqreset-1",
+      hostname: "seqreset-1.buyallmemes.com",
+      heartbeat_token_hash: await hashToken(NEW_TOKEN),
+      admin_token_sealed: "",
+      first_seen: FIXED_NOW,
+    });
+    const row = await approveEnrollment(store, "seqreset-1");
+    expect(row?.last_seq).toBe(0);
+    expect(row?.last_ts).toBe(0);
+    // And the next beat with a low seq is accepted again.
+    const hb = await handleHeartbeat(heartbeatRequest("seqreset-1", 1, 6000, NEW_TOKEN), store, () => 1700000200);
+    expect(hb.status).toBe(200);
+  });
+
+  it("approve on a known id swaps the heartbeat binding, keeps admin hash, resets seq", async () => {
     const store = new MemStore();
     const before = await seedEnrolled(store, "rotate-1");
     const rec = recorder();
@@ -201,7 +220,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(await tokenMatches(CLONE_TOKEN, row?.heartbeat_token_hash ?? "")).toBe(true);
     expect(await tokenMatches(KNOWN_TOKEN, row?.heartbeat_token_hash ?? "")).toBe(false);
     expect(row?.admin_token_hash).toBe(before.admin_token_hash);
-    expect(row).toMatchObject({ last_seq: 11, last_ts: 5000, last_seen: 1700000000, enrolled: 1 });
+    expect(row).toMatchObject({ last_seq: 0, last_ts: 0, last_seen: 1700000000, enrolled: 1 });
     const stale = await handleHeartbeat(heartbeatRequest("rotate-1", 12, 6000, KNOWN_TOKEN), store);
     expect(stale.status).toBe(401);
   });
