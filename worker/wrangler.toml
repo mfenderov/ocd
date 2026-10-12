@@ -9,3 +9,6 @@ class_name = "FleetState"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["FleetState"]
+
+[vars]
+ENROLL_BASE_URL = "https://ocd-fleet.fenderovlol.workers.dev"
