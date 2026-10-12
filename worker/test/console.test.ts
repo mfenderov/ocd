@@ -91,6 +91,47 @@ describe("console page access (Task 2 story: browser Access session, no CLI toke
   });
 });
 
+describe("console offline threshold (90s fleet heartbeat contract)", () => {
+  async function serveHtml(): Promise<string> {
+    const { jwt, jwks } = await craftJwt();
+    return withJwks(jwks, async () => {
+      const res = await app.fetch(consoleRequest("/console", jwt), consoleEnv());
+      expect(res.status).toBe(200);
+      return await res.text();
+    });
+  }
+
+  it("pins OFFLINE_AFTER_SEC = 90, never the old 5-minute value", async () => {
+    const html = await serveHtml();
+    expect(html).toContain("OFFLINE_AFTER_SEC = 90");
+    expect(html).not.toContain("OFFLINE_AFTER_SEC = 300");
+    const m = html.match(/var OFFLINE_AFTER_SEC = (\d+);/);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBe(90);
+  });
+
+  it("boxState compares staleness with strict > on the named constant", async () => {
+    // Strictly-exceeds semantics on the 90s contract: 91s stale reads off,
+    // 89s and exactly-90s read on. Pinned against the shipped source (the
+    // classifier is inline page JS, so the test asserts its exact shape).
+    const html = await serveHtml();
+    const fn = html.match(/function boxState\(box\) \{([\s\S]*?)\n\}/);
+    expect(fn).not.toBeNull();
+    const body = fn![1];
+    expect(body).toMatch(/-\s*box\.last_seen\s*>\s*OFFLINE_AFTER_SEC/);
+  });
+
+  it("boxState keeps the server-side tombstone ahead of staleness", async () => {
+    // A tombstoned box that also went quiet stays tombstoned/pending: the
+    // block is the binding fact, staleness is secondary.
+    const html = await serveHtml();
+    const fn = html.match(/function boxState\(box\) \{([\s\S]*?)\n\}/);
+    expect(fn).not.toBeNull();
+    const body = fn![1];
+    expect(body.indexOf("tombstoned")).toBeLessThan(body.indexOf("OFFLINE_AFTER_SEC"));
+  });
+});
+
 describe("console page content", () => {
   it("valid Access JWT serves 200 HTML with board markers", async () => {
     const { jwt, jwks } = await craftJwt();

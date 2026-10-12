@@ -53,9 +53,10 @@
 // headers. Only public box fields are rendered — extra response fields are
 // dropped by pickBox, never trusted.
 
-// A box is offline when it has not checked in for 5 minutes (heartbeats run
-// far more often than that; a quiet box is a dead or cut-off box).
-var OFFLINE_AFTER_SEC = 300;
+// Offline threshold (binding, fleet heartbeat contract): 90s on every
+// surface — three missed beats at the 30s box heartbeat default. The CLI
+// (`internal/fleet.BoxState`) classifies with the same constant.
+var OFFLINE_AFTER_SEC = 90;
 // Boxes flagged tainted by the API (link 409 / audit rows) render as
 // actionable "revoke pending", never just red.
 var taintedBoxes = {};
