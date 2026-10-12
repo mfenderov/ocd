@@ -645,7 +645,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
 });
 
 describe("enrolled fast-path admin rotation", () => {
-  it("rotate-ok: bound token + new admin_token seals, stores, reports rotated:true, no ping", async () => {
+  it("rotate-ok: bound token + new admin_token seals, stores, reports rotated:true, pings once", async () => {
     const store = new MemStore();
     await seedEnrolled(store, "rot-1");
     const rec = recorder();
@@ -657,12 +657,15 @@ describe("enrolled fast-path admin rotation", () => {
       TEST_SECRETS,
     );
     expect(result).toEqual({ status: "enrolled", id: "rot-1", rotated: true });
-    expect(rec.texts).toHaveLength(0);
     expect(store.getPending("rot-1")).toBeUndefined();
     const row = store.getBox("rot-1");
     expect(row?.admin_token_sealed).not.toContain("fresh-admin-rotation-1");
     expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe("fresh-admin-rotation-1");
     expect(row).toMatchObject({ last_seq: 11, last_ts: 5000, enrolled: 1 });
+    expect(rec.texts).toHaveLength(1);
+    expect(rec.texts[0]).toContain("rot-1");
+    expect(rec.texts[0]).toContain(new Date(FIXED_NOW * 1000).toISOString());
+    expect(rec.texts[0]).not.toContain("fresh-admin-rotation-1");
     const again = await requestEnrollment(
       store,
       { id: "rot-1", hostname: "rot-1.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
@@ -671,7 +674,7 @@ describe("enrolled fast-path admin rotation", () => {
       TEST_SECRETS,
     );
     expect(again).toEqual({ status: "enrolled", id: "rot-1", rotated: false });
-    expect(rec.texts).toHaveLength(0);
+    expect(rec.texts).toHaveLength(1);
   });
 
   it("rotation overwrites a previously bound admin token", async () => {

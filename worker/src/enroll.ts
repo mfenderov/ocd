@@ -197,6 +197,10 @@ export function mismatchAlertText(id: string): string {
   return `auth mismatch: heartbeat for known id="${id}" rejected (token does not match binding).`;
 }
 
+export function rotationPingText(id: string, now: number): string {
+  return `admin token rotated: id="${id}" at ${new Date(now * 1000).toISOString()}.`;
+}
+
 // Direct Bot API call. Bot token + owner chat id come from Worker env only
 // (see telegramNotifier). Failures log the status code alone — never the URL
 // (it embeds the token), body, or chat id.
@@ -332,7 +336,11 @@ export async function requestEnrollment(
     if (current === body.admin_token) {
       return { status: "enrolled", id: body.id, rotated: false };
     }
+    const now = nowSec();
     store.putBox({ ...known, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+    // A rotation nobody hears about is a silent credential change: ping the
+    // owner channel exactly like enrollment pings (id + time, never tokens).
+    await notify(rotationPingText(body.id, now));
     return { status: "enrolled", id: body.id, rotated: true };
   }
   if (!config.capSecret) {
