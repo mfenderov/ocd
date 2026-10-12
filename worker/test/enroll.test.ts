@@ -8,12 +8,14 @@ import {
   handleEnrollDeny,
   handleEnrollRequest,
   isPinnedHostname,
+  enrollPingText,
   issueCapabilityLink,
   mismatchAlertText,
   parseEnrollBody,
   parseHostSuffixes,
   requestEnrollment,
   sealAdminToken,
+  rotationPingText,
   sendTelegramMessage,
   unsealAdminToken,
   verifyCapability,
@@ -264,6 +266,26 @@ describe("enrollment approve-on-sight (unit)", () => {
   });
 });
 
+describe("ping bodies are short HTML, never raw URLs", () => {
+  it("enroll ping shows anchors, id and host, hides link bulk", () => {
+    const text = enrollPingText(
+      { id: "pretty-1", hostname: "pretty-1.buyallmemes.com" },
+      { approve: "https://fleet.test/approve?sig=abc", deny: "https://fleet.test/deny?sig=def" },
+      1700000900,
+    );
+    expect(text).toContain("<b>New box wants in</b>");
+    expect(text).toContain('<a href="https://fleet.test/approve?sig=abc">Approve</a>');
+    expect(text).toContain('<a href="https://fleet.test/deny?sig=def">Deny</a>');
+    expect(text).not.toMatch(/approve: https/);
+  });
+
+  it("rotation ping is one line with id and time", () => {
+    const text = rotationPingText("pretty-1", 1700000000);
+    expect(text).toContain("pretty-1");
+    expect(text).not.toContain("sig=");
+  });
+});
+
 describe("heartbeat token mismatch is rejected + alerted", () => {
   it("wrong token on a known id → 401 and exactly one alert naming the id", async () => {
     const store = new MemStore();
@@ -323,7 +345,12 @@ describe("telegram ping (Bot API, direct fetch)", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.telegram.org/botbot-secret-1/sendMessage");
     expect(calls[0].init.method).toBe("POST");
-    expect(JSON.parse(calls[0].init.body as string)).toEqual({ chat_id: "chat-1", text: "hello" });
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      chat_id: "chat-1",
+      text: "hello",
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
   });
 
   it("never throws and never logs secrets on transport or API failure", async () => {
@@ -675,7 +702,7 @@ describe("enrolled fast-path admin rotation", () => {
     expect(row).toMatchObject({ last_seq: 11, last_ts: 5000, enrolled: 1 });
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).toContain("rot-1");
-    expect(rec.texts[0]).toContain(new Date(FIXED_NOW * 1000).toISOString());
+    expect(rec.texts[0]).toContain(new Date(FIXED_NOW * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z");
     expect(rec.texts[0]).not.toContain("fresh-admin-rotation-1");
     const again = await requestEnrollment(
       store,
@@ -840,7 +867,7 @@ describe("pending-path rotation ping", () => {
     expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe("new-admin-9");
     expect(rec.texts).toHaveLength(2);
     expect(rec.texts[1]).toContain("rot-p");
-    expect(rec.texts[1]).toContain("admin token rotated");
+    expect(rec.texts[1]).toContain("Admin token rotated");
     expect(rec.texts[1]).not.toContain("new-admin-9");
   });
 
@@ -916,7 +943,7 @@ describe("deny leaves a marker row", () => {
 
 describe("capability binding (approval TOCTOU)", () => {
   function approveLink(ping: string): string {
-    const match = ping.match(/approve: (\S+)/);
+    const match = ping.match(/<a href="([^"]+)">Approve<\/a>/);
     if (!match) {
       throw new Error("test: no approve link in ping");
     }
@@ -924,7 +951,7 @@ describe("capability binding (approval TOCTOU)", () => {
   }
 
   function denyLink(ping: string): string {
-    const match = ping.match(/deny: (\S+)/);
+    const match = ping.match(/<a href="([^"]+)">Deny<\/a>/);
     if (!match) {
       throw new Error("test: no deny link in ping");
     }
