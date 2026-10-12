@@ -216,3 +216,25 @@ func TestSendOnceLeavesCallerClientUntouched(t *testing.T) {
 		t.Fatalf("want caller Timeout still 0, got %v", zero.Timeout)
 	}
 }
+
+func TestHeartbeatURLAcceptsBareAndFullBase(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/heartbeat" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enrolled":true}`))
+	}))
+	defer srv.Close()
+	for _, base := range []string{srv.URL, srv.URL + "/", srv.URL + "/api/heartbeat"} {
+		if _, err := boxagent.SendOnce(st, srv.Client(), base, "box-1", "tok", "", "v"); err != nil {
+			t.Fatalf("base %q must reach /api/heartbeat, got %v", base, err)
+		}
+	}
+}

@@ -9,6 +9,7 @@ import {
   pinnedRegistry,
   reenrollPingText,
   REENROLL_SEQ_THRESHOLD,
+  shouldPingMismatch,
 } from "../src/heartbeat";
 import type { BoxRow } from "../src/state";
 
@@ -259,5 +260,15 @@ describe("seq-reset re-enroll signal", () => {
     expect(res.status).toBe(401);
     expect(mismatches).toEqual(["hb-authe"]);
     expect(pings).toHaveLength(0);
+  });
+});
+
+describe("mismatch ping dedup", () => {
+  it("pings once per window, then again after", () => {
+    const seen = new Map<string, number>();
+    expect(shouldPingMismatch(seen, "box-1", 1_000, 900_000)).toBe(true);
+    expect(shouldPingMismatch(seen, "box-1", 2_000, 900_000)).toBe(false);
+    expect(shouldPingMismatch(seen, "box-2", 3_000, 900_000)).toBe(true);
+    expect(shouldPingMismatch(seen, "box-1", 1_000 + 900_001, 900_000)).toBe(true);
   });
 });

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mfenderov/ocd/internal/store"
@@ -70,10 +71,21 @@ func withTimeout(client *http.Client) *http.Client {
 	return out
 }
 
+// heartbeatURL tolerates a bare Worker origin: the endpoint path is
+// appended unless already present, so OCD_WORKER_URL works with or
+// without the /api/heartbeat suffix.
+func heartbeatURL(base string) string {
+	trimmed := strings.TrimSuffix(base, "/")
+	if strings.HasSuffix(trimmed, "/api/heartbeat") {
+		return trimmed
+	}
+	return trimmed + "/api/heartbeat"
+}
+
 func postHeartbeat(client *http.Client, workerURL, token string, payload []byte) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), heartbeatTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, workerURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, heartbeatURL(workerURL), bytes.NewReader(payload))
 	if err != nil {
 		return false, fmt.Errorf("boxagent: build heartbeat request: %w", err)
 	}

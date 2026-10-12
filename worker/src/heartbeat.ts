@@ -189,6 +189,24 @@ function defaultNowSec(): number {
 // re-enroll (which rebinds). Genuine replays of high seqs stay silent.
 export const REENROLL_SEQ_THRESHOLD = 10;
 
+export const MISMATCH_PING_WINDOW_MS = 15 * 60 * 1000;
+
+// shouldPingMismatch rate-limits mismatch pings to one per box per window.
+// A wrong-token box beats every 30s; without this the owner gets spammed.
+export function shouldPingMismatch(
+  seen: Map<string, number>,
+  id: string,
+  nowMs: number,
+  windowMs: number = MISMATCH_PING_WINDOW_MS,
+): boolean {
+  const last = seen.get(id);
+  if (last !== undefined && nowMs - last < windowMs) {
+    return false;
+  }
+  seen.set(id, nowMs);
+  return true;
+}
+
 export function reenrollPingText(id: string): string {
   return (
     `seq reset suspected: heartbeat for id="${id}" presented a valid token ` +
