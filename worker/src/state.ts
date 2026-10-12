@@ -13,6 +13,12 @@ import {
 import { handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
 import { handleMintLink, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
+import {
+  handleDeleteToken,
+  handleMintToken,
+  handleRotateToken,
+  type TokenRow,
+} from "./tokens";
 
 export interface BoxRow {
   id: string;
@@ -92,6 +98,7 @@ interface FleetEnv {
   TELEGRAM_OWNER_CHAT_ID?: string;
   ENROLL_CAPABILITY_SECRET?: string;
   ADMIN_SEAL_SECRET?: string;
+  FLEET_BOOTSTRAP_SECRET?: string;
   ENROLL_BASE_URL?: string;
   FLEET_HOST_SUFFIXES?: string;
 }
@@ -102,6 +109,7 @@ export class FleetState implements DurableObject {
   private ownerChatId?: string;
   private capSecret?: string;
   private sealKey?: string;
+  private bootstrapSecret?: string;
   private baseUrl?: string;
   private hostSuffixes?: string;
   private mismatchPinged = new Map<string, number>();
@@ -112,6 +120,7 @@ export class FleetState implements DurableObject {
     this.ownerChatId = env?.TELEGRAM_OWNER_CHAT_ID;
     this.capSecret = env?.ENROLL_CAPABILITY_SECRET;
     this.sealKey = env?.ADMIN_SEAL_SECRET;
+    this.bootstrapSecret = env?.FLEET_BOOTSTRAP_SECRET;
     this.baseUrl = env?.ENROLL_BASE_URL;
     this.hostSuffixes = env?.FLEET_HOST_SUFFIXES;
   }
@@ -145,6 +154,17 @@ export class FleetState implements DurableObject {
     }>;
     if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
       this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
+    }
+    // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
+    // a missing table reads as zero columns, so fresh and existing DBs
+    // converge here instead of in the one-shot SCHEMA string.
+    const tokenCols = this.state.storage.sql.exec("PRAGMA table_info(cli_tokens)").toArray() as Array<{
+      name: string;
+    }>;
+    if (tokenCols.length === 0) {
+      this.state.storage.sql.exec(
+        "CREATE TABLE cli_tokens(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)",
+      );
     }
   }
 
@@ -250,6 +270,45 @@ export class FleetState implements DurableObject {
     );
   }
 
+  // CLI token rows (Task 1): hashes and scope JSON only — plaintext values
+  // never reach SQLite. No listing endpoint serves these rows.
+  getToken(id: string): TokenRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT id, token_hash, scopes, created_at FROM cli_tokens WHERE id = ? LIMIT 1", id);
+    return cursor.toArray()[0] as unknown as TokenRow | undefined;
+  }
+
+  getTokenByHash(hash: string): TokenRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT id, token_hash, scopes, created_at FROM cli_tokens WHERE token_hash = ? LIMIT 1",
+      hash,
+    );
+    return cursor.toArray()[0] as unknown as TokenRow | undefined;
+  }
+
+  putToken(row: TokenRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO cli_tokens (id, token_hash, scopes, created_at) VALUES (?, ?, ?, ?)",
+      row.id,
+      row.token_hash,
+      row.scopes,
+      row.created_at,
+    );
+  }
+
+  deleteToken(id: string): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("DELETE FROM cli_tokens WHERE id = ?", id);
+  }
+
+  countTokens(): number {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT COUNT(*) AS n FROM cli_tokens");
+    return (cursor.toArray()[0] as unknown as { n: number }).n;
+  }
+
   deleteTombstone(boxId: string): void {
     this.ensureSchema();
     this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
@@ -305,6 +364,27 @@ export class FleetState implements DurableObject {
       return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
         sealKey: this.sealKey,
       });
+    }
+    if (request.method === "POST" && url.pathname === "/tokens") {
+      return handleMintToken(request, this, { bootstrapSecret: this.bootstrapSecret });
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/tokens/") && url.pathname.endsWith("/rotate")) {
+      const id = decodeURIComponent(url.pathname.slice("/tokens/".length, -"/rotate".length));
+      if (!id) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleRotateToken(id, request, this);
+    }
+    if (
+      request.method === "DELETE" &&
+      url.pathname.startsWith("/tokens/") &&
+      !url.pathname.slice("/tokens/".length).includes("/")
+    ) {
+      const id = decodeURIComponent(url.pathname.slice("/tokens/".length));
+      if (!id) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleDeleteToken(id, request, this);
     }
     return new Response("Not Found", { status: 404 });
   }

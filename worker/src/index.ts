@@ -67,6 +67,17 @@ async function handleRevokeApi(request: Request, env: Env | undefined, doPath: s
   return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
+async function handleTokensApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  return await stub.fetch(new Request(`http://do${doPath}`, request));
+}
+
 async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
   if (!env?.FLEET_STATE) {
     console.error("FLEET_STATE binding is not configured");
@@ -120,6 +131,27 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/enroll/deny") {
       return handleEnrollApi(request, env, "/enroll/deny");
+    }
+    if (request.method === "POST" && url.pathname === "/api/tokens") {
+      return handleTokensApi(request, env, "/tokens");
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/api/tokens/") &&
+      url.pathname.endsWith("/rotate") &&
+      url.pathname.length > "/api/tokens//rotate".length
+    ) {
+      const id = url.pathname.slice("/api/tokens/".length, -"/rotate".length);
+      return handleTokensApi(request, env, `/tokens/${encodeURIComponent(id)}/rotate`);
+    }
+    if (
+      request.method === "DELETE" &&
+      url.pathname.startsWith("/api/tokens/") &&
+      !url.pathname.slice("/api/tokens/".length).includes("/") &&
+      url.pathname.length > "/api/tokens/".length
+    ) {
+      const id = url.pathname.slice("/api/tokens/".length);
+      return handleTokensApi(request, env, `/tokens/${encodeURIComponent(id)}`);
     }
     return new Response("Not Found", { status: 404 });
   },
