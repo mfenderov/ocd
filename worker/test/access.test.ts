@@ -169,7 +169,13 @@ describe("verifyAccessJwt", () => {
     const { privateKey, jwk } = await makeKey("k1");
     const other = await makeKey("k2");
     const good = await signJwt(privateKey, { alg: "RS256", kid: "k1", typ: "JWT" }, payload());
-    const tampered = good.slice(0, -1) + (good.endsWith("A") ? "B" : "A");
+    // Flip the FIRST char of the signature segment: every bit there is
+    // significant, unlike the last base64url char (partial quantum), so the
+    // mutation is guaranteed. (Flipping the tail char is a no-op ~1/16 of
+    // the time and flaked this test.)
+    const sigParts = good.split(".");
+    const first = sigParts[2][0];
+    const tampered = sigParts.slice(0, 2).join(".") + "." + (first === "A" ? "B" : "A") + sigParts[2].slice(1);
     const fetchJwks = jwksFetcher({ keys: [jwk, other.jwk] });
     expect(await verifyAccessJwt(tampered, accessConfig(), deps(fetchJwks))).toBeNull();
     // Signed by k2 but claiming k1: signature check against k1 fails.
