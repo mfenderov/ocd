@@ -26,7 +26,7 @@ class MemStore implements RevokeStore {
   putBox(box: BoxRow): void {
     this.boxes.set(box.id, { ...box });
   }
-  listBackends(): BoxRow[] {
+  listBoxes(): BoxRow[] {
     return [...this.boxes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
   }
   getTombstone(boxId: string): TombstoneRow | undefined {

@@ -4,12 +4,13 @@ import {
   handleEnrollDeny,
   handleEnrollRequest,
   mismatchAlertText,
+  parseHostSuffixes,
   telegramNotifier,
   type EnrollConfig,
   type NotifyFn,
   type PendingRow,
 } from "./enroll";
-import { handleHeartbeat } from "./heartbeat";
+import { handleHeartbeat, reenrollPingText } from "./heartbeat";
 import { handleMintLink, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
 
@@ -24,6 +25,26 @@ export interface BoxRow {
   last_ts: number;
   last_seen: number;
   enrolled: number;
+}
+
+// Public backends shape: everything the console needs, none of the secret
+// material. GET /backends serves exactly this — token hashes and the sealed
+// admin blob never leave the DO over that route.
+export interface BoxPublic {
+  id: string;
+  hostname: string;
+  epoch: number;
+  last_seq: number;
+  last_ts: number;
+  last_seen: number;
+  enrolled: number;
+}
+
+// Deny marker: a refused enrollment leaves id + timestamp (never tokens) so
+// denials are auditable instead of silent.
+export interface DenialRow {
+  id: string;
+  denied_at: number;
 }
 
 const SCHEMA = `
@@ -50,10 +71,16 @@ CREATE TABLE IF NOT EXISTS tombstones(
   box_id TEXT PRIMARY KEY,
   epoch INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS denials(
+  id TEXT PRIMARY KEY,
+  denied_at INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 const COLUMNS =
   "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, epoch, last_seq, last_ts, last_seen, enrolled";
+
+const PUBLIC_COLUMNS = "id, hostname, epoch, last_seq, last_ts, last_seen, enrolled";
 
 const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen";
 
@@ -66,6 +93,7 @@ interface FleetEnv {
   ENROLL_CAPABILITY_SECRET?: string;
   ADMIN_SEAL_SECRET?: string;
   ENROLL_BASE_URL?: string;
+  FLEET_HOST_SUFFIXES?: string;
 }
 
 export class FleetState implements DurableObject {
@@ -75,6 +103,7 @@ export class FleetState implements DurableObject {
   private capSecret?: string;
   private sealKey?: string;
   private baseUrl?: string;
+  private hostSuffixes?: string;
 
   constructor(state: DurableObjectState, env?: FleetEnv) {
     this.state = state;
@@ -83,6 +112,7 @@ export class FleetState implements DurableObject {
     this.capSecret = env?.ENROLL_CAPABILITY_SECRET;
     this.sealKey = env?.ADMIN_SEAL_SECRET;
     this.baseUrl = env?.ENROLL_BASE_URL;
+    this.hostSuffixes = env?.FLEET_HOST_SUFFIXES;
   }
 
   private notifier(): NotifyFn {
@@ -90,7 +120,12 @@ export class FleetState implements DurableObject {
   }
 
   private enrollConfig(): EnrollConfig {
-    return { capSecret: this.capSecret, baseUrl: this.baseUrl, sealKey: this.sealKey };
+    return {
+      capSecret: this.capSecret,
+      baseUrl: this.baseUrl,
+      sealKey: this.sealKey,
+      hostSuffixes: parseHostSuffixes(this.hostSuffixes),
+    };
   }
 
   private ensureSchema(): void {
@@ -112,7 +147,15 @@ export class FleetState implements DurableObject {
     }
   }
 
-  listBackends(): BoxRow[] {
+  listBackends(): BoxPublic[] {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(`SELECT ${PUBLIC_COLUMNS} FROM boxes ORDER BY id`);
+    return cursor.toArray() as unknown as BoxPublic[];
+  }
+
+  // Full rows stay inside the DO: audit/revoke relays decrypt the sealed
+  // admin token at call time and need the hashes. Never served over HTTP.
+  listBoxes(): BoxRow[] {
     this.ensureSchema();
     const cursor = this.state.storage.sql.exec(`SELECT ${COLUMNS} FROM boxes ORDER BY id`);
     return cursor.toArray() as unknown as BoxRow[];
@@ -175,6 +218,17 @@ export class FleetState implements DurableObject {
     this.state.storage.sql.exec("DELETE FROM pending WHERE id = ?", id);
   }
 
+  getDenial(id: string): DenialRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT id, denied_at FROM denials WHERE id = ? LIMIT 1", id);
+    return cursor.toArray()[0] as unknown as DenialRow | undefined;
+  }
+
+  putDenial(row: DenialRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("INSERT OR REPLACE INTO denials (id, denied_at) VALUES (?, ?)", row.id, row.denied_at);
+  }
+
   getTombstone(boxId: string): TombstoneRow | undefined {
     this.ensureSchema();
     const cursor = this.state.storage.sql.exec(
@@ -210,15 +264,23 @@ export class FleetState implements DurableObject {
     }
     if (request.method === "POST" && url.pathname === "/heartbeat") {
       const notify = this.notifier();
-      return handleHeartbeat(request, this, undefined, async (id: string) => {
-        await notify(mismatchAlertText(id));
-      });
+      return handleHeartbeat(
+        request,
+        this,
+        undefined,
+        async (id: string) => {
+          await notify(mismatchAlertText(id));
+        },
+        async (id: string) => {
+          await notify(reenrollPingText(id));
+        },
+      );
     }
     if (request.method === "POST" && url.pathname === "/enroll") {
       return handleEnrollRequest(request, this, this.notifier(), undefined, this.enrollConfig());
     }
     if (request.method === "GET" && url.pathname === "/enroll/approve") {
-      return handleEnrollApprove(request, this, this.enrollConfig());
+      return handleEnrollApprove(request, this, this.enrollConfig(), undefined, this.notifier());
     }
     if (request.method === "GET" && url.pathname === "/enroll/deny") {
       return handleEnrollDeny(request, this, this.enrollConfig());

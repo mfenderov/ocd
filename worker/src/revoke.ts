@@ -35,7 +35,7 @@ export interface TombstoneStore {
 
 export interface RevokeStore extends TombstoneStore {
   getBox(id: string): BoxRow | undefined;
-  listBackends(): BoxRow[];
+  listBoxes(): BoxRow[];
 }
 
 export interface RevokeDeps {
@@ -166,7 +166,7 @@ export async function revokeAllBoxes(
   deps: RevokeDeps = {},
 ): Promise<RevokeResult[]> {
   const results: RevokeResult[] = [];
-  for (const box of store.listBackends()) {
+  for (const box of store.listBoxes()) {
     results.push(await revokeOneBox(box.id, store, deps));
   }
   return results;

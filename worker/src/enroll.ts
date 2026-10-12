@@ -1,5 +1,5 @@
 import { hashToken, tokenMatches } from "./heartbeat";
-import type { BoxRow } from "./state";
+import type { BoxRow, DenialRow } from "./state";
 
 // Enrollment request body (box JSON contract, snake_case): a box that wants
 // to join (or re-bind after a token change) sends {id, hostname,
@@ -26,11 +26,14 @@ export interface PendingRow {
 
 // Resolve-time secrets, all from Worker env (see FleetState). Every field is
 // optional at the type level so misconfiguration degrades to a loud 500, and
-// unit tests can pass explicit values.
+// unit tests can pass explicit values. hostSuffixes overrides the enrollment
+// hostname allowlist (parsed from FLEET_HOST_SUFFIXES, default
+// buyallmemes.com).
 export interface EnrollConfig {
   capSecret?: string;
   baseUrl?: string;
   sealKey?: string;
+  hostSuffixes?: string[];
 }
 
 export interface EnrollStore {
@@ -39,23 +42,66 @@ export interface EnrollStore {
   getPending(id: string): PendingRow | undefined;
   putPending(row: PendingRow): void;
   deletePending(id: string): void;
+  getDenial(id: string): DenialRow | undefined;
+  putDenial(row: DenialRow): void;
 }
 
 // Owner ping sink. Contract: never throws, never logs secrets —
 // sendTelegramMessage below already swallows transport/API failures.
 export type NotifyFn = (text: string) => Promise<void>;
 
-function isPinnedHostname(value: string): boolean {
+// Enrollment intake only accepts real fleet hostnames: multi-label DNS names
+// under one of the allowed suffixes (default *.buyallmemes.com). IP
+// literals, localhost, single-label names, and .local names are rejected so
+// a compromised box or a curious operator cannot pin an address the console
+// would later call back (SSRF-adjacent intake). Suffix matching is
+// dot-boundary exact: "notbuyallmemes.com" and "x.buyallmemes.com.evil.com"
+// do not match.
+export const DEFAULT_HOST_SUFFIXES = ["buyallmemes.com"];
+
+export function parseHostSuffixes(raw?: string): string[] {
+  if (raw === undefined) {
+    return [...DEFAULT_HOST_SUFFIXES];
+  }
+  const list = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/\.+$/, ""))
+    .filter((s) => s.length > 0);
+  return list.length > 0 ? list : [...DEFAULT_HOST_SUFFIXES];
+}
+
+function isIPv4Literal(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+  return parts.every((p) => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+}
+
+export function isPinnedHostname(value: string, suffixes: string[] = DEFAULT_HOST_SUFFIXES): boolean {
   if (value.length === 0 || value.length > 253) {
     return false;
   }
   if (/\s/.test(value) || value.includes("/") || value.includes("://") || value.includes("@") || value.includes(":")) {
     return false;
   }
-  return true;
+  if (value.startsWith("[") || isIPv4Literal(value)) {
+    return false;
+  }
+  const lower = value.toLowerCase();
+  if (lower === "localhost" || lower.endsWith(".localhost")) {
+    return false;
+  }
+  if (!lower.includes(".")) {
+    return false;
+  }
+  if (lower === "local" || lower.endsWith(".local")) {
+    return false;
+  }
+  return suffixes.some((s) => lower === s || lower.endsWith(`.${s}`));
 }
 
-export function parseEnrollBody(value: unknown): EnrollBody | null {
+export function parseEnrollBody(value: unknown, suffixes: string[] = DEFAULT_HOST_SUFFIXES): EnrollBody | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
@@ -63,7 +109,7 @@ export function parseEnrollBody(value: unknown): EnrollBody | null {
   if (typeof v["id"] !== "string" || v["id"].length === 0) {
     return null;
   }
-  if (typeof v["hostname"] !== "string" || !isPinnedHostname(v["hostname"])) {
+  if (typeof v["hostname"] !== "string" || !isPinnedHostname(v["hostname"], suffixes)) {
     return null;
   }
   if (typeof v["enroll_token"] !== "string" || v["enroll_token"].length === 0) {
@@ -83,14 +129,32 @@ export type ResolveAction = "approve" | "deny";
 
 // Capability links: HMAC-SHA256 over (action + pending-id + expiry), keyed by
 // a Worker env secret. The action is bound into the MAC so a deny link can
-// never approve (stronger than the id+expiry minimum). Endpoints verify
-// signature + expiry before resolving anything.
+// never approve (stronger than the id+expiry minimum). Enrollment links
+// additionally bind the pending heartbeat-token hash + hostname (see
+// CapabilityBinding): the approve/deny handlers re-verify equality against
+// the CURRENT pending row, so overwriting a pending request invalidates
+// previously issued links (approval TOCTOU). Endpoints verify signature +
+// expiry before resolving anything.
 export const CAPABILITY_TTL_SEC = 900;
+
+// Values bound into an enrollment capability link at issue time. Both are
+// non-secret (a SHA-256 hex and a public DNS name) and travel as link
+// params; the MAC authenticates them, the resolve step compares them.
+export interface CapabilityBinding {
+  tokenHash: string;
+  hostname: string;
+}
+
+export function capBinding(tokenHash: string, hostname: string): string {
+  return `${tokenHash}.${hostname}`;
+}
 
 export interface CapabilityToken {
   id: string;
   exp: number;
   sig: string;
+  tokenHash?: string;
+  hostname?: string;
 }
 
 export function parseCapabilityQuery(url: URL): CapabilityToken | null {
@@ -104,7 +168,14 @@ export function parseCapabilityQuery(url: URL): CapabilityToken | null {
   if (!Number.isInteger(exp) || exp <= 0) {
     return null;
   }
-  return { id, exp, sig };
+  const token: CapabilityToken = { id, exp, sig };
+  const tokenHash = url.searchParams.get("token_hash");
+  const hostname = url.searchParams.get("hostname");
+  if (tokenHash !== null && hostname !== null) {
+    token.tokenHash = tokenHash;
+    token.hostname = hostname;
+  }
+  return token;
 }
 
 async function importCapKey(secret: string): Promise<CryptoKey> {
@@ -120,8 +191,9 @@ async function importCapKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-function capData(action: ResolveAction, id: string, exp: number): Uint8Array {
-  return new TextEncoder().encode(`${action}.${id}.${exp}`);
+function capData(action: ResolveAction, id: string, exp: number, binding?: string): Uint8Array {
+  const body = binding === undefined ? `${action}.${id}.${exp}` : `${action}.${id}.${exp}.${binding}`;
+  return new TextEncoder().encode(body);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -141,9 +213,10 @@ export async function signCapability(
   action: ResolveAction,
   id: string,
   exp: number,
+  binding?: string,
 ): Promise<string> {
   const key = await importCapKey(secret);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, capData(action, id, exp)));
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, capData(action, id, exp, binding)));
   return bytesToHex(sig);
 }
 
@@ -154,6 +227,7 @@ export async function verifyCapability(
   exp: number,
   sig: string,
   nowSec: () => number = defaultNowSec,
+  binding?: string,
 ): Promise<boolean> {
   if (!Number.isInteger(exp) || exp <= 0 || nowSec() > exp) {
     return false;
@@ -163,7 +237,7 @@ export async function verifyCapability(
   }
   try {
     const key = await importCapKey(secret);
-    return await crypto.subtle.verify("HMAC", key, hexToBytes(sig), capData(action, id, exp));
+    return await crypto.subtle.verify("HMAC", key, hexToBytes(sig), capData(action, id, exp, binding));
   } catch {
     return false;
   }
@@ -175,10 +249,17 @@ export async function issueCapabilityLink(opts: {
   action: ResolveAction;
   id: string;
   exp: number;
+  binding?: CapabilityBinding;
 }): Promise<string> {
-  const sig = await signCapability(opts.secret, opts.action, opts.id, opts.exp);
+  const binding = opts.binding ? capBinding(opts.binding.tokenHash, opts.binding.hostname) : undefined;
+  const sig = await signCapability(opts.secret, opts.action, opts.id, opts.exp, binding);
   const base = (opts.baseUrl ?? "").replace(/\/+$/, "");
-  return `${base}/api/enroll/${opts.action}?id=${encodeURIComponent(opts.id)}&exp=${opts.exp}&sig=${sig}`;
+  let link =
+    `${base}/api/enroll/${opts.action}?id=${encodeURIComponent(opts.id)}&exp=${opts.exp}&sig=${sig}`;
+  if (opts.binding) {
+    link += `&token_hash=${encodeURIComponent(opts.binding.tokenHash)}&hostname=${encodeURIComponent(opts.binding.hostname)}`;
+  }
+  return link;
 }
 
 export function enrollPingText(
@@ -317,6 +398,10 @@ export async function requestEnrollment(
   nowSec: () => number = defaultNowSec,
   config: EnrollConfig = {},
 ): Promise<{ status: EnrollStatus; id: string; rotated: boolean }> {
+  const suffixes = config.hostSuffixes ?? DEFAULT_HOST_SUFFIXES;
+  if (!isPinnedHostname(body.hostname, suffixes)) {
+    throw new Error(`enroll: bad_request (hostname "${body.hostname}" not allowed)`);
+  }
   const known = store.getBox(body.id);
   if (known && (await tokenMatches(body.enroll_token, known.heartbeat_token_hash))) {
     // Bound-token fast path. A supplied admin_token is a rotation, never a
@@ -354,20 +439,25 @@ export async function requestEnrollment(
     sealed = await sealAdminToken(config.sealKey, body.admin_token);
   }
   const now = nowSec();
+  const tokenHash = await hashToken(body.enroll_token);
   store.putPending({
     id: body.id,
     hostname: body.hostname,
-    heartbeat_token_hash: await hashToken(body.enroll_token),
+    heartbeat_token_hash: tokenHash,
     admin_token_sealed: sealed,
     first_seen: now,
   });
   const exp = now + CAPABILITY_TTL_SEC;
+  // Bind the pending token hash + hostname into both links so a later
+  // overwrite invalidates these (approval TOCTOU: resolve re-checks).
+  const binding: CapabilityBinding = { tokenHash, hostname: body.hostname };
   const approve = await issueCapabilityLink({
     secret: config.capSecret,
     baseUrl: config.baseUrl,
     action: "approve",
     id: body.id,
     exp,
+    binding,
   });
   const deny = await issueCapabilityLink({
     secret: config.capSecret,
@@ -375,6 +465,7 @@ export async function requestEnrollment(
     action: "deny",
     id: body.id,
     exp,
+    binding,
   });
   if (!config.baseUrl) {
     console.error("enroll: public base URL not configured; ping carries relative links");
@@ -383,13 +474,35 @@ export async function requestEnrollment(
   return { status: "pending", id: body.id, rotated: false };
 }
 
-export async function approveEnrollment(store: EnrollStore, id: string): Promise<BoxRow | null> {
+async function noopNotify(): Promise<void> {}
+
+function bindingMatches(pending: PendingRow, expected: CapabilityBinding): boolean {
+  return pending.heartbeat_token_hash === expected.tokenHash && pending.hostname === expected.hostname;
+}
+
+export async function approveEnrollment(
+  store: EnrollStore,
+  id: string,
+  notify: NotifyFn = noopNotify,
+  nowSec: () => number = defaultNowSec,
+  expected?: CapabilityBinding,
+): Promise<BoxRow | null> {
   const pending = store.getPending(id);
   if (!pending) {
     return null;
   }
+  // TOCTOU close: a link issued before a pending overwrite carries the old
+  // token hash/hostname. Fail closed rather than binding the attacker's row.
+  if (expected && !bindingMatches(pending, expected)) {
+    throw new Error("enroll: forbidden (capability binding mismatch)");
+  }
   const known = store.getBox(id);
   const sealed = pending.admin_token_sealed || known?.admin_token_sealed || "";
+  // Pending-path rotation: the pending row carries a sealed admin token that
+  // differs from the bound one. Same rule as the fast path — ping the owner
+  // (id + time, never tokens) instead of swapping silently.
+  const rotated = !!known && pending.admin_token_sealed !== "" && pending.admin_token_sealed !== known.admin_token_sealed;
+  const now = nowSec();
   const row: BoxRow = known
     ? { ...known, heartbeat_token_hash: pending.heartbeat_token_hash, admin_token_sealed: sealed, enrolled: 1 }
     : {
@@ -407,14 +520,29 @@ export async function approveEnrollment(store: EnrollStore, id: string): Promise
   // Synchronous write block: bind + clear pending together, no interleave.
   store.putBox(row);
   store.deletePending(id);
+  if (rotated) {
+    await notify(rotationPingText(id, now));
+  }
   return row;
 }
 
-export function denyEnrollment(store: EnrollStore, id: string): boolean {
-  if (!store.getPending(id)) {
+export function denyEnrollment(
+  store: EnrollStore,
+  id: string,
+  nowSec: () => number = defaultNowSec,
+  expected?: CapabilityBinding,
+): boolean {
+  const pending = store.getPending(id);
+  if (!pending) {
     return false;
   }
+  if (expected && !bindingMatches(pending, expected)) {
+    throw new Error("enroll: forbidden (capability binding mismatch)");
+  }
   store.deletePending(id);
+  // A deny that leaves no record is unauditable: persist who was refused and
+  // when (id + timestamp only, never tokens).
+  store.putDenial({ id, denied_at: nowSec() });
   return true;
 }
 
@@ -433,7 +561,7 @@ export async function handleEnrollRequest(
   nowSec: () => number = defaultNowSec,
   config: EnrollConfig = {},
 ): Promise<Response> {
-  const body = parseEnrollBody(await readJson(request));
+  const body = parseEnrollBody(await readJson(request), config.hostSuffixes ?? DEFAULT_HOST_SUFFIXES);
   if (!body) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
@@ -446,6 +574,11 @@ export async function handleEnrollRequest(
       rotated: result.rotated,
     });
   } catch (err) {
+    // Defense in depth: direct requestEnrollment callers hit the hostname
+    // guard too; surface those as 400, real misconfigurations as 500.
+    if (err instanceof Error && err.message.includes("bad_request")) {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
     console.error(err instanceof Error ? err.message : "enroll: misconfigured");
     return Response.json({ error: "misconfigured" }, { status: 500 });
   }
@@ -453,13 +586,16 @@ export async function handleEnrollRequest(
 
 // Capability-gated resolve: malformed params → 400, missing server secret →
 // loud 500, bad/expired/forged signature → 403. Signature + expiry verify
-// BEFORE any state is read or resolved.
+// BEFORE any state is read or resolved. When the link carries a binding
+// (token_hash + hostname, issued for enrollment pends), the MAC covers it;
+// the approve/deny step then re-checks equality against the current pending
+// row and fails closed on mismatch (TOCTOU).
 async function verifyResolve(
   request: Request,
   action: ResolveAction,
   config: EnrollConfig,
   nowSec: () => number,
-): Promise<{ id: string } | Response> {
+): Promise<{ id: string; binding?: CapabilityBinding } | Response> {
   const token = parseCapabilityQuery(new URL(request.url));
   if (!token) {
     return Response.json({ error: "bad_request" }, { status: 400 });
@@ -468,10 +604,24 @@ async function verifyResolve(
     console.error("enroll: capability secret not configured");
     return Response.json({ error: "misconfigured" }, { status: 500 });
   }
-  if (!(await verifyCapability(config.capSecret, action, token.id, token.exp, token.sig, nowSec))) {
+  const binding =
+    token.tokenHash !== undefined && token.hostname !== undefined
+      ? capBinding(token.tokenHash, token.hostname)
+      : undefined;
+  if (!(await verifyCapability(config.capSecret, action, token.id, token.exp, token.sig, nowSec, binding))) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
+  if (binding !== undefined && token.tokenHash !== undefined && token.hostname !== undefined) {
+    return { id: token.id, binding: { tokenHash: token.tokenHash, hostname: token.hostname } };
+  }
   return { id: token.id };
+}
+
+function forbiddenResponse(err: unknown): Response | null {
+  if (err instanceof Error && err.message.includes("forbidden")) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+  return null;
 }
 
 export async function handleEnrollApprove(
@@ -479,16 +629,21 @@ export async function handleEnrollApprove(
   store: EnrollStore,
   config: EnrollConfig = {},
   nowSec: () => number = defaultNowSec,
+  notify: NotifyFn = noopNotify,
 ): Promise<Response> {
   const verified = await verifyResolve(request, "approve", config, nowSec);
   if (verified instanceof Response) {
     return verified;
   }
-  const row = await approveEnrollment(store, verified.id);
-  if (!row) {
-    return Response.json({ error: "no_pending" }, { status: 404 });
+  try {
+    const row = await approveEnrollment(store, verified.id, notify, nowSec, verified.binding);
+    if (!row) {
+      return Response.json({ error: "no_pending" }, { status: 404 });
+    }
+    return Response.json({ status: "approved", id: row.id, enrolled: true });
+  } catch (err) {
+    return forbiddenResponse(err) ?? Response.json({ error: "misconfigured" }, { status: 500 });
   }
-  return Response.json({ status: "approved", id: row.id, enrolled: true });
 }
 
 export async function handleEnrollDeny(
@@ -501,8 +656,12 @@ export async function handleEnrollDeny(
   if (verified instanceof Response) {
     return verified;
   }
-  if (!denyEnrollment(store, verified.id)) {
-    return Response.json({ error: "no_pending" }, { status: 404 });
+  try {
+    if (!denyEnrollment(store, verified.id, nowSec, verified.binding)) {
+      return Response.json({ error: "no_pending" }, { status: 404 });
+    }
+    return Response.json({ status: "denied", id: verified.id });
+  } catch (err) {
+    return forbiddenResponse(err) ?? Response.json({ error: "misconfigured" }, { status: 500 });
   }
-  return Response.json({ status: "denied", id: verified.id });
 }

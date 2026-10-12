@@ -23,7 +23,7 @@ class MemStore implements AuditStore {
   getBox(id: string): BoxRow | undefined {
     return this.boxes.get(id);
   }
-  listBackends(): BoxRow[] {
+  listBoxes(): BoxRow[] {
     return [...this.boxes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
   }
   getTombstone(boxId: string): TombstoneRow | undefined {

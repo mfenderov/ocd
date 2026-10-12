@@ -3,9 +3,12 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   fetchBox,
   fetchUrlPinned,
+  handleHeartbeat,
   hashToken,
   pinnedHostname,
   pinnedRegistry,
+  reenrollPingText,
+  REENROLL_SEQ_THRESHOLD,
 } from "../src/heartbeat";
 import type { BoxRow } from "../src/state";
 
@@ -159,5 +162,102 @@ describe("heartbeat ingest", () => {
     await expect(
       runInDurableObject(stub, async (instance) => instance.pinnedHostname("ghost")),
     ).rejects.toThrow();
+  });
+});
+
+describe("seq-reset re-enroll signal", () => {
+  const TOKEN = "hb-reenroll-token-1";
+
+  class HbMemStore {
+    boxes = new Map<string, BoxRow>();
+    constructor(box: BoxRow) {
+      this.boxes.set(box.id, { ...box });
+    }
+    getBox(id: string): BoxRow | undefined {
+      return this.boxes.get(id);
+    }
+    putBox(box: BoxRow): void {
+      this.boxes.set(box.id, { ...box });
+    }
+  }
+
+  async function resetStore(id: string, lastSeq: number): Promise<HbMemStore> {
+    return new HbMemStore({
+      id,
+      hostname: `${id}.buyallmemes.com`,
+      heartbeat_token_hash: await hashToken(TOKEN),
+      admin_token_hash: "",
+      admin_token_sealed: "",
+      epoch: 1,
+      last_seq: lastSeq,
+      last_ts: 9000,
+      last_seen: 1700000000,
+      enrolled: 1,
+    });
+  }
+
+  function hbRequest(id: string, seq: number): Request {
+    return new Request("https://fleet.local/api/heartbeat", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ id, seq, box_now: 9999, epoch: 1 }),
+    });
+  }
+
+  it("low incoming seq on stale_seq 409s with re_enroll_required + exactly one ping", async () => {
+    const store = await resetStore("hb-reset", 500);
+    const pings: string[] = [];
+    const res = await handleHeartbeat(hbRequest("hb-reset", 1), store, () => 1700000400, undefined, async (id: string) => {
+      pings.push(reenrollPingText(id));
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "stale_seq", code: "re_enroll_required" });
+    expect(pings).toHaveLength(1);
+    expect(pings[0]).toContain("hb-reset");
+    expect(pings[0]).not.toContain(TOKEN);
+    // Nothing accepted: presence untouched, still bricked on retry, still pinging.
+    expect(store.getBox("hb-reset")?.last_seq).toBe(500);
+  });
+
+  it("threshold-boundary seq still signals; high stale_seq 409s silently", async () => {
+    const store = await resetStore("hb-edge", 500);
+    const pings: string[] = [];
+    const onReenroll = async (id: string) => {
+      pings.push(reenrollPingText(id));
+    };
+    const edge = await handleHeartbeat(hbRequest("hb-edge", REENROLL_SEQ_THRESHOLD), store, () => 1700000400, undefined, onReenroll);
+    expect(edge.status).toBe(409);
+    expect(await edge.json()).toMatchObject({ code: "re_enroll_required" });
+    expect(pings).toHaveLength(1);
+    const high = await handleHeartbeat(hbRequest("hb-edge", 499), store, () => 1700000400, undefined, onReenroll);
+    expect(high.status).toBe(409);
+    expect(await high.json()).toEqual({ error: "stale_seq" });
+    expect(pings).toHaveLength(1);
+    expect(store.getBox("hb-edge")?.last_seq).toBe(500);
+  });
+
+  it("wrong token never signals re-enroll (401 + mismatch path only)", async () => {
+    const store = await resetStore("hb-authe", 500);
+    const pings: string[] = [];
+    const mismatches: string[] = [];
+    const bad = new Request("https://fleet.local/api/heartbeat", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer wrong" },
+      body: JSON.stringify({ id: "hb-authe", seq: 1, box_now: 9999, epoch: 1 }),
+    });
+    const res = await handleHeartbeat(
+      bad,
+      store,
+      () => 1700000400,
+      async (id: string) => {
+        mismatches.push(id);
+      },
+      async (id: string) => {
+        pings.push(reenrollPingText(id));
+      },
+    );
+    expect(res.status).toBe(401);
+    expect(mismatches).toEqual(["hb-authe"]);
+    expect(pings).toHaveLength(0);
   });
 });

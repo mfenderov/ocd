@@ -47,7 +47,7 @@ export type AuditRow = MergedAuditRow | AuditErrorRow;
 
 export interface AuditStore {
   getBox(id: string): BoxRow | undefined;
-  listBackends(): BoxRow[];
+  listBoxes(): BoxRow[];
   getTombstone(boxId: string): TombstoneRow | undefined;
 }
 
@@ -184,7 +184,7 @@ export async function fetchAudits(
       throw new UnknownBoxError(opts.boxId);
     }
   }
-  const targets = store.listBackends().filter((b) => b.enrolled === 1 && (!opts.boxId || b.id === opts.boxId));
+  const targets = store.listBoxes().filter((b) => b.enrolled === 1 && (!opts.boxId || b.id === opts.boxId));
   const taintedBy = new Map(targets.map((box) => [box.id, isTainted(box.epoch, store.getTombstone(box.id))]));
   const settled = await Promise.allSettled(
     targets.map((box) => fetchOneBox(box, n, taintedBy.get(box.id) ?? false, deps)),

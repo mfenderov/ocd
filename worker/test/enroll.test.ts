@@ -2,18 +2,22 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveEnrollment,
+  capBinding,
   denyEnrollment,
   handleEnrollApprove,
   handleEnrollDeny,
   handleEnrollRequest,
+  isPinnedHostname,
   issueCapabilityLink,
   mismatchAlertText,
   parseEnrollBody,
+  parseHostSuffixes,
   requestEnrollment,
   sealAdminToken,
   sendTelegramMessage,
   unsealAdminToken,
   verifyCapability,
+  type CapabilityBinding,
   type EnrollConfig,
   type EnrollStore,
   type NotifyFn,
@@ -21,7 +25,7 @@ import {
 } from "../src/enroll";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
-import type { BoxRow } from "../src/state";
+import type { BoxRow, DenialRow } from "../src/state";
 
 const NEW_TOKEN = "enroll-brand-new-token-1";
 const KNOWN_TOKEN = "enroll-known-token-1";
@@ -31,6 +35,7 @@ const ADMIN_TOKEN = "enroll-admin-token-1";
 class MemStore implements EnrollStore {
   boxes = new Map<string, BoxRow>();
   pending = new Map<string, PendingRow>();
+  denials = new Map<string, DenialRow>();
   getBox(id: string): BoxRow | undefined {
     return this.boxes.get(id);
   }
@@ -46,6 +51,12 @@ class MemStore implements EnrollStore {
   deletePending(id: string): void {
     this.pending.delete(id);
   }
+  getDenial(id: string): DenialRow | undefined {
+    return this.denials.get(id);
+  }
+  putDenial(row: DenialRow): void {
+    this.denials.set(row.id, { ...row });
+  }
 }
 
 function recorder(): { texts: string[]; notify: NotifyFn } {
@@ -59,7 +70,7 @@ function recorder(): { texts: string[]; notify: NotifyFn } {
 async function seedEnrolled(store: MemStore, id: string): Promise<BoxRow> {
   const box: BoxRow = {
     id,
-    hostname: `${id}.example.com`,
+    hostname: `${id}.buyallmemes.com`,
     heartbeat_token_hash: await hashToken(KNOWN_TOKEN),
     admin_token_hash: await hashToken(ADMIN_TOKEN),
     admin_token_sealed: "",
@@ -103,19 +114,19 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     const result = await requestEnrollment(
       store,
-      { id: "nb-1", hostname: "nb-1.example.com", enroll_token: NEW_TOKEN },
+      { id: "nb-1", hostname: "nb-1.buyallmemes.com", enroll_token: NEW_TOKEN },
       rec.notify,
       () => 1700000100,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     expect(result).toEqual({ status: "pending", id: "nb-1", rotated: false });
     const row = store.getPending("nb-1");
-    expect(row).toMatchObject({ id: "nb-1", hostname: "nb-1.example.com", first_seen: 1700000100 });
+    expect(row).toMatchObject({ id: "nb-1", hostname: "nb-1.buyallmemes.com", first_seen: 1700000100 });
     expect(row?.heartbeat_token_hash).toBe(await hashToken(NEW_TOKEN));
     expect(row?.heartbeat_token_hash).not.toContain(NEW_TOKEN);
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).toContain("nb-1");
-    expect(rec.texts[0]).toContain("nb-1.example.com");
+    expect(rec.texts[0]).toContain("nb-1.buyallmemes.com");
     expect(rec.texts[0]).toContain("/api/enroll/approve");
     expect(rec.texts[0]).toContain("/api/enroll/deny");
     expect(rec.texts[0]).not.toContain(NEW_TOKEN);
@@ -127,7 +138,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     const result = await requestEnrollment(
       store,
-      { id: "bound-1", hostname: "bound-1.example.com", enroll_token: KNOWN_TOKEN },
+      { id: "bound-1", hostname: "bound-1.buyallmemes.com", enroll_token: KNOWN_TOKEN },
       rec.notify,
     );
     expect(result).toEqual({ status: "enrolled", id: "bound-1", rotated: false });
@@ -141,7 +152,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     const result = await requestEnrollment(
       store,
-      { id: "clone-1", hostname: "clone-1.example.com", enroll_token: CLONE_TOKEN },
+      { id: "clone-1", hostname: "clone-1.buyallmemes.com", enroll_token: CLONE_TOKEN },
       rec.notify,
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
@@ -157,13 +168,13 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     await requestEnrollment(
       store,
-      { id: "fresh-1", hostname: "fresh-1.example.com", enroll_token: NEW_TOKEN },
+      { id: "fresh-1", hostname: "fresh-1.buyallmemes.com", enroll_token: NEW_TOKEN },
       rec.notify,
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     const row = await approveEnrollment(store, "fresh-1");
-    expect(row).toMatchObject({ id: "fresh-1", hostname: "fresh-1.example.com", enrolled: 1 });
+    expect(row).toMatchObject({ id: "fresh-1", hostname: "fresh-1.buyallmemes.com", enrolled: 1 });
     expect(await tokenMatches(NEW_TOKEN, row?.heartbeat_token_hash ?? "")).toBe(true);
     expect(store.getPending("fresh-1")).toBeUndefined();
     expect(rec.texts[0]).toContain("/api/enroll/approve?id=fresh-1&exp=");
@@ -179,7 +190,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     await requestEnrollment(
       store,
-      { id: "rotate-1", hostname: "rotate-1.example.com", enroll_token: CLONE_TOKEN },
+      { id: "rotate-1", hostname: "rotate-1.buyallmemes.com", enroll_token: CLONE_TOKEN },
       rec.notify,
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
@@ -198,7 +209,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     const rec = recorder();
     await requestEnrollment(
       store,
-      { id: "deny-1", hostname: "deny-1.example.com", enroll_token: NEW_TOKEN },
+      { id: "deny-1", hostname: "deny-1.buyallmemes.com", enroll_token: NEW_TOKEN },
       rec.notify,
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
@@ -214,16 +225,16 @@ describe("enrollment approve-on-sight (unit)", () => {
     const store = new MemStore();
     const rec = recorder();
     const badEnroll: unknown[] = [
-      { hostname: "x.example.com", enroll_token: NEW_TOKEN },
-      { id: "", hostname: "x.example.com", enroll_token: NEW_TOKEN },
+      { hostname: "x.buyallmemes.com", enroll_token: NEW_TOKEN },
+      { id: "", hostname: "x.buyallmemes.com", enroll_token: NEW_TOKEN },
       { id: "x", enroll_token: NEW_TOKEN },
       { id: "x", hostname: "", enroll_token: NEW_TOKEN },
       { id: "x", hostname: "https://evil.example/pwn", enroll_token: NEW_TOKEN },
       { id: "x", hostname: "evil example.com", enroll_token: NEW_TOKEN },
-      { id: "x", hostname: "x.example.com" },
-      { id: "x", hostname: "x.example.com", enroll_token: "" },
-      { id: "x", hostname: "x.example.com", enroll_token: NEW_TOKEN, admin_token: "" },
-      { id: "x", hostname: "x.example.com", enroll_token: NEW_TOKEN, admin_token: 7 },
+      { id: "x", hostname: "x.buyallmemes.com" },
+      { id: "x", hostname: "x.buyallmemes.com", enroll_token: "" },
+      { id: "x", hostname: "x.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: "" },
+      { id: "x", hostname: "x.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: 7 },
       null,
       [],
     ];
@@ -342,7 +353,7 @@ describe("enroll routes through the worker + DO", () => {
     const res = await SELF.fetch("https://fleet.local/api/enroll", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-new", hostname: "enr-new.example.com", enroll_token: NEW_TOKEN }),
+      body: JSON.stringify({ id: "enr-new", hostname: "enr-new.buyallmemes.com", enroll_token: NEW_TOKEN }),
     });
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ error: "misconfigured" });
@@ -414,7 +425,7 @@ describe("approve/deny capability links", () => {
     const store = new MemStore();
     await requestEnrollment(
       store,
-      { id, hostname: `${id}.example.com`, enroll_token: NEW_TOKEN },
+      { id, hostname: `${id}.buyallmemes.com`, enroll_token: NEW_TOKEN },
       async () => {},
       fixedNow,
       TEST_SECRETS,
@@ -427,15 +438,15 @@ describe("approve/deny capability links", () => {
     const rec = recorder();
     await requestEnrollment(
       store,
-      { id: "cap-1", hostname: "cap-1.example.com", enroll_token: NEW_TOKEN },
+      { id: "cap-1", hostname: "cap-1.buyallmemes.com", enroll_token: NEW_TOKEN },
       rec.notify,
       fixedNow,
-      { ...TEST_SECRETS, baseUrl: "https://fleet.example.com" },
+      { ...TEST_SECRETS, baseUrl: "https://fleet.buyallmemes.com" },
     );
     expect(rec.texts).toHaveLength(1);
     const ping = rec.texts[0];
-    expect(ping).toContain(`https://fleet.example.com/api/enroll/approve?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
-    expect(ping).toContain(`https://fleet.example.com/api/enroll/deny?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
+    expect(ping).toContain(`https://fleet.buyallmemes.com/api/enroll/approve?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
+    expect(ping).toContain(`https://fleet.buyallmemes.com/api/enroll/deny?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
     expect(ping).not.toContain('POST /api/enroll/approve {"id"');
     expect(ping).not.toContain(NEW_TOKEN);
   });
@@ -564,7 +575,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     const rec = recorder();
     await requestEnrollment(
       store,
-      { id: "seal-1", hostname: "seal-1.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+      { id: "seal-1", hostname: "seal-1.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
       rec.notify,
       fixedNow,
       TEST_SECRETS,
@@ -587,7 +598,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     await expect(
       requestEnrollment(
         store,
-        { id: "seal-loud", hostname: "seal-loud.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+        { id: "seal-loud", hostname: "seal-loud.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
         async () => {},
         fixedNow,
         { capSecret: CAP_TEST_KEY },
@@ -600,7 +611,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     const store = new MemStore();
     const result = await requestEnrollment(
       store,
-      { id: "seal-none", hostname: "seal-none.example.com", enroll_token: NEW_TOKEN },
+      { id: "seal-none", hostname: "seal-none.buyallmemes.com", enroll_token: NEW_TOKEN },
       async () => {},
       fixedNow,
       { capSecret: CAP_TEST_KEY },
@@ -616,7 +627,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     const store = new MemStore();
     await requestEnrollment(
       store,
-      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+      { id: "seal-re", hostname: "seal-re.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
       async () => {},
       fixedNow,
       TEST_SECRETS,
@@ -624,7 +635,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     const first = await approveEnrollment(store, "seal-re");
     await requestEnrollment(
       store,
-      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: CLONE_TOKEN },
+      { id: "seal-re", hostname: "seal-re.buyallmemes.com", enroll_token: CLONE_TOKEN },
       async () => {},
       fixedNow,
       TEST_SECRETS,
@@ -633,7 +644,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
     expect(kept?.admin_token_sealed).toBe(first?.admin_token_sealed);
     await requestEnrollment(
       store,
-      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: "rotated-enroll-token-3", admin_token: "rotated-admin-plain-8" },
+      { id: "seal-re", hostname: "seal-re.buyallmemes.com", enroll_token: "rotated-enroll-token-3", admin_token: "rotated-admin-plain-8" },
       async () => {},
       fixedNow,
       TEST_SECRETS,
@@ -651,7 +662,7 @@ describe("enrolled fast-path admin rotation", () => {
     const rec = recorder();
     const result = await requestEnrollment(
       store,
-      { id: "rot-1", hostname: "rot-1.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+      { id: "rot-1", hostname: "rot-1.buyallmemes.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
       rec.notify,
       fixedNow,
       TEST_SECRETS,
@@ -668,7 +679,7 @@ describe("enrolled fast-path admin rotation", () => {
     expect(rec.texts[0]).not.toContain("fresh-admin-rotation-1");
     const again = await requestEnrollment(
       store,
-      { id: "rot-1", hostname: "rot-1.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+      { id: "rot-1", hostname: "rot-1.buyallmemes.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
       rec.notify,
       fixedNow,
       TEST_SECRETS,
@@ -683,7 +694,7 @@ describe("enrolled fast-path admin rotation", () => {
     store.putBox({ ...box, admin_token_sealed: await sealAdminToken(SEAL_KEY, "old-admin-1") });
     const result = await requestEnrollment(
       store,
-      { id: "rot-2", hostname: "rot-2.example.com", enroll_token: KNOWN_TOKEN, admin_token: "new-admin-2" },
+      { id: "rot-2", hostname: "rot-2.buyallmemes.com", enroll_token: KNOWN_TOKEN, admin_token: "new-admin-2" },
       async () => {},
       fixedNow,
       TEST_SECRETS,
@@ -698,7 +709,7 @@ describe("enrolled fast-path admin rotation", () => {
     await expect(
       requestEnrollment(
         store,
-        { id: "rot-3", hostname: "rot-3.example.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
+        { id: "rot-3", hostname: "rot-3.buyallmemes.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
         async () => {},
         fixedNow,
         { capSecret: CAP_TEST_KEY },
@@ -714,7 +725,7 @@ describe("enrolled fast-path admin rotation", () => {
     const res = await handleEnrollRequest(
       jsonRequest("/enroll", {
         id: "rot-4",
-        hostname: "rot-4.example.com",
+        hostname: "rot-4.buyallmemes.com",
         enroll_token: KNOWN_TOKEN,
         admin_token: "fresh-admin-rotation-2",
       }),
@@ -725,5 +736,296 @@ describe("enrolled fast-path admin rotation", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "enrolled", id: "rot-4", enrolled: true, rotated: true });
+  });
+});
+
+describe("enrollment hostname policy", () => {
+  const good = (hostname: string) => ({ id: "h-1", hostname, enroll_token: NEW_TOKEN });
+
+  it("accepts multi-label names under the default suffix, including the bare suffix", () => {
+    for (const hostname of ["box1.buyallmemes.com", "deep.sub.buyallmemes.com", "buyallmemes.com"]) {
+      expect(isPinnedHostname(hostname)).toBe(true);
+      expect(parseEnrollBody(good(hostname))).toMatchObject({ hostname });
+    }
+  });
+
+  it("rejects IP literals, localhost, single-label, .local, and off-suffix names", () => {
+    const bad = [
+      "1.2.3.4",
+      "10.0.0.5",
+      "127.0.0.1",
+      "::1",
+      "localhost",
+      "LOCALHOST",
+      "box.localhost",
+      "mybox",
+      "printer.local",
+      "evil.com",
+      "x.buyallmemes.com.evil.com",
+      "notbuyallmemes.com",
+      "buyallmemes.com.",
+    ];
+    for (const hostname of bad) {
+      expect(isPinnedHostname(hostname)).toBe(false);
+      expect(parseEnrollBody(good(hostname))).toBeNull();
+    }
+  });
+
+  it("suffix allowlist override accepts other suffixes and still rejects the rest", () => {
+    expect(parseHostSuffixes(undefined)).toEqual(["buyallmemes.com"]);
+    expect(parseHostSuffixes("")).toEqual(["buyallmemes.com"]);
+    expect(parseHostSuffixes("Example.COM , other.test ")).toEqual(["example.com", "other.test"]);
+    expect(parseEnrollBody(good("db.example.com"), ["example.com"])).toMatchObject({
+      hostname: "db.example.com",
+    });
+    expect(parseEnrollBody(good("db.example.com"))).toBeNull();
+    expect(parseEnrollBody(good("1.2.3.4"), ["1.2.3.4"])).toBeNull();
+    expect(parseEnrollBody(good("other.test"), ["example.com"])).toBeNull();
+  });
+
+  it("handler 400s intake violations without touching state or pinging", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    for (const hostname of ["9.9.9.9", "mybox", "box.local", "localhost", "evil.com"]) {
+      const res = await handleEnrollRequest(
+        jsonRequest("/enroll", { id: "h-bad", hostname, enroll_token: NEW_TOKEN }),
+        store,
+        rec.notify,
+        fixedNow,
+        TEST_SECRETS,
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(store.pending.size).toBe(0);
+    expect(rec.texts).toHaveLength(0);
+  });
+
+  it("handler honors the hostSuffixes override", async () => {
+    const store = new MemStore();
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", { id: "h-ov", hostname: "db.example.com", enroll_token: NEW_TOKEN }),
+      store,
+      async () => {},
+      fixedNow,
+      { ...TEST_SECRETS, hostSuffixes: ["example.com"] },
+    );
+    expect(res.status).toBe(200);
+    expect(store.getPending("h-ov")?.hostname).toBe("db.example.com");
+  });
+
+  it("requestEnrollment enforces the policy for direct callers", async () => {
+    const store = new MemStore();
+    await expect(
+      requestEnrollment(store, good("10.1.2.3"), async () => {}, fixedNow, TEST_SECRETS),
+    ).rejects.toThrow("bad_request");
+    expect(store.getPending("h-1")).toBeUndefined();
+  });
+});
+
+describe("pending-path rotation ping", () => {
+  it("approve that swaps the sealed admin token pings the owner once", async () => {
+    const store = new MemStore();
+    const box = await seedEnrolled(store, "rot-p");
+    store.putBox({ ...box, admin_token_sealed: await sealAdminToken(SEAL_KEY, "old-admin-1") });
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "rot-p", hostname: "rot-p.buyallmemes.com", enroll_token: CLONE_TOKEN, admin_token: "new-admin-9" },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(rec.texts).toHaveLength(1);
+    const row = await approveEnrollment(store, "rot-p", rec.notify, fixedNow);
+    expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe("new-admin-9");
+    expect(rec.texts).toHaveLength(2);
+    expect(rec.texts[1]).toContain("rot-p");
+    expect(rec.texts[1]).toContain("admin token rotated");
+    expect(rec.texts[1]).not.toContain("new-admin-9");
+  });
+
+  it("approve that preserves the sealed value stays silent", async () => {
+    const store = new MemStore();
+    const box = await seedEnrolled(store, "rot-q");
+    const sealed = await sealAdminToken(SEAL_KEY, "keep-admin-1");
+    store.putBox({ ...box, admin_token_sealed: sealed });
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "rot-q", hostname: "rot-q.buyallmemes.com", enroll_token: CLONE_TOKEN },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const row = await approveEnrollment(store, "rot-q", rec.notify, fixedNow);
+    expect(row?.admin_token_sealed).toBe(sealed);
+    expect(rec.texts).toHaveLength(1);
+  });
+
+  it("first-time approve never pings rotation", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "rot-new", hostname: "rot-new.buyallmemes.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    await approveEnrollment(store, "rot-new", rec.notify, fixedNow);
+    expect(rec.texts).toHaveLength(1);
+  });
+});
+
+describe("deny leaves a marker row", () => {
+  it("denyEnrollment persists id + timestamp", async () => {
+    const store = new MemStore();
+    await requestEnrollment(
+      store,
+      { id: "deny-m", hostname: "deny-m.buyallmemes.com", enroll_token: NEW_TOKEN },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect(denyEnrollment(store, "deny-m", fixedNow)).toBe(true);
+    expect(store.getPending("deny-m")).toBeUndefined();
+    expect(store.getDenial("deny-m")).toEqual({ id: "deny-m", denied_at: FIXED_NOW });
+    expect(denyEnrollment(store, "deny-m", fixedNow)).toBe(false);
+  });
+
+  it("deny through the capability handler persists the marker", async () => {
+    const store = new MemStore();
+    await requestEnrollment(
+      store,
+      { id: "deny-h", hostname: "deny-h.buyallmemes.com", enroll_token: NEW_TOKEN },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const res = await handleEnrollDeny(
+      getRequest(await linkFor("deny", "deny-h", FIXED_NOW + 900)),
+      store,
+      CAPS,
+      fixedNow,
+    );
+    expect(res.status).toBe(200);
+    expect(store.getDenial("deny-h")).toEqual({ id: "deny-h", denied_at: FIXED_NOW });
+    expect(store.getBox("deny-h")).toBeUndefined();
+  });
+});
+
+describe("capability binding (approval TOCTOU)", () => {
+  function approveLink(ping: string): string {
+    const match = ping.match(/approve: (\S+)/);
+    if (!match) {
+      throw new Error("test: no approve link in ping");
+    }
+    return match[1];
+  }
+
+  function denyLink(ping: string): string {
+    const match = ping.match(/deny: (\S+)/);
+    if (!match) {
+      throw new Error("test: no deny link in ping");
+    }
+    return match[1];
+  }
+
+  it("ping links bind the pending token hash + hostname into the MAC", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "bind-1", hostname: "bind-1.buyallmemes.com", enroll_token: NEW_TOKEN },
+      rec.notify,
+      fixedNow,
+      { ...TEST_SECRETS, baseUrl: "https://fleet.test" },
+    );
+    const pending = store.getPending("bind-1");
+    const url = new URL(approveLink(rec.texts[0]));
+    expect(url.searchParams.get("token_hash")).toBe(pending?.heartbeat_token_hash);
+    expect(url.searchParams.get("hostname")).toBe("bind-1.buyallmemes.com");
+    const binding: CapabilityBinding = {
+      tokenHash: pending?.heartbeat_token_hash ?? "",
+      hostname: pending?.hostname ?? "",
+    };
+    expect(
+      await verifyCapability(
+        CAP_TEST_KEY,
+        "approve",
+        "bind-1",
+        FIXED_NOW + 900,
+        url.searchParams.get("sig") ?? "",
+        fixedNow,
+        capBinding(binding.tokenHash, binding.hostname),
+      ),
+    ).toBe(true);
+    expect(
+      await verifyCapability(
+        CAP_TEST_KEY,
+        "approve",
+        "bind-1",
+        FIXED_NOW + 900,
+        url.searchParams.get("sig") ?? "",
+        fixedNow,
+        capBinding(await hashToken("other-token"), binding.hostname),
+      ),
+    ).toBe(false);
+  });
+
+  it("overwrite-then-approve-with-old-link fails closed; the fresh link still works", async () => {
+    const store = new MemStore();
+    const first = recorder();
+    await requestEnrollment(
+      store,
+      { id: "bind-2", hostname: "bind-2.buyallmemes.com", enroll_token: NEW_TOKEN },
+      first.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const oldLink = approveLink(first.texts[0]);
+    const second = recorder();
+    await requestEnrollment(
+      store,
+      { id: "bind-2", hostname: "bind-2.buyallmemes.com", enroll_token: CLONE_TOKEN },
+      second.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const stale = await handleEnrollApprove(getRequest(oldLink), store, CAPS, fixedNow);
+    expect(stale.status).toBe(403);
+    expect(await stale.json()).toMatchObject({ error: "forbidden" });
+    // Overwritten pending is untouched: still the new token, still pending.
+    expect(store.getPending("bind-2")?.heartbeat_token_hash).toBe(await hashToken(CLONE_TOKEN));
+    const fresh = await handleEnrollApprove(getRequest(approveLink(second.texts[0])), store, CAPS, fixedNow);
+    expect(fresh.status).toBe(200);
+    expect(await tokenMatches(CLONE_TOKEN, store.getBox("bind-2")?.heartbeat_token_hash ?? "")).toBe(true);
+  });
+
+  it("old deny link after overwrite is 403; the fresh deny link denies + marks", async () => {
+    const store = new MemStore();
+    const first = recorder();
+    await requestEnrollment(
+      store,
+      { id: "bind-3", hostname: "bind-3.buyallmemes.com", enroll_token: NEW_TOKEN },
+      first.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const oldDeny = denyLink(first.texts[0]);
+    const second = recorder();
+    await requestEnrollment(
+      store,
+      { id: "bind-3", hostname: "bind-3.buyallmemes.com", enroll_token: CLONE_TOKEN },
+      second.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    expect((await handleEnrollDeny(getRequest(oldDeny), store, CAPS, fixedNow)).status).toBe(403);
+    expect(store.getPending("bind-3")).toBeDefined();
+    const res = await handleEnrollDeny(getRequest(denyLink(second.texts[0])), store, CAPS, fixedNow);
+    expect(res.status).toBe(200);
+    expect(store.getPending("bind-3")).toBeUndefined();
+    expect(store.getDenial("bind-3")).toEqual({ id: "bind-3", denied_at: FIXED_NOW });
   });
 });

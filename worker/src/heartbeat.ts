@@ -119,9 +119,9 @@ export function checkReplay(
 }
 
 // Pinned-host registry: box id -> enrolled-time hostname. Build from
-// listBackends() rows; every future outbound box call must resolve through
-// this, never through heartbeat-supplied URLs (SSRF rule).
-export function pinnedRegistry(rows: BoxRow[]): Map<string, string> {
+// listBackends()/listBoxes() rows; every future outbound box call must
+// resolve through this, never through heartbeat-supplied URLs (SSRF rule).
+export function pinnedRegistry(rows: Array<Pick<BoxRow, "id" | "hostname">>): Map<string, string> {
   return new Map(rows.map((row) => [row.id, row.hostname]));
 }
 
@@ -182,6 +182,20 @@ function defaultNowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+// A box that loses its local DB restarts its seq counter at 1 while
+// presenting a still-valid token: every heartbeat then 409s as stale_seq
+// forever. A stale seq at or below this threshold is treated as a probable
+// seq reset — rejected (never accepted), but flagged so the owner can
+// re-enroll (which rebinds). Genuine replays of high seqs stay silent.
+export const REENROLL_SEQ_THRESHOLD = 10;
+
+export function reenrollPingText(id: string): string {
+  return (
+    `seq reset suspected: heartbeat for id="${id}" presented a valid token ` +
+    `with a reset-looking seq. The box may have lost its DB — re-enroll it to rebind.`
+  );
+}
+
 export async function handleHeartbeat(
   request: Request,
   store: HeartbeatStore,
@@ -191,6 +205,9 @@ export async function handleHeartbeat(
   // is not a secret; the presented token is never passed on or logged.
   // Contract: must never throw — alerting must not break the auth path.
   onMismatch?: (id: string) => Promise<void> | void,
+  // Fired when an AUTHENTICATED heartbeat looks like a post-DB-loss seq
+  // reset (stale_seq with a low incoming seq). Same never-throw contract.
+  onReenroll?: (id: string) => Promise<void> | void,
 ): Promise<Response> {
   let raw: unknown;
   try {
@@ -218,6 +235,13 @@ export async function handleHeartbeat(
   }
   const verdict = checkReplay(row, body.seq, body.box_now);
   if (verdict !== "ok") {
+    if (verdict === "stale_seq" && body.seq <= REENROLL_SEQ_THRESHOLD) {
+      // Probable DB loss, but the token is valid so this is the real box,
+      // not a replay attacker: say so explicitly and ping the owner. Never
+      // accept (the seq really is stale) — re-enrollment rebinds.
+      await onReenroll?.(row.id);
+      return Response.json({ error: verdict, code: "re_enroll_required" }, { status: 409 });
+    }
     return Response.json({ error: verdict }, { status: 409 });
   }
   const seen = nowSec();
