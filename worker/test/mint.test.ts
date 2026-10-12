@@ -1,12 +1,35 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { hashToken } from "../src/heartbeat";
 import { sealAdminToken } from "../src/enroll";
 import { handleMintLink, isTainted, type MintStore, type TombstoneRow } from "../src/mint";
 import type { BoxRow } from "../src/state";
+import { handleMintToken } from "../src/tokens";
 
 const SEAL_KEY = "test-seal-key-mint-4";
 const ADMIN_PLAIN = "mint-admin-plaintext-9";
+const BOOTSTRAP = "test-bootstrap-mint-route-2";
+
+// Guarded link routes need a link-scope token; one all-scopes token covers
+// this file (narrow-scope denials live in scopes.test.ts).
+let routeToken = "";
+
+beforeAll(async () => {
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  routeToken = await runInDurableObject(stub, async (instance) => {
+    const res = await handleMintToken(
+      new Request("https://fleet.local/tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${BOOTSTRAP}` },
+        body: JSON.stringify({}),
+      }),
+      instance,
+      { bootstrapSecret: BOOTSTRAP },
+    );
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { token: string }).token;
+  });
+});
 
 class MemStore implements MintStore {
   boxes = new Map<string, BoxRow>();
@@ -199,6 +222,7 @@ describe("mint route through the worker + DO", () => {
   it("POST /api/backends/:id/link on unknown box is 404", async () => {
     const res = await SELF.fetch("https://fleet.local/api/backends/route-ghost/link", {
       method: "POST",
+      headers: { authorization: `Bearer ${routeToken}` },
     });
     expect(res.status).toBe(404);
   });
@@ -222,7 +246,7 @@ describe("mint route through the worker + DO", () => {
     });
     const res = await SELF.fetch("https://fleet.local/api/backends/route-tainted/link", {
       method: "POST",
-      headers: { "idempotency-key": "route-key-1" },
+      headers: { "idempotency-key": "route-key-1", authorization: `Bearer ${routeToken}` },
     });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: "tainted" });

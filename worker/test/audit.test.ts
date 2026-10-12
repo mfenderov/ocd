@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   AUDIT_DEADLINE_MS,
   fetchAudits,
@@ -13,6 +13,30 @@ import { hashToken } from "../src/heartbeat";
 import app from "../src/index";
 import type { TombstoneRow } from "../src/mint";
 import type { BoxRow } from "../src/state";
+import { handleMintToken } from "../src/tokens";
+
+const BOOTSTRAP = "test-bootstrap-audit-route-2";
+
+// Guarded audit reads need an audit-scope token; one all-scopes token covers
+// this file (narrow-scope denials live in scopes.test.ts).
+let routeToken = "";
+
+beforeAll(async () => {
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  routeToken = await runInDurableObject(stub, async (instance) => {
+    const res = await handleMintToken(
+      new Request("https://fleet.local/tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${BOOTSTRAP}` },
+        body: JSON.stringify({}),
+      }),
+      instance,
+      { bootstrapSecret: BOOTSTRAP },
+    );
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { token: string }).token;
+  });
+});
 
 const SEAL_KEY = "test-seal-key-audit-6";
 const ADMIN_PLAIN = "audit-admin-plaintext-6";
@@ -322,7 +346,9 @@ describe("audit merge (unit)", () => {
 
 describe("audit routes through the worker + DO", () => {
   it("GET /api/audit?box=ghost is 404", async () => {
-    const res = await SELF.fetch("https://fleet.local/api/audit?box=route-audit-ghost");
+    const res = await SELF.fetch("https://fleet.local/api/audit?box=route-audit-ghost", {
+      headers: { authorization: `Bearer ${routeToken}` },
+    });
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: "unknown_box" });
   });
@@ -343,7 +369,9 @@ describe("audit routes through the worker + DO", () => {
         enrolled: 1,
       });
     });
-    const res = await SELF.fetch("https://fleet.local/api/audit?box=route-audit-known");
+    const res = await SELF.fetch("https://fleet.local/api/audit?box=route-audit-known", {
+      headers: { authorization: `Bearer ${routeToken}` },
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       rows: [
@@ -353,7 +381,9 @@ describe("audit routes through the worker + DO", () => {
   });
 
   it("unfiltered GET /api/audit is 200 with a rows array", async () => {
-    const res = await SELF.fetch("https://fleet.local/api/audit");
+    const res = await SELF.fetch("https://fleet.local/api/audit", {
+      headers: { authorization: `Bearer ${routeToken}` },
+    });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { rows: unknown[] };
     expect(Array.isArray(body.rows)).toBe(true);

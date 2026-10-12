@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { sealAdminToken } from "../src/enroll";
 import { handleHeartbeat, hashToken } from "../src/heartbeat";
 import app from "../src/index";
@@ -13,6 +13,30 @@ import {
 } from "../src/revoke";
 import type { BoxRow } from "../src/state";
 import type { TombstoneRow } from "../src/mint";
+import { handleMintToken } from "../src/tokens";
+
+const BOOTSTRAP = "test-bootstrap-revoke-route-2";
+
+// Guarded revoke routes need a revoke-scope token; one all-scopes token
+// covers this file (narrow-scope denials live in scopes.test.ts).
+let routeToken = "";
+
+beforeAll(async () => {
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  routeToken = await runInDurableObject(stub, async (instance) => {
+    const res = await handleMintToken(
+      new Request("https://fleet.local/tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${BOOTSTRAP}` },
+        body: JSON.stringify({}),
+      }),
+      instance,
+      { bootstrapSecret: BOOTSTRAP },
+    );
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { token: string }).token;
+  });
+});
 
 const SEAL_KEY = "test-seal-key-revoke-5";
 const ADMIN_PLAIN = "revoke-admin-plaintext-5";
@@ -347,7 +371,7 @@ describe("revoke routes through the worker + DO", () => {
   it("POST /api/backends/:id/revoke without confirm is 400", async () => {
     const res = await SELF.fetch("https://fleet.local/api/backends/route-revoke-nc/revoke", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${routeToken}` },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
@@ -356,7 +380,7 @@ describe("revoke routes through the worker + DO", () => {
   it("POST /api/backends/:id/revoke on unknown box is 404", async () => {
     const res = await SELF.fetch("https://fleet.local/api/backends/route-revoke-ghost/revoke", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${routeToken}` },
       body: JSON.stringify({ confirm: true }),
     });
     expect(res.status).toBe(404);
@@ -365,7 +389,7 @@ describe("revoke routes through the worker + DO", () => {
   it("POST /api/revoke-all without confirm is 400", async () => {
     const res = await SELF.fetch("https://fleet.local/api/revoke-all", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${routeToken}` },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
@@ -393,7 +417,7 @@ describe("revoke routes through the worker + DO", () => {
     });
     const res = await SELF.fetch("https://fleet.local/api/backends/route-revoke-off/revoke", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${routeToken}` },
       body: JSON.stringify({ confirm: true }),
     });
     expect(res.status).toBe(500);

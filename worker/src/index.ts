@@ -1,4 +1,7 @@
+import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute, unauthorized } from "./access";
+import { extractBearer } from "./heartbeat";
 import { FleetState } from "./state";
+import type { CliScope } from "./tokens";
 
 export { FleetState };
 
@@ -6,21 +9,11 @@ export interface Env {
   FLEET_STATE: DurableObjectNamespace;
 }
 
-async function handleBackends(env?: Env): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch("http://do/backends");
-}
-
 // Single choke point for every plain DO passthrough: binding check, then
-// forward method + mapped path + headers + body verbatim. Routes needing
-// more (query preservation in enroll/audit, id extraction in link, no
-// request at all in backends above) keep their own helpers.
+// forward method + mapped path + headers + body verbatim. Backends reads go
+// through here too so the Authorization/Access headers reach the DO scope
+// guard. Routes needing more (query preservation in enroll/audit, id
+// extraction in link) keep their own helpers.
 export async function forwardToDo(
   request: Request,
   env: Env | undefined,
@@ -80,8 +73,22 @@ async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Task 2 edge fast-path: a guarded route with no credential at all (no
+    // bearer, no Access assertion) cannot authorize — 401 without a DO
+    // roundtrip. Scope/JWT validity is enforced DO-side in state.ts. With no
+    // binding the route handlers still fail loud 500 below, so this yields
+    // to them when env is missing.
+    const scope: CliScope | null = scopeForEdgeRoute(request.method, url.pathname);
+    if (
+      scope &&
+      env?.FLEET_STATE &&
+      !extractBearer(request) &&
+      !request.headers.get(ACCESS_ASSERTION_HEADER)
+    ) {
+      return unauthorized();
+    }
     if (request.method === "GET" && url.pathname === "/api/backends") {
-      return handleBackends(env);
+      return forwardToDo(request, env, "/backends");
     }
     if (request.method === "GET" && url.pathname === "/api/audit") {
       return handleAuditApi(request, env);
