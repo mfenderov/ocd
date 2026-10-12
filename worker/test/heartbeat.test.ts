@@ -27,6 +27,7 @@ function seedBox(id: string, overrides: Partial<BoxRow> = {}): Promise<BoxRow> {
       hostname: `${id}.example.com`,
       heartbeat_token_hash: HB_HASH,
       admin_token_hash: ADMIN_HASH,
+      admin_token_sealed: "",
       epoch: 1,
       last_seq: 7,
       last_ts: 0,

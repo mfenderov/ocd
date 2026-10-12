@@ -3,14 +3,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveEnrollment,
   denyEnrollment,
-  enrollPingText,
   handleEnrollApprove,
   handleEnrollDeny,
   handleEnrollRequest,
+  issueCapabilityLink,
   mismatchAlertText,
   parseEnrollBody,
   requestEnrollment,
+  sealAdminToken,
   sendTelegramMessage,
+  unsealAdminToken,
+  verifyCapability,
+  type EnrollConfig,
   type EnrollStore,
   type NotifyFn,
   type PendingRow,
@@ -58,6 +62,7 @@ async function seedEnrolled(store: MemStore, id: string): Promise<BoxRow> {
     hostname: `${id}.example.com`,
     heartbeat_token_hash: await hashToken(KNOWN_TOKEN),
     admin_token_hash: await hashToken(ADMIN_TOKEN),
+    admin_token_sealed: "",
     epoch: 3,
     last_seq: 11,
     last_ts: 5000,
@@ -101,6 +106,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       { id: "nb-1", hostname: "nb-1.example.com", enroll_token: NEW_TOKEN },
       rec.notify,
       () => 1700000100,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     expect(result).toEqual({ status: "pending", id: "nb-1" });
     const row = store.getPending("nb-1");
@@ -137,6 +143,8 @@ describe("enrollment approve-on-sight (unit)", () => {
       store,
       { id: "clone-1", hostname: "clone-1.example.com", enroll_token: CLONE_TOKEN },
       rec.notify,
+      undefined,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     expect(result).toEqual({ status: "pending", id: "clone-1" });
     expect(store.getPending("clone-1")?.heartbeat_token_hash).toBe(await hashToken(CLONE_TOKEN));
@@ -144,19 +152,22 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(rec.texts[0]).not.toContain(CLONE_TOKEN);
   });
 
-  it("approve binds a new id permanently: heartbeat accepted, ping text matches", async () => {
+  it("approve binds a new id permanently: heartbeat accepted, ping carries links", async () => {
     const store = new MemStore();
     const rec = recorder();
     await requestEnrollment(
       store,
       { id: "fresh-1", hostname: "fresh-1.example.com", enroll_token: NEW_TOKEN },
       rec.notify,
+      undefined,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     const row = await approveEnrollment(store, "fresh-1");
     expect(row).toMatchObject({ id: "fresh-1", hostname: "fresh-1.example.com", enrolled: 1 });
     expect(await tokenMatches(NEW_TOKEN, row?.heartbeat_token_hash ?? "")).toBe(true);
     expect(store.getPending("fresh-1")).toBeUndefined();
-    expect(enrollPingText({ id: "fresh-1", hostname: "fresh-1.example.com" })).toBe(rec.texts[0]);
+    expect(rec.texts[0]).toContain("/api/enroll/approve?id=fresh-1&exp=");
+    expect(rec.texts[0]).toContain("/api/enroll/deny?id=fresh-1&exp=");
     const hb = await handleHeartbeat(heartbeatRequest("fresh-1", 1, 100, NEW_TOKEN), store, () => 1700000200);
     expect(hb.status).toBe(200);
     expect(await hb.json()).toMatchObject({ id: "fresh-1", enrolled: true });
@@ -170,6 +181,8 @@ describe("enrollment approve-on-sight (unit)", () => {
       store,
       { id: "rotate-1", hostname: "rotate-1.example.com", enroll_token: CLONE_TOKEN },
       rec.notify,
+      undefined,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     const row = await approveEnrollment(store, "rotate-1");
     expect(await tokenMatches(CLONE_TOKEN, row?.heartbeat_token_hash ?? "")).toBe(true);
@@ -187,6 +200,8 @@ describe("enrollment approve-on-sight (unit)", () => {
       store,
       { id: "deny-1", hostname: "deny-1.example.com", enroll_token: NEW_TOKEN },
       rec.notify,
+      undefined,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
     expect(denyEnrollment(store, "deny-1")).toBe(true);
     expect(store.getPending("deny-1")).toBeUndefined();
@@ -207,6 +222,8 @@ describe("enrollment approve-on-sight (unit)", () => {
       { id: "x", hostname: "evil example.com", enroll_token: NEW_TOKEN },
       { id: "x", hostname: "x.example.com" },
       { id: "x", hostname: "x.example.com", enroll_token: "" },
+      { id: "x", hostname: "x.example.com", enroll_token: NEW_TOKEN, admin_token: "" },
+      { id: "x", hostname: "x.example.com", enroll_token: NEW_TOKEN, admin_token: 7 },
       null,
       [],
     ];
@@ -218,20 +235,21 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(store.pending.size).toBe(0);
     expect(rec.texts).toHaveLength(0);
     for (const handler of [handleEnrollApprove, handleEnrollDeny] as const) {
-      for (const body of [{}, { id: "" }, { id: 7 }, null]) {
-        const res = await handler(jsonRequest("/x", body), store);
+      for (const url of ["https://fleet.local/x", "https://fleet.local/x?id=&exp=1&sig=zz"]) {
+        const res = await handler(new Request(url), store);
         expect(res.status).toBe(400);
       }
     }
   });
 
-  it("approve/deny with no pending row resolve 404, never 500", async () => {
+  it("valid links with no pending row resolve 404, never 500", async () => {
     const store = new MemStore();
-    expect((await handleEnrollApprove(jsonRequest("/enroll/approve", { id: "ghost" }), store)).status).toBe(404);
-    expect(await (await handleEnrollApprove(jsonRequest("/enroll/approve", { id: "ghost" }), store)).json()).toMatchObject({
-      error: "no_pending",
-    });
-    expect((await handleEnrollDeny(jsonRequest("/enroll/deny", { id: "ghost" }), store)).status).toBe(404);
+    const approve = await issueCapabilityLink({ secret: CAP_TEST_KEY, action: "approve", id: "ghost", exp: FIXED_NOW + 900 });
+    const res = await handleEnrollApprove(getRequest(approve), store, CAPS, fixedNow);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "no_pending" });
+    const deny = await issueCapabilityLink({ secret: CAP_TEST_KEY, action: "deny", id: "ghost", exp: FIXED_NOW + 900 });
+    expect((await handleEnrollDeny(getRequest(deny), store, CAPS, fixedNow)).status).toBe(404);
   });
 });
 
@@ -317,89 +335,311 @@ describe("enroll routes through the worker + DO", () => {
     return runInDurableObject(stub, async (instance) => instance.getPending(id));
   }
 
-  function readBox(id: string): Promise<BoxRow | undefined> {
-    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    return runInDurableObject(stub, async (instance) => instance.getBox(id));
-  }
-
-  it("POST /api/enroll parks a new id as pending", async () => {
+  // Test env carries no capability/seal secrets (by design — they are Worker
+  // secrets, never committed), so routes pin the fail-loud degraded behavior.
+  // The full issue→ping→approve link flow is covered at unit level above.
+  it("POST /api/enroll without a capability secret fails loud 500, writes nothing", async () => {
     const res = await SELF.fetch("https://fleet.local/api/enroll", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "enr-new", hostname: "enr-new.example.com", enroll_token: NEW_TOKEN }),
     });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ status: "pending", id: "enr-new", enrolled: false });
-    expect((await readPending("enr-new"))?.hostname).toBe("enr-new.example.com");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ error: "misconfigured" });
+    expect(await readPending("enr-new")).toBeUndefined();
   });
 
-  it("POST /api/enroll/approve binds the token; heartbeat then accepted", async () => {
-    await SELF.fetch("https://fleet.local/api/enroll", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-loop", hostname: "enr-loop.example.com", enroll_token: NEW_TOKEN }),
-    });
-    const approve = await SELF.fetch("https://fleet.local/api/enroll/approve", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-loop" }),
-    });
-    expect(approve.status).toBe(200);
-    expect(await approve.json()).toMatchObject({ status: "approved", id: "enr-loop", enrolled: true });
-    expect(await readPending("enr-loop")).toBeUndefined();
-    const box = await readBox("enr-loop");
-    expect(await tokenMatches(NEW_TOKEN, box?.heartbeat_token_hash ?? "")).toBe(true);
-    const hb = await SELF.fetch("https://fleet.local/api/heartbeat", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${NEW_TOKEN}` },
-      body: JSON.stringify({ id: "enr-loop", seq: 1, box_now: 100, epoch: 0 }),
-    });
-    expect(hb.status).toBe(200);
-    expect(await hb.json()).toMatchObject({ id: "enr-loop", enrolled: true });
+  it("GET /api/enroll/approve|deny without a capability secret fails loud 500", async () => {
+    for (const action of ["approve", "deny"] as const) {
+      const res = await SELF.fetch(
+        `https://fleet.local/api/enroll/${action}?id=enr-x&exp=1700001400&sig=${"0".repeat(64)}`,
+      );
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "misconfigured" });
+    }
   });
 
-  it("POST /api/enroll/deny clears pending; second deny is 404", async () => {
-    await SELF.fetch("https://fleet.local/api/enroll", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-deny", hostname: "enr-deny.example.com", enroll_token: NEW_TOKEN }),
-    });
-    const deny = await SELF.fetch("https://fleet.local/api/enroll/deny", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-deny" }),
-    });
-    expect(deny.status).toBe(200);
-    expect(await deny.json()).toMatchObject({ status: "denied", id: "enr-deny" });
-    expect(await readPending("enr-deny")).toBeUndefined();
-    const again = await SELF.fetch("https://fleet.local/api/enroll/deny", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "enr-deny" }),
-    });
-    expect(again.status).toBe(404);
-  });
-
-  it("malformed enroll bodies are 400 through the route", async () => {
-    const res = await SELF.fetch("https://fleet.local/api/enroll", {
+  it("malformed enroll bodies and capability params are 400 through the route", async () => {
+    const badEnroll = await SELF.fetch("https://fleet.local/api/enroll", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "enr-bad" }),
     });
-    expect(res.status).toBe(400);
+    expect(badEnroll.status).toBe(400);
+    const badLink = await SELF.fetch("https://fleet.local/api/enroll/approve?id=enr-bad");
+    expect(badLink.status).toBe(400);
   });
 
   it("fails loud when the FLEET_STATE binding is missing", async () => {
-    for (const path of ["/api/enroll", "/api/enroll/approve", "/api/enroll/deny"]) {
-      const res = await app.fetch(
-        new Request(`http://x${path}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: "x" }),
-        }),
-      );
+    const enroll = await app.fetch(
+      new Request("http://x/api/enroll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "x" }),
+      }),
+    );
+    expect(enroll.status).toBe(500);
+    expect(await enroll.text()).toContain("FLEET_STATE");
+    for (const path of ["/api/enroll/approve", "/api/enroll/deny"]) {
+      const res = await app.fetch(new Request(`http://x${path}?id=x&exp=1&sig=00`));
       expect(res.status).toBe(500);
       expect(await res.text()).toContain("FLEET_STATE");
     }
+  });
+});
+
+const CAP_TEST_KEY = "test-capability-hmac-key-1";
+const SEAL_KEY = "test-seal-key-def-2";
+const ADMIN_PLAIN = "box-admin-plaintext-token-zzz-7";
+const FIXED_NOW = 1700000500;
+const fixedNow = () => FIXED_NOW;
+const TEST_SECRETS = { capSecret: CAP_TEST_KEY, sealKey: SEAL_KEY };
+const CAPS: EnrollConfig = { capSecret: CAP_TEST_KEY };
+
+function linkFor(action: "approve" | "deny", id: string, exp: number, secret: string = CAP_TEST_KEY): Promise<string> {
+  return issueCapabilityLink({ secret, action, id, exp });
+}
+
+function getRequest(link: string): Request {
+  const url = link.startsWith("http") ? link : `https://fleet.local${link}`;
+  return new Request(url);
+}
+
+function tamperSig(sig: string): string {
+  return sig.slice(0, -1) + (sig.endsWith("0") ? "1" : "0");
+}
+
+describe("approve/deny capability links", () => {
+  async function pendingStore(id: string): Promise<MemStore> {
+    const store = new MemStore();
+    await requestEnrollment(
+      store,
+      { id, hostname: `${id}.example.com`, enroll_token: NEW_TOKEN },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    return store;
+  }
+
+  it("ping carries tappable approve/deny links with exp+sig, not plain commands", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "cap-1", hostname: "cap-1.example.com", enroll_token: NEW_TOKEN },
+      rec.notify,
+      fixedNow,
+      { ...TEST_SECRETS, baseUrl: "https://fleet.example.com" },
+    );
+    expect(rec.texts).toHaveLength(1);
+    const ping = rec.texts[0];
+    expect(ping).toContain(`https://fleet.example.com/api/enroll/approve?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
+    expect(ping).toContain(`https://fleet.example.com/api/enroll/deny?id=cap-1&exp=${FIXED_NOW + 900}&sig=`);
+    expect(ping).not.toContain('POST /api/enroll/approve {"id"');
+    expect(ping).not.toContain(NEW_TOKEN);
+  });
+
+  it("valid approve link resolves and binds the token", async () => {
+    const store = await pendingStore("cap-ok");
+    const res = await handleEnrollApprove(getRequest(await linkFor("approve", "cap-ok", FIXED_NOW + 900)), store, CAPS, fixedNow);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "approved", id: "cap-ok", enrolled: true });
+    expect(store.getPending("cap-ok")).toBeUndefined();
+  });
+
+  it("valid deny link clears pending without creating a box", async () => {
+    const store = await pendingStore("cap-deny");
+    const res = await handleEnrollDeny(getRequest(await linkFor("deny", "cap-deny", FIXED_NOW + 900)), store, CAPS, fixedNow);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "denied", id: "cap-deny" });
+    expect(store.getPending("cap-deny")).toBeUndefined();
+    expect(store.getBox("cap-deny")).toBeUndefined();
+  });
+
+  it("tampered signature is 403 and leaves pending intact", async () => {
+    const store = await pendingStore("cap-tamper");
+    const link = await linkFor("approve", "cap-tamper", FIXED_NOW + 900);
+    const sig = new URL(link, "https://fleet.local").searchParams.get("sig") ?? "";
+    const bad = link.replace(sig, tamperSig(sig));
+    const res = await handleEnrollApprove(getRequest(bad), store, CAPS, fixedNow);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "forbidden" });
+    expect(store.getPending("cap-tamper")).toBeDefined();
+  });
+
+  it("signature for another id is 403", async () => {
+    const store = await pendingStore("cap-other");
+    const link = await linkFor("approve", "someone-else", FIXED_NOW + 900);
+    const swapped = link.replace("id=someone-else", "id=cap-other");
+    const res = await handleEnrollApprove(getRequest(swapped), store, CAPS, fixedNow);
+    expect(res.status).toBe(403);
+    expect(store.getPending("cap-other")).toBeDefined();
+  });
+
+  it("expired link is 403 even with a valid signature", async () => {
+    const store = await pendingStore("cap-exp");
+    expect(await verifyCapability(CAP_TEST_KEY, "approve", "cap-exp", FIXED_NOW - 1, await linkSig("approve", "cap-exp", FIXED_NOW - 1), fixedNow)).toBe(false);
+    const res = await handleEnrollApprove(
+      getRequest(await linkFor("approve", "cap-exp", FIXED_NOW - 1)),
+      store,
+      CAPS,
+      fixedNow,
+    );
+    expect(res.status).toBe(403);
+    expect(store.getPending("cap-exp")).toBeDefined();
+  });
+
+  it("forged link (wrong secret) is 403; forged link for unknown id is 403, not 404", async () => {
+    const store = await pendingStore("cap-forge");
+    const forged = await linkFor("approve", "cap-forge", FIXED_NOW + 900, "attacker-secret");
+    expect((await handleEnrollApprove(getRequest(forged), store, CAPS, fixedNow)).status).toBe(403);
+    const ghost = await linkFor("approve", "ghost", FIXED_NOW + 900, "attacker-secret");
+    const res = await handleEnrollApprove(getRequest(ghost), store, CAPS, fixedNow);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "forbidden" });
+  });
+
+  it("approve link used on the deny endpoint is 403 (action-bound)", async () => {
+    const store = await pendingStore("cap-action");
+    const res = await handleEnrollDeny(
+      getRequest(await linkFor("approve", "cap-action", FIXED_NOW + 900)),
+      store,
+      CAPS,
+      fixedNow,
+    );
+    expect(res.status).toBe(403);
+    expect(store.getPending("cap-action")).toBeDefined();
+  });
+
+  it("missing or malformed capability params are 400", async () => {
+    const store = await pendingStore("cap-mal");
+    const urls = [
+      "https://fleet.local/enroll/approve",
+      "https://fleet.local/enroll/approve?id=cap-mal",
+      "https://fleet.local/enroll/approve?id=cap-mal&exp=abc&sig=00",
+      "https://fleet.local/enroll/approve?id=&exp=1700001400&sig=00",
+      "https://fleet.local/enroll/approve?id=cap-mal&exp=-5&sig=00",
+    ];
+    for (const url of urls) {
+      expect((await handleEnrollApprove(new Request(url), store, CAPS, fixedNow)).status).toBe(400);
+    }
+    expect((await handleEnrollDeny(new Request("https://fleet.local/enroll/deny?id=cap-mal"), store, CAPS, fixedNow)).status).toBe(400);
+    expect(store.getPending("cap-mal")).toBeDefined();
+  });
+
+  it("missing capability secret fails loud 500 without resolving", async () => {
+    const store = await pendingStore("cap-nosec");
+    const link = await linkFor("approve", "cap-nosec", FIXED_NOW + 900);
+    const res = await handleEnrollApprove(getRequest(link), store, {}, fixedNow);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ error: "misconfigured" });
+    expect(store.getPending("cap-nosec")).toBeDefined();
+  });
+});
+
+async function linkSig(action: "approve" | "deny", id: string, exp: number): Promise<string> {
+  return new URL(await linkFor(action, id, exp), "https://fleet.local").searchParams.get("sig") ?? "";
+}
+
+describe("admin token sealed at rest (AES-GCM)", () => {
+  it("seal round-trips and the stored form is not plaintext", async () => {
+    const sealed = await sealAdminToken(SEAL_KEY, ADMIN_PLAIN);
+    expect(sealed).not.toContain(ADMIN_PLAIN);
+    expect(await unsealAdminToken(SEAL_KEY, sealed)).toBe(ADMIN_PLAIN);
+  });
+
+  it("wrong key fails; tampered blob fails; empty unseals to null", async () => {
+    const sealed = await sealAdminToken(SEAL_KEY, ADMIN_PLAIN);
+    await expect(unsealAdminToken("wrong-key", sealed)).rejects.toThrow();
+    const middle = Math.floor(sealed.length / 2);
+    const flip = sealed[middle] === "A" ? "B" : "A";
+    await expect(unsealAdminToken(SEAL_KEY, sealed.slice(0, middle) + flip + sealed.slice(middle + 1))).rejects.toThrow();
+    await expect(unsealAdminToken(SEAL_KEY, "")).resolves.toBeNull();
+  });
+
+  it("enrollment with admin_token stores only the sealed form, never plaintext", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "seal-1", hostname: "seal-1.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+      rec.notify,
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const pending = store.getPending("seal-1");
+    expect(pending?.admin_token_sealed).toBeDefined();
+    expect(pending?.admin_token_sealed).not.toContain(ADMIN_PLAIN);
+    expect(await unsealAdminToken(SEAL_KEY, pending?.admin_token_sealed ?? "")).toBe(ADMIN_PLAIN);
+    const row = await approveEnrollment(store, "seal-1");
+    expect(row?.admin_token_sealed).toBe(pending?.admin_token_sealed);
+    expect(row?.admin_token_hash).toBe("");
+    expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe(ADMIN_PLAIN);
+    expect(rec.texts.join("\n")).not.toContain(ADMIN_PLAIN);
+    const logged = error.mock.calls.map((args) => args.map(String).join(" ")).join("\n");
+    expect(logged).not.toContain(ADMIN_PLAIN);
+  });
+
+  it("admin_token without a seal key fails loud with no pending row (never silently dropped)", async () => {
+    const store = new MemStore();
+    await expect(
+      requestEnrollment(
+        store,
+        { id: "seal-loud", hostname: "seal-loud.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+        async () => {},
+        fixedNow,
+        { capSecret: CAP_TEST_KEY },
+      ),
+    ).rejects.toThrow("seal key");
+    expect(store.getPending("seal-loud")).toBeUndefined();
+  });
+
+  it("enrollment without admin_token needs no seal key and seals nothing", async () => {
+    const store = new MemStore();
+    const result = await requestEnrollment(
+      store,
+      { id: "seal-none", hostname: "seal-none.example.com", enroll_token: NEW_TOKEN },
+      async () => {},
+      fixedNow,
+      { capSecret: CAP_TEST_KEY },
+    );
+    expect(result).toEqual({ status: "pending", id: "seal-none" });
+    expect(store.getPending("seal-none")?.admin_token_sealed).toBe("");
+    const row = await approveEnrollment(store, "seal-none");
+    expect(row?.admin_token_sealed).toBe("");
+    await expect(unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).resolves.toBeNull();
+  });
+
+  it("known-id rebind with a new admin_token overwrites; without preserves", async () => {
+    const store = new MemStore();
+    await requestEnrollment(
+      store,
+      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: NEW_TOKEN, admin_token: ADMIN_PLAIN },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const first = await approveEnrollment(store, "seal-re");
+    await requestEnrollment(
+      store,
+      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: CLONE_TOKEN },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const kept = await approveEnrollment(store, "seal-re");
+    expect(kept?.admin_token_sealed).toBe(first?.admin_token_sealed);
+    await requestEnrollment(
+      store,
+      { id: "seal-re", hostname: "seal-re.example.com", enroll_token: "rotated-enroll-token-3", admin_token: "rotated-admin-plain-8" },
+      async () => {},
+      fixedNow,
+      TEST_SECRETS,
+    );
+    const rotated = await approveEnrollment(store, "seal-re");
+    expect(rotated?.admin_token_sealed).not.toBe(first?.admin_token_sealed);
+    expect(await unsealAdminToken(SEAL_KEY, rotated?.admin_token_sealed ?? "")).toBe("rotated-admin-plain-8");
   });
 });

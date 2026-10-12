@@ -36,7 +36,9 @@ async function handleEnrollApi(request: Request, env: Env | undefined, doPath: s
     });
   }
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request(`http://do${doPath}`, request));
+  // Preserve the query string: capability links carry id/exp/sig as params.
+  const search = new URL(request.url).search;
+  return await stub.fetch(new Request(`http://do${doPath}${search}`, request));
 }
 
 export default {
@@ -51,10 +53,10 @@ export default {
     if (request.method === "POST" && url.pathname === "/api/enroll") {
       return handleEnrollApi(request, env, "/enroll");
     }
-    if (request.method === "POST" && url.pathname === "/api/enroll/approve") {
+    if (request.method === "GET" && url.pathname === "/api/enroll/approve") {
       return handleEnrollApi(request, env, "/enroll/approve");
     }
-    if (request.method === "POST" && url.pathname === "/api/enroll/deny") {
+    if (request.method === "GET" && url.pathname === "/api/enroll/deny") {
       return handleEnrollApi(request, env, "/enroll/deny");
     }
     return new Response("Not Found", { status: 404 });

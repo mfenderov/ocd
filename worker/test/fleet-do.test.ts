@@ -7,6 +7,7 @@ const BOX: BoxRow = {
   hostname: "host-1",
   heartbeat_token_hash: "hb-hash",
   admin_token_hash: "admin-hash",
+  admin_token_sealed: "",
   epoch: 1,
   last_seq: 7,
   last_ts: 0,

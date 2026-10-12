@@ -4,6 +4,7 @@ import {
   handleEnrollRequest,
   mismatchAlertText,
   telegramNotifier,
+  type EnrollConfig,
   type NotifyFn,
   type PendingRow,
 } from "./enroll";
@@ -14,6 +15,7 @@ export interface BoxRow {
   hostname: string;
   heartbeat_token_hash: string;
   admin_token_hash: string;
+  admin_token_sealed: string;
   epoch: number;
   last_seq: number;
   last_ts: number;
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS boxes(
   hostname TEXT NOT NULL,
   heartbeat_token_hash TEXT NOT NULL,
   admin_token_hash TEXT NOT NULL,
+  admin_token_sealed TEXT NOT NULL DEFAULT '',
   epoch INTEGER NOT NULL DEFAULT 0,
   last_seq INTEGER NOT NULL DEFAULT 0,
   last_ts INTEGER NOT NULL DEFAULT 0,
@@ -37,45 +40,68 @@ CREATE TABLE IF NOT EXISTS pending(
   id TEXT PRIMARY KEY,
   hostname TEXT NOT NULL,
   heartbeat_token_hash TEXT NOT NULL,
+  admin_token_sealed TEXT NOT NULL DEFAULT '',
   first_seen INTEGER NOT NULL DEFAULT 0
 );
 `;
 
 const COLUMNS =
-  "id, hostname, heartbeat_token_hash, admin_token_hash, epoch, last_seq, last_ts, last_seen, enrolled";
+  "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, epoch, last_seq, last_ts, last_seen, enrolled";
 
-const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, first_seen";
+const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen";
 
-// Subset of Worker env the DO reads: Telegram secrets for enrollment pings.
-// workerd passes env as the second constructor arg; missing values degrade
-// to a loud no-op notifier, never a silent skip.
-interface TelegramEnv {
+// Subset of Worker env the DO reads. workerd passes env as the second
+// constructor arg; missing values degrade to loud 500s / dropped pings,
+// never silent skips. ENROLL_BASE_URL is not secret (public hostname).
+interface FleetEnv {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_OWNER_CHAT_ID?: string;
+  ENROLL_CAPABILITY_SECRET?: string;
+  ADMIN_SEAL_SECRET?: string;
+  ENROLL_BASE_URL?: string;
 }
 
 export class FleetState implements DurableObject {
   private state: DurableObjectState;
   private botToken?: string;
   private ownerChatId?: string;
+  private capSecret?: string;
+  private sealKey?: string;
+  private baseUrl?: string;
 
-  constructor(state: DurableObjectState, env?: TelegramEnv) {
+  constructor(state: DurableObjectState, env?: FleetEnv) {
     this.state = state;
     this.botToken = env?.TELEGRAM_BOT_TOKEN;
     this.ownerChatId = env?.TELEGRAM_OWNER_CHAT_ID;
+    this.capSecret = env?.ENROLL_CAPABILITY_SECRET;
+    this.sealKey = env?.ADMIN_SEAL_SECRET;
+    this.baseUrl = env?.ENROLL_BASE_URL;
   }
 
   private notifier(): NotifyFn {
     return telegramNotifier(this.botToken, this.ownerChatId);
   }
 
+  private enrollConfig(): EnrollConfig {
+    return { capSecret: this.capSecret, baseUrl: this.baseUrl, sealKey: this.sealKey };
+  }
+
   private ensureSchema(): void {
     this.state.storage.sql.exec(SCHEMA);
-    const cols = this.state.storage.sql.exec("PRAGMA table_info(boxes)").toArray() as Array<{
+    const boxCols = this.state.storage.sql.exec("PRAGMA table_info(boxes)").toArray() as Array<{
       name: string;
     }>;
-    if (!cols.some((c) => c.name === "last_ts")) {
+    if (!boxCols.some((c) => c.name === "last_ts")) {
       this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!boxCols.some((c) => c.name === "admin_token_sealed")) {
+      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
+    }
+    const pendingCols = this.state.storage.sql.exec("PRAGMA table_info(pending)").toArray() as Array<{
+      name: string;
+    }>;
+    if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
+      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
     }
   }
 
@@ -102,11 +128,12 @@ export class FleetState implements DurableObject {
   putBox(box: BoxRow): void {
     this.ensureSchema();
     this.state.storage.sql.exec(
-      "INSERT OR REPLACE INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, epoch, last_seq, last_ts, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, epoch, last_seq, last_ts, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       box.id,
       box.hostname,
       box.heartbeat_token_hash,
       box.admin_token_hash,
+      box.admin_token_sealed,
       box.epoch,
       box.last_seq,
       box.last_ts,
@@ -127,10 +154,11 @@ export class FleetState implements DurableObject {
   putPending(row: PendingRow): void {
     this.ensureSchema();
     this.state.storage.sql.exec(
-      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, first_seen) VALUES (?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen) VALUES (?, ?, ?, ?, ?)",
       row.id,
       row.hostname,
       row.heartbeat_token_hash,
+      row.admin_token_sealed,
       row.first_seen,
     );
   }
@@ -152,13 +180,13 @@ export class FleetState implements DurableObject {
       });
     }
     if (request.method === "POST" && url.pathname === "/enroll") {
-      return handleEnrollRequest(request, this, this.notifier());
+      return handleEnrollRequest(request, this, this.notifier(), undefined, this.enrollConfig());
     }
-    if (request.method === "POST" && url.pathname === "/enroll/approve") {
-      return handleEnrollApprove(request, this);
+    if (request.method === "GET" && url.pathname === "/enroll/approve") {
+      return handleEnrollApprove(request, this, this.enrollConfig());
     }
-    if (request.method === "POST" && url.pathname === "/enroll/deny") {
-      return handleEnrollDeny(request, this);
+    if (request.method === "GET" && url.pathname === "/enroll/deny") {
+      return handleEnrollDeny(request, this, this.enrollConfig());
     }
     return new Response("Not Found", { status: 404 });
   }
