@@ -82,6 +82,18 @@ export class BoxAuditError extends Error {
   }
 }
 
+// Thrown by fetchAudits when boxId names no enrolled box. handleAudit maps
+// it to 404 unknown_box; direct callers get a loud rejection, never a
+// silent [].
+export class UnknownBoxError extends Error {
+  boxId: string;
+  constructor(boxId: string) {
+    super(`unknown box "${boxId}"`);
+    this.name = "UnknownBoxError";
+    this.boxId = boxId;
+  }
+}
+
 function toMerged(boxId: string, tainted: boolean, raw: unknown): MergedAuditRow {
   const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   const str = (key: string): string => (typeof r[key] === "string" ? (r[key] as string) : "");
@@ -155,15 +167,23 @@ function byEventTimeDesc(a: AuditRow, b: AuditRow): number {
 }
 
 // Parallel fan-out over enrolled boxes (or one box when boxId is set).
-// Never rejects for per-box causes: every settlement becomes rows or a
-// marker. `n` bounds event volume; markers are control plane and are never
-// paginated away (dropping one would be the silent gap this exists to avoid).
+// Per-box transport failures become markers, but unknown boxId throws
+// UnknownBoxError and programmer errors propagate — neither is a silent gap
+// nor a masked marker. `n` bounds event volume; markers are control plane
+// and are never paginated away (dropping one would be the silent gap this
+// exists to avoid).
 export async function fetchAudits(
   store: AuditStore,
   opts: { boxId?: string; n: number },
   deps: AuditDeps = {},
 ): Promise<AuditRow[]> {
   const n = Number.isInteger(opts.n) && opts.n > 0 ? Math.min(opts.n, 200) : 50;
+  if (opts.boxId) {
+    const box = store.getBox(opts.boxId);
+    if (!box || box.enrolled !== 1) {
+      throw new UnknownBoxError(opts.boxId);
+    }
+  }
   const targets = store.listBackends().filter((b) => b.enrolled === 1 && (!opts.boxId || b.id === opts.boxId));
   const taintedBy = new Map(targets.map((box) => [box.id, isTainted(box.epoch, store.getTombstone(box.id))]));
   const settled = await Promise.allSettled(
@@ -186,7 +206,9 @@ export async function fetchAudits(
         tainted,
       });
     } else {
-      markers.push({ box: box.id, at: box.last_seen, error: "box_unreachable", last_seen: box.last_seen, tainted });
+      // Not a box failure — a bug (broken fetcher contract, bad row mapping).
+      // Masking it as box_unreachable would lie to the operator; let it fail loud.
+      throw result.reason;
     }
   });
   events.sort(byEventTimeDesc);
@@ -200,11 +222,14 @@ export async function handleAudit(
 ): Promise<Response> {
   const url = new URL(request.url);
   const boxId = url.searchParams.get("box") || undefined;
-  if (boxId) {
-    const box = store.getBox(boxId);
-    if (!box || box.enrolled !== 1) {
+  try {
+    return Response.json({
+      rows: await fetchAudits(store, { boxId, n: parseAuditN(url.searchParams.get("n")) }, deps),
+    });
+  } catch (err) {
+    if (err instanceof UnknownBoxError) {
       return Response.json({ error: "unknown_box" }, { status: 404 });
     }
+    throw err;
   }
-  return Response.json({ rows: await fetchAudits(store, { boxId, n: parseAuditN(url.searchParams.get("n")) }, deps) });
 }

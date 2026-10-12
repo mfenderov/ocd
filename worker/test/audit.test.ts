@@ -5,6 +5,7 @@ import {
   fetchAudits,
   handleAudit,
   parseAuditN,
+  UnknownBoxError,
 } from "../src/audit";
 import type { AuditStore } from "../src/audit";
 import { sealAdminToken } from "../src/enroll";
@@ -280,6 +281,42 @@ describe("audit merge (unit)", () => {
       { box: "audit-noseal", at: 1700000000, error: "misconfigured", last_seen: 1700000000, tainted: false },
     ]);
     expect(calls).toHaveLength(0);
+  });
+
+  it("merged top-n cut keeps exactly the n newest events across boxes", async () => {
+    const store = new MemStore();
+    await seedBox(store, "audit-cut-a");
+    await seedBox(store, "audit-cut-b");
+    const fetcher = rowsFetcher(
+      [
+        ["audit-cut-a", [seedRow(1699999900, "a1"), seedRow(1699999700, "a2"), seedRow(1699999600, "a3"), seedRow(1699999500, "a4"), seedRow(1699999400, "a5")]],
+        ["audit-cut-b", [seedRow(1699999850, "b1"), seedRow(1699999750, "b2"), seedRow(1699999650, "b3"), seedRow(1699999550, "b4"), seedRow(1699999450, "b5")]],
+      ],
+      [],
+    );
+    const rows = await fetchAudits(store, { n: 4 }, { sealKey: SEAL_KEY, fetcher });
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => (r as { actor?: string }).actor)).toEqual(["a1", "b1", "b2", "a2"]);
+    expect(rows.map((r) => r.at)).toEqual([1699999900, 1699999850, 1699999750, 1699999700]);
+  });
+
+  it("fetchAudits with an unknown boxId throws UnknownBoxError instead of a silent []", async () => {
+    const store = new MemStore();
+    await seedBox(store, "audit-known");
+    const calls: FetchCall[] = [];
+    await expect(
+      fetchAudits(store, { boxId: "ghost", n: 50 }, { sealKey: SEAL_KEY, fetcher: rowsFetcher([], calls) }),
+    ).rejects.toThrow(UnknownBoxError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("programmer errors propagate instead of masking as box_unreachable", async () => {
+    const store = new MemStore();
+    await seedBox(store, "audit-badfetch");
+    const nullFetcher = (async () => null) as unknown as typeof fetch;
+    await expect(
+      fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: nullFetcher }),
+    ).rejects.toThrow(TypeError);
   });
 });
 
