@@ -28,6 +28,17 @@ async function handleHeartbeatApi(request: Request, env?: Env): Promise<Response
   return await stub.fetch(new Request("http://do/heartbeat", request));
 }
 
+async function handleEnrollApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  return await stub.fetch(new Request(`http://do${doPath}`, request));
+}
+
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -36,6 +47,15 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
       return handleHeartbeatApi(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/api/enroll") {
+      return handleEnrollApi(request, env, "/enroll");
+    }
+    if (request.method === "POST" && url.pathname === "/api/enroll/approve") {
+      return handleEnrollApi(request, env, "/enroll/approve");
+    }
+    if (request.method === "POST" && url.pathname === "/api/enroll/deny") {
+      return handleEnrollApi(request, env, "/enroll/deny");
     }
     return new Response("Not Found", { status: 404 });
   },

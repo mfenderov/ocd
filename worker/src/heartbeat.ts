@@ -178,6 +178,11 @@ export async function handleHeartbeat(
   request: Request,
   store: HeartbeatStore,
   nowSec: () => number = defaultNowSec,
+  // Fired when auth fails for a KNOWN box id (wrong or missing token):
+  // the cloned-.env case. Unknown ids stay silent (scanner noise). The id
+  // is not a secret; the presented token is never passed on or logged.
+  // Contract: must never throw — alerting must not break the auth path.
+  onMismatch?: (id: string) => Promise<void> | void,
 ): Promise<Response> {
   let raw: unknown;
   try {
@@ -192,6 +197,9 @@ export async function handleHeartbeat(
   const candidate = store.getBox(body.id);
   const token = extractBearer(request);
   if (!candidate || !token || !(await tokenMatches(token, candidate.heartbeat_token_hash))) {
+    if (candidate) {
+      await onMismatch?.(candidate.id);
+    }
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   // Re-read after the async verify so the check-and-write below runs as one
