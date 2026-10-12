@@ -1,7 +1,8 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ACCESS_ASSERTION_HEADER } from "../src/access";
+import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute } from "../src/access";
 import { handleMintToken } from "../src/tokens";
+import { generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
 
 const BOOTSTRAP = "test-bootstrap-scopes-2";
 
@@ -104,8 +105,7 @@ describe("scope guards through the worker + DO", () => {
     expect(noConfirm.status).toBe(400);
   });
 
-  it("an unconfigured Access allowlist denies the JWT path (fail-closed)", async () => {
-    // Test env carries no ACCESS_* vars by design, so any assertion denies.
+  it("a malformed Access assertion denies (never a bypass)", async () => {
     const res = await selfFetch(apiRequest("/api/backends", "GET", undefined, undefined, "stale.jwt.here"));
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ error: "unauthorized" });
@@ -120,5 +120,114 @@ describe("scope guards through the worker + DO", () => {
     // Token rotate with a garbage token is still the lifecycle 403, not a scope 401.
     const rotate = await selfFetch(apiRequest("/api/tokens/route-ghost/rotate", "POST", {}, "garbage"));
     expect(rotate.status).toBe(403);
+  });
+});
+
+describe("guarded-route exhaustiveness (anonymous must 401 everywhere)", () => {
+  // Explicit route table — there is no shared router table, so this MUST
+  // mirror the guarded branches in worker/src/index.ts fetch() (edge
+  // fast-path) and the scopeForDoRoute dispatch in worker/src/access.ts (DO
+  // enforcement). ADD NEW GUARDED ROUTES HERE when the router gains them:
+  // a mutating route missing from both mappers serves anonymous callers and
+  // must fail these tests.
+  const GUARDED: Array<{ method: string; path: string; body?: unknown }> = [
+    { method: "GET", path: "/api/backends" },
+    { method: "GET", path: "/api/audit" },
+    { method: "POST", path: "/api/revoke-all", body: {} },
+    { method: "POST", path: "/api/backends/rt-exhaust/link" },
+    { method: "POST", path: "/api/backends/rt-exhaust/revoke", body: { confirm: true } },
+  ];
+
+  it("every listed route maps to an edge scope (mapper parity with the router)", () => {
+    for (const route of GUARDED) {
+      expect(scopeForEdgeRoute(route.method, route.path)).not.toBeNull();
+    }
+  });
+
+  it("anonymous requests 401 with an unauthorized body on every guarded route", async () => {
+    for (const route of GUARDED) {
+      const res = await selfFetch(apiRequest(route.path, route.method, route.body));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "unauthorized" });
+    }
+  });
+
+  it("garbage-bearer requests 401 on every guarded route (DO validity, not just edge presence)", async () => {
+    // A bearer value passes the edge presence check, so only DO-side scope
+    // validation can 401 these. If the DO mapper misses a route the edge
+    // covers, the handler runs and the status differs (404/400/200).
+    for (const route of GUARDED) {
+      const res = await selfFetch(apiRequest(route.path, route.method, route.body, "garbage-token"));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "unauthorized" });
+    }
+  });
+});
+
+// Must match wrangler.toml [vars] (the DO under test is constructed with the
+// test env): this is the env threading the valid-JWT test proves end-to-end.
+const ACCESS_TEAM = "test-team.cloudflareaccess.com";
+const ACCESS_AUD = "test-access-aud-tag";
+const ACCESS_EMAIL = "owner@example.com";
+
+function jwksUrl(): string {
+  return `https://${ACCESS_TEAM}/cdn-cgi/access/certs`;
+}
+
+describe("valid Access JWT end-to-end (env threading)", () => {
+  it("a valid JWT allows a guarded route via SELF and direct DO fetch", async () => {
+    const { privateKey, jwk } = await generateRsaKey("route-e2e-k1");
+    const nowSec = Math.floor(Date.now() / 1000);
+    const jwt = await signRsaJwt(
+      privateKey,
+      { alg: "RS256", kid: "route-e2e-k1", typ: "JWT" },
+      { aud: ACCESS_AUD, exp: nowSec + 600, email: ACCESS_EMAIL },
+    );
+    const jwks = { keys: [jwk] };
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+
+    // Stub the JWKS fetch inside the DO isolate (runInDurableObject executes
+    // there): anything but the certs URL falls through to the real fetch.
+    // Left active across the SELF call below so the full edge + DO path is
+    // proven; restored in finally.
+    await runInDurableObject(stub, async () => {
+      const globals = globalThis as unknown as Record<string, unknown>;
+      globals["__prevFetch"] = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (input.toString() === jwksUrl()) {
+          return Response.json(jwks);
+        }
+        return (globals["__prevFetch"] as typeof fetch)(input, init);
+      }) as typeof fetch;
+    });
+    try {
+      // Direct DO route: proves constructor env → accessConfig → verify.
+      const direct = await runInDurableObject(stub, async (instance) => {
+        const res = await instance.fetch(
+          new Request("http://do/link/scope-jwt-ghost", {
+            method: "POST",
+            headers: { [ACCESS_ASSERTION_HEADER]: jwt },
+          }),
+        );
+        return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      });
+      // Unknown box: auth passed, the link handler ran and 404d.
+      expect(direct.status).toBe(404);
+      expect(direct.body).toMatchObject({ error: "unknown_box" });
+
+      // Full edge path: the edge presence check forwards JWT-bearing
+      // requests and the DO allows them — 404 ghost, never 401.
+      const viaEdge = await selfFetch(
+        apiRequest("/api/backends/scope-jwt-ghost/link", "POST", undefined, undefined, jwt),
+      );
+      expect(viaEdge.status).toBe(404);
+      expect(await viaEdge.json()).toMatchObject({ error: "unknown_box" });
+    } finally {
+      await runInDurableObject(stub, async () => {
+        const globals = globalThis as unknown as Record<string, unknown>;
+        globalThis.fetch = globals["__prevFetch"] as typeof fetch;
+        delete globals["__prevFetch"];
+      });
+    }
   });
 });

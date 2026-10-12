@@ -12,3 +12,11 @@ new_sqlite_classes = ["FleetState"]
 
 [vars]
 ENROLL_BASE_URL = "https://ocd-fleet.fenderovlol.workers.dev"
+# Cloudflare Access browser bypass (Task 2): local-test defaults so the
+# route-level valid-JWT test proves the env threading end-to-end
+# (FleetState constructor -> accessConfig -> verifyAccessJwt).
+# PROD MUST OVERRIDE all three before deploy: unset means deny-all
+# fail-closed for browsers, and these test values must never go live.
+ACCESS_TEAM_DOMAIN = "test-team.cloudflareaccess.com"
+ACCESS_AUD = "test-access-aud-tag"
+ACCESS_ALLOWED_EMAIL = "owner@example.com"

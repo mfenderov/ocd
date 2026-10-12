@@ -9,6 +9,7 @@ import {
   type AccessConfig,
 } from "../src/access";
 import { handleMintToken, type TokenRow, type TokenStore } from "../src/tokens";
+import { b64url, generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
 
 const BOOTSTRAP = "test-bootstrap-access-2";
 
@@ -62,54 +63,18 @@ function scopedRequest(path: string, method: string, bearer?: string, assertion?
   return new Request(`https://fleet.local${path}`, { method, headers });
 }
 
-// --- Access JWT crafting (RS256, in-test keys, no network) ---
-
-function b64url(input: string | Uint8Array): string {
-  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
+// --- Access JWT fixtures (RS256, in-test keys, no network) ---
 
 const NOW = 1700000000;
 const TEAM = "team.cloudflareaccess.com";
 const AUD = "test-access-aud-tag";
 const EMAIL = "owner@example.com";
 
+const makeKey = generateRsaKey;
+const signJwt = signRsaJwt;
+
 function accessConfig(overrides: Partial<AccessConfig> = {}): AccessConfig {
   return { teamDomain: TEAM, aud: AUD, allowedEmail: EMAIL, ...overrides };
-}
-
-interface KeyPair {
-  privateKey: CryptoKey;
-  jwk: JsonWebKey;
-}
-
-async function makeKey(kid: string): Promise<KeyPair> {
-  const pair = (await crypto.subtle.generateKey(
-    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
-    true,
-    ["sign", "verify"],
-  )) as CryptoKeyPair;
-  const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey & { kid?: string };
-  jwk.kid = kid;
-  jwk.alg = "RS256";
-  return { privateKey: pair.privateKey, jwk };
-}
-
-async function signJwt(
-  privateKey: CryptoKey,
-  header: Record<string, unknown>,
-  payload: Record<string, unknown>,
-): Promise<string> {
-  const h = b64url(JSON.stringify(header));
-  const p = b64url(JSON.stringify(payload));
-  const sig = new Uint8Array(
-    await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, privateKey, new TextEncoder().encode(`${h}.${p}`)),
-  );
-  return `${h}.${p}.${b64url(sig)}`;
 }
 
 function payload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
