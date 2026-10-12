@@ -12,7 +12,7 @@ import {
   type PendingRow,
 } from "./enroll";
 import { handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
-import { handleMintLink, type TombstoneRow } from "./mint";
+import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
 import {
   handleDeleteToken,
@@ -36,7 +36,10 @@ export interface BoxRow {
 
 // Public backends shape: everything the console needs, none of the secret
 // material. GET /backends serves exactly this — token hashes and the sealed
-// admin blob never leave the DO over that route.
+// admin blob never leave the DO over that route. `tombstoned` is the
+// server-side pending-revoke marker (same isTainted rule as mint/audit), so
+// the console renders it on fresh load instead of guessing offline vs
+// blocked.
 export interface BoxPublic {
   id: string;
   hostname: string;
@@ -45,6 +48,7 @@ export interface BoxPublic {
   last_ts: number;
   last_seen: number;
   enrolled: number;
+  tombstoned: boolean;
 }
 
 // Deny marker: a refused enrollment leaves id + timestamp (never tokens) so
@@ -192,7 +196,10 @@ export class FleetState implements DurableObject {
   listBackends(): BoxPublic[] {
     this.ensureSchema();
     const cursor = this.state.storage.sql.exec(`SELECT ${PUBLIC_COLUMNS} FROM boxes ORDER BY id`);
-    return cursor.toArray() as unknown as BoxPublic[];
+    const rows = cursor.toArray() as unknown as Array<Omit<BoxPublic, "tombstoned">>;
+    // One tombstone read per box (fleets are small): same isTainted rule the
+    // mint gate and audit markers use — no duplicated state, no second table.
+    return rows.map((row) => ({ ...row, tombstoned: isTainted(row.epoch, this.getTombstone(row.id)) }));
   }
 
   // Full rows stay inside the DO: audit/revoke relays decrypt the sealed

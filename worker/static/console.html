@@ -82,11 +82,15 @@ function pickBox(raw) {
     epoch: Number(raw.epoch || 0),
     last_seen: Number(raw.last_seen || 0),
     enrolled: Number(raw.enrolled || 0),
+    // Server-side pending-revoke marker (strict: truthy non-booleans ignored).
+    tombstoned: raw.tombstoned === true,
   };
 }
 
 function boxState(box) {
-  if (taintedBoxes[box.id]) return "pending";
+  // Server-side tombstone and locally inferred taint share the orange dot,
+  // but the card text keeps them distinct (see renderBoard).
+  if (box.tombstoned || taintedBoxes[box.id]) return "pending";
   if (Math.floor(Date.now() / 1000) - box.last_seen > OFFLINE_AFTER_SEC) return "off";
   return "on";
 }
@@ -144,10 +148,11 @@ function renderBoard(board, boxes) {
     card.appendChild(top);
     var status = el("div", "", "last-synced");
     if (state === "on") status.textContent = "online · last synced " + ago(box.last_seen);
-    else if (state === "pending") status.textContent = "offline · last synced " + ago(box.last_seen);
+    else if (box.tombstoned) status.textContent = "tombstoned · last synced " + ago(box.last_seen);
     else status.textContent = "offline · last synced " + ago(box.last_seen);
     card.appendChild(status);
-    if (state === "pending") card.appendChild(el("span", "revoke pending — tap REVOKE below", "badge"));
+    if (box.tombstoned) card.appendChild(el("span", "tombstoned — blocked until the box returns", "badge"));
+    else if (state === "pending") card.appendChild(el("span", "revoke pending — tap REVOKE below", "badge"));
     var msg = el("div", "", "note");
     card.appendChild(msg);
 

@@ -102,7 +102,8 @@ describe("console page content", () => {
     });
     // Board contract markers: board root, backend fetch, big LOGIN tap,
     // per-box revoke confirm, audit filter, last-synced offline marker,
-    // tainted/revoke-pending state, phone-first viewport.
+    // tainted/revoke-pending state, server-side tombstone marker,
+    // phone-first viewport.
     for (const marker of [
       "fleet console",
       'id="board"',
@@ -112,6 +113,8 @@ describe("console page content", () => {
       "/api/audit",
       "last-synced",
       "revoke pending",
+      "tombstoned",
+      "until the box returns",
       "viewport",
     ]) {
       expect(html.toLowerCase()).toContain(marker.toLowerCase());

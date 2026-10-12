@@ -24,7 +24,12 @@ const PUBLIC_BOX = {
   last_ts: 0,
   last_seen: 1700000000,
   enrolled: 1,
+  tombstoned: false,
 };
+
+// Token minted in the first test (bootstrap is single-use: once a token
+// exists the bootstrap bearer 403s, so later tests reuse this bearer).
+let backendsToken = "";
 
 describe("fleet DO (real SQLite backend)", () => {
   it("GET /api/backends returns [] on fresh state from the DO path", async () => {
@@ -47,6 +52,7 @@ describe("fleet DO (real SQLite backend)", () => {
       return ((await res.json()) as { token: string }).token;
     });
     const authed = { authorization: `Bearer ${routeToken}` };
+    backendsToken = routeToken;
     const fresh = await SELF.fetch("https://fleet.local/api/backends", { headers: authed });
     expect(fresh.status).toBe(200);
     expect(await fresh.json()).toEqual([]);
@@ -83,5 +89,23 @@ describe("fleet DO (real SQLite backend)", () => {
     expect(rows).toEqual([PUBLIC_BOX]);
     const full = await runInDurableObject(stub, async (instance) => instance.listBoxes());
     expect(full).toEqual([{ ...BOX }]);
+  });
+
+  it("GET /api/backends marks a server-side tombstoned box tombstoned:true", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+    // Tombstone at the box's own epoch: isTainted holds, no heartbeat heal.
+    await runInDurableObject(stub, async (instance) => {
+      instance.putBox({ ...BOX, id: "box-tomb-1", hostname: "host-tomb-1" });
+      instance.putTombstone({ box_id: "box-tomb-1", epoch: 1 });
+    });
+    const res = await SELF.fetch("https://fleet.local/api/backends", {
+      headers: { authorization: `Bearer ${backendsToken}` },
+    });
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    const tomb = rows.find((r) => r["id"] === "box-tomb-1");
+    expect(tomb).toMatchObject({ id: "box-tomb-1", tombstoned: true });
+    // Untombstoned boxes stay false so the console can tell them apart.
+    expect(rows.find((r) => r["id"] === "box-1")).toMatchObject({ tombstoned: false });
   });
 });
