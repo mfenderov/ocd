@@ -1,3 +1,4 @@
+import type { TombstoneRow } from "./mint";
 import type { BoxRow } from "./state";
 
 // Heartbeat request body (box JSON contract, snake_case). The box sends
@@ -17,6 +18,11 @@ export interface HeartbeatBody {
 export interface HeartbeatStore {
   getBox(id: string): BoxRow | undefined;
   putBox(box: BoxRow): void;
+  // Tombstone reads (Task 5 revoke). Optional so unit MemStores that only
+  // track boxes keep compiling; the real FleetState implements both and
+  // heals through the path below.
+  getTombstone?(boxId: string): TombstoneRow | undefined;
+  deleteTombstone?(boxId: string): void;
 }
 
 export function parseHeartbeatBody(value: unknown): HeartbeatBody | null {
@@ -216,5 +222,14 @@ export async function handleHeartbeat(
   }
   const seen = nowSec();
   store.putBox({ ...row, last_seq: body.seq, last_ts: body.box_now, last_seen: seen, epoch: body.epoch });
-  return Response.json({ id: row.id, enrolled: row.enrolled === 1, last_seen: seen });
+  // Taint signal (Task 5 revoke): the tombstone epoch is the greatest stale
+  // epoch (see TombstoneRow in mint.ts), so the box is tainted while its
+  // reported epoch has not rotated past it. A healed epoch clears the
+  // tombstone here — heartbeat is the only path that observes new epochs.
+  const tombstone = store.getTombstone?.(body.id);
+  const tainted = tombstone !== undefined && tombstone !== null && body.epoch <= tombstone.epoch;
+  if (tombstone && body.epoch > tombstone.epoch) {
+    store.deleteTombstone?.(body.id);
+  }
+  return Response.json({ id: row.id, enrolled: row.enrolled === 1, last_seen: seen, tainted });
 }

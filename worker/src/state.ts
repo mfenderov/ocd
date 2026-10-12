@@ -10,6 +10,7 @@ import {
 } from "./enroll";
 import { handleHeartbeat } from "./heartbeat";
 import { handleMintLink, type TombstoneRow } from "./mint";
+import { handleRevoke, handleRevokeAll } from "./revoke";
 
 export interface BoxRow {
   id: string;
@@ -217,6 +218,16 @@ export class FleetState implements DurableObject {
     }
     if (request.method === "GET" && url.pathname === "/enroll/deny") {
       return handleEnrollDeny(request, this, this.enrollConfig());
+    }
+    if (request.method === "POST" && url.pathname === "/revoke-all") {
+      return handleRevokeAll(request, this, { sealKey: this.sealKey });
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/revoke/")) {
+      const boxId = decodeURIComponent(url.pathname.slice("/revoke/".length));
+      if (!boxId) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleRevoke(boxId, request, this, { sealKey: this.sealKey });
     }
     if (request.method === "POST" && url.pathname.startsWith("/link/")) {
       const boxId = decodeURIComponent(url.pathname.slice("/link/".length));
