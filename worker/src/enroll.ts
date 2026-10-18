@@ -262,24 +262,34 @@ export async function issueCapabilityLink(opts: {
   return link;
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export function enrollPingText(
   body: Pick<EnrollBody, "id" | "hostname">,
   links: { approve: string; deny: string },
   exp: number,
 ): string {
+  const when = new Date(exp * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z";
   return (
-    `enroll request: id="${body.id}" hostname="${body.hostname}". ` +
-    `approve: ${links.approve} deny: ${links.deny} ` +
-    `(links expire ${new Date(exp * 1000).toISOString()}).`
+    `🔐 <b>New box wants in</b>
+` +
+    `<code>${escapeHtml(body.id)}</code> · <code>${escapeHtml(body.hostname)}</code>
+` +
+    `<a href="${links.approve}">Approve</a>   <a href="${links.deny}">Deny</a>
+` +
+    `Links die ${when}.`
   );
 }
 
 export function mismatchAlertText(id: string): string {
-  return `auth mismatch: heartbeat for known id="${id}" rejected (token does not match binding).`;
+  return `🚨 <b>Auth mismatch</b> · heartbeat for <code>${escapeHtml(id)}</code> rejected (wrong token). Possible cloned env — check it.`;
 }
 
 export function rotationPingText(id: string, now: number): string {
-  return `admin token rotated: id="${id}" at ${new Date(now * 1000).toISOString()}.`;
+  const when = new Date(now * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z";
+  return `🔑 <b>Admin token rotated</b> · <code>${escapeHtml(id)}</code> · ${when}`;
 }
 
 // Direct Bot API call. Bot token + owner chat id come from Worker env only
@@ -294,7 +304,12 @@ export async function sendTelegramMessage(
   const init: RequestInit = {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    }),
   };
   let res: Response;
   try {
@@ -504,7 +519,18 @@ export async function approveEnrollment(
   const rotated = !!known && pending.admin_token_sealed !== "" && pending.admin_token_sealed !== known.admin_token_sealed;
   const now = nowSec();
   const row: BoxRow = known
-    ? { ...known, heartbeat_token_hash: pending.heartbeat_token_hash, admin_token_sealed: sealed, enrolled: 1 }
+    ? {
+        ...known,
+        heartbeat_token_hash: pending.heartbeat_token_hash,
+        admin_token_sealed: sealed,
+        // Re-approval rebinds trust: restart the seq counter so a box that
+        // lost its DB (seq reset to 1) is accepted again. Safe because
+        // approval itself is the owner-trusted event and the token still
+        // has to match.
+        last_seq: 0,
+        last_ts: 0,
+        enrolled: 1,
+      }
     : {
         id: pending.id,
         hostname: pending.hostname,

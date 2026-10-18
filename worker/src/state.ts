@@ -10,7 +10,7 @@ import {
   type NotifyFn,
   type PendingRow,
 } from "./enroll";
-import { handleHeartbeat, reenrollPingText } from "./heartbeat";
+import { handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
 import { handleMintLink, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
 
@@ -104,6 +104,7 @@ export class FleetState implements DurableObject {
   private sealKey?: string;
   private baseUrl?: string;
   private hostSuffixes?: string;
+  private mismatchPinged = new Map<string, number>();
 
   constructor(state: DurableObjectState, env?: FleetEnv) {
     this.state = state;
@@ -269,6 +270,7 @@ export class FleetState implements DurableObject {
         this,
         undefined,
         async (id: string) => {
+          if (!shouldPingMismatch(this.mismatchPinged, id, Date.now())) return;
           await notify(mismatchAlertText(id));
         },
         async (id: string) => {
