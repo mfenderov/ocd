@@ -44,12 +44,36 @@ func TestRootHasMintDevicesStatus(t *testing.T) {
 	}
 }
 
-func TestServeRefusesWithoutToken(t *testing.T) {
+func TestServeRunsWithoutTelegram(t *testing.T) {
 	t.Setenv("OCD_TG_TOKEN", "")
+	t.Setenv("OCD_OWNER_ID", "")
+	addr := freeAddr(t)
+	t.Setenv("OCD_SERVE_ADDR", addr)
+	t.Setenv("OCD_DB", filepath.Join(t.TempDir(), "serve.db"))
+	t.Setenv("OCD_WEBHOOK_BASE", "")
+	t.Setenv("OCD_WORKER_URL", "")
+	t.Setenv("OCD_HEARTBEAT_TOKEN", "")
+	t.Setenv("OCD_ENROLL_TOKEN", "")
+	t.Setenv("OCD_BOX_ID", "")
+	t.Setenv("OCD_ADMIN_TOKEN", "")
+
+	out := &safeBuffer{}
+	done := make(chan error, 1)
+	go func() { done <- cli.RunServe(out) }()
+
+	waitHealthy(t, addr, done, out)
+	got := out.String()
+	if !strings.Contains(got, "telegram off") {
+		t.Fatalf("want 'telegram off' log line when tokens unset, got %q", got)
+	}
+}
+
+func TestServeRefusesHalfConfiguredTelegram(t *testing.T) {
+	t.Setenv("OCD_TG_TOKEN", "test-dummy-token")
 	t.Setenv("OCD_OWNER_ID", "")
 	var sb strings.Builder
 	if err := cli.RunServe(&sb); err == nil {
-		t.Fatal("want refusal without token")
+		t.Fatal("want refusal on token-without-owner")
 	}
 }
 

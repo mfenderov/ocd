@@ -116,11 +116,15 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 }
 
 func RunServe(w io.Writer) error {
-	if os.Getenv("OCD_TG_TOKEN") == "" {
-		return fmt.Errorf("OCD_TG_TOKEN unset: refusing to run deaf (bot would silently ignore everything)")
-	}
-	if os.Getenv("OCD_OWNER_ID") == "" {
-		return fmt.Errorf("OCD_OWNER_ID unset: refusing to run deaf")
+	tgOn := true
+	switch tok, owner := os.Getenv("OCD_TG_TOKEN"), os.Getenv("OCD_OWNER_ID"); {
+	case tok == "" && owner == "":
+		// Secondary boxes (fleet heartbeat + admin only): the single bot
+		// stays on the primary box, polling twice would fight over updates.
+		tgOn = false
+		_, _ = fmt.Fprintln(w, "telegram off (OCD_TG_TOKEN and OCD_OWNER_ID unset)")
+	case tok == "" || owner == "":
+		return fmt.Errorf("ocd: half-configured telegram (need both OCD_TG_TOKEN and OCD_OWNER_ID, or neither)")
 	}
 	st, err := openStore()
 	if err != nil {
@@ -139,13 +143,17 @@ func RunServe(w io.Writer) error {
 
 	ctx := context.Background()
 
-	hookPath, hookSecret := setupWebhook(ctx, w, st)
-	poll := hookPath == ""
-	go func() {
-		if err := tg.Start(ctx, st, poll); err != nil {
-			_, _ = fmt.Fprintln(w, "telegram:", err)
-		}
-	}()
+	hookPath, hookSecret := "", ""
+	poll := true
+	if tgOn {
+		hookPath, hookSecret = setupWebhook(ctx, w, st)
+		poll = hookPath == ""
+		go func() {
+			if err := tg.Start(ctx, st, poll); err != nil {
+				_, _ = fmt.Fprintln(w, "telegram:", err)
+			}
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/pair", pair.Handler(st, execPair))
@@ -155,7 +163,9 @@ func RunServe(w io.Writer) error {
 	mountAdmin(mux, w, st, execPair)
 	startHeartbeat(ctx, w, st)
 
-	if poll {
+	if !tgOn {
+		_, _ = fmt.Fprintln(w, "mode: telegram off")
+	} else if poll {
 		_, _ = fmt.Fprintln(w, "mode: polling")
 	} else {
 		mux.Handle("/webhook/"+hookPath, hook.Handler(st, hookSecret, st.SeenUpdate,

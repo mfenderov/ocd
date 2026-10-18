@@ -155,6 +155,6 @@ func Root() *cobra.Command {
 	}
 	revoke.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
 
-	root.AddCommand(serve, mintCmd, devices, status, revoke, fleet.NewCommand())
+	root.AddCommand(serve, mintCmd, devices, status, revoke, fleet.NewCommand(), onboardCmd())
 	return root
 }
