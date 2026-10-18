@@ -27,10 +27,13 @@ var (
 )
 
 // FormValues collects wizard inputs. Pre-fill from flags; empty means ask.
+// Empty EnrollCode keeps the Telegram approve-tap flow; a typed code
+// (from /enrollcode) enrolls immediately with no approve tap.
 type FormValues struct {
 	BoxID      string
 	WorkerURL  string
 	PublicHost string
+	EnrollCode string
 }
 
 // RunForm prompts for the three onboarding inputs, validating as it goes.
@@ -69,6 +72,10 @@ func RunForm(pre FormValues) (FormValues, error) {
 					}
 					return nil
 				}),
+			huh.NewInput().
+				Title("Enroll code (optional)").
+				Description("From /enrollcode in Telegram; empty waits for an approve tap instead.").
+				Value(&out.EnrollCode),
 		),
 	)
 	if err := form.Run(); err != nil {

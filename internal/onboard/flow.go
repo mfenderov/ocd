@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mfenderov/ocd/internal/boxagent"
@@ -14,10 +15,13 @@ import (
 
 // Config gathers everything DoOnboard needs. EnvPath/DBPath are explicit so
 // tests stay hermetic; the command fills them from ~/.ocd defaults.
+// EnrollCode, when set, replaces the approve-tap flow with the typed code
+// from /enrollcode (the pending row already binds it).
 type Config struct {
 	BoxID        string
 	WorkerURL    string
 	PublicHost   string
+	EnrollCode   string
 	EnvPath      string
 	DBPath       string
 	Timeout      time.Duration
@@ -85,15 +89,23 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		return err
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	say("requesting enrollment (approve in Telegram)")
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken)
+	say("requesting enrollment")
+	enrollToken := heartbeatToken
+	if code := strings.TrimSpace(cfg.EnrollCode); code != "" {
+		enrollToken = code
+	}
+	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, enrollToken, adminToken)
 	if err != nil {
 		return err
 	}
 	if status == "enrolled" {
-		say("already enrolled")
+		say("enrolled")
 		return nil
 	}
+	if strings.TrimSpace(cfg.EnrollCode) != "" {
+		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
+	}
+	say("waiting for Telegram approval…")
 	dbPath := cfg.DBPath
 	if dbPath == "" {
 		dbPath, err = DefaultDBPath()

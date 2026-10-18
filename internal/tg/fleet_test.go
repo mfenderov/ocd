@@ -2,7 +2,9 @@ package tg_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -211,5 +213,54 @@ func TestFleetAuditEmpty(t *testing.T) {
 	}
 	if !strings.Contains(got, "No audit rows") {
 		t.Fatalf("empty audit must say so, got:\n%s", got)
+	}
+}
+
+func TestFleetEnrollCode(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/enroll" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending","id":"mac"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OCD_WORKER_URL", srv.URL)
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+	got, err := tg.FleetEnrollCodeText(context.Background(), "mac", "")
+	if err != nil {
+		t.Fatalf("enrollcode: %v", err)
+	}
+	code, _ := body["enroll_token"].(string)
+	if len(code) < 16 {
+		t.Fatalf("code must be a strong secret, got %q", code)
+	}
+	if !strings.Contains(got, code) || !strings.Contains(got, "--enroll-code") || !strings.Contains(got, "mac") {
+		t.Fatalf("reply must carry the code and its usage, got:\n%s", got)
+	}
+	if body["hostname"] != "oc-mac.buyallmemes.com" {
+		t.Fatalf("default hostname must follow oc-<box> convention, got %v", body["hostname"])
+	}
+	if _, hasAdmin := body["admin_token"]; hasAdmin {
+		t.Fatal("issuer must not seal an admin it cannot know")
+	}
+}
+
+func TestFleetEnrollCodeUsage(t *testing.T) {
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+	got, err := tg.FleetEnrollCodeText(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("missing box is usage, not error: %v", err)
+	}
+	if !strings.Contains(got, "/enrollcode") {
+		t.Fatalf("must show usage, got:\n%s", got)
 	}
 }

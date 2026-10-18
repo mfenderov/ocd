@@ -446,6 +446,35 @@ export async function requestEnrollment(
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
   }
+  // Typed-code claim: the owner read the pending token out of Telegram and
+  // typed it into `ocd onboard`. Displaying a single-use code in the
+  // owner-only chat WAS the approval, so bind immediately with no second
+  // ping (admin-rotation pings still apply). Anything stale, rebound, or
+  // mistyped falls through to a fresh pending row below.
+  const pending = store.getPending(body.id);
+  if (pending) {
+    const fresh = nowSec() - pending.first_seen <= CAPABILITY_TTL_SEC;
+    if (
+      fresh &&
+      pending.hostname === body.hostname &&
+      (await tokenMatches(body.enroll_token, pending.heartbeat_token_hash))
+    ) {
+      if (body.admin_token !== undefined) {
+        if (!config.sealKey) {
+          throw new Error("enroll: seal key not configured");
+        }
+        store.putPending({ ...pending, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+      }
+      const knownNow = store.getBox(body.id);
+      const sealedNow = store.getPending(body.id)?.admin_token_sealed ?? "";
+      const rotated = !!knownNow && sealedNow !== "" && sealedNow !== (knownNow.admin_token_sealed ?? "");
+      await approveEnrollment(store, body.id, notify, nowSec, {
+        tokenHash: pending.heartbeat_token_hash,
+        hostname: pending.hostname,
+      });
+      return { status: "enrolled", id: body.id, rotated };
+    }
+  }
   let sealed = "";
   if (body.admin_token !== undefined) {
     if (!config.sealKey) {

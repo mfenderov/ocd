@@ -2,6 +2,7 @@ package onboard_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -164,5 +165,59 @@ func TestDoOnboardRejectsBadBoxID(t *testing.T) {
 	cfg := onboard.Config{BoxID: "Bad Box!"}
 	if err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {
 		t.Fatal("want validation error before any network")
+	}
+}
+
+func TestDoOnboardEnrollCodeSkipsWait(t *testing.T) {
+	heartbeats := 0
+	var gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/enroll" {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotToken, _ = body["enroll_token"].(string)
+			_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
+			return
+		}
+		heartbeats++
+		_, _ = w.Write([]byte(`{"enrolled":true}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
+		t.Fatalf("onboard with code: %v", err)
+	}
+	if gotToken != "typed-code-9" {
+		t.Fatalf("must enroll with the typed code, sent %q", gotToken)
+	}
+	if heartbeats != 0 {
+		t.Fatalf("immediate enroll must not heartbeat, got %d", heartbeats)
+	}
+}
+
+func TestDoOnboardBadCodeFailsFast(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending","id":"mac"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "stale-code", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := onboard.DoOnboard(ctx, cfg, nil); err == nil {
+		t.Fatal("rejected code must fail instead of waiting forever")
 	}
 }

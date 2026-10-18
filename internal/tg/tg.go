@@ -253,6 +253,11 @@ func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, c
 		sendFleetReply(ctx, b, st, chatID, box, "audit", func() (string, error) {
 			return FleetAuditText(ctx, box, n)
 		})
+	case strings.HasPrefix(text, "/enrollcode"):
+		box, host := fleetEnrollArgs(text)
+		sendFleetReply(ctx, b, st, chatID, box, "enroll-code", func() (string, error) {
+			return FleetEnrollCodeText(ctx, box, host)
+		})
 	}
 }
 
@@ -292,6 +297,19 @@ func fleetBoxConfirm(text, cmd string) (string, bool) {
 func hasFleetYes(text, cmd string) bool {
 	fields := strings.Fields(text)
 	return len(fields) == 2 && fields[0] == cmd && fields[1] == "YES"
+}
+
+// fleetEnrollArgs parses /enrollcode <box> [hostname].
+func fleetEnrollArgs(text string) (string, string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 || fields[0] != "/enrollcode" {
+		return "", ""
+	}
+	host := ""
+	if len(fields) > 2 {
+		host = fields[2]
+	}
+	return fields[1], host
 }
 
 // fleetAuditArgs parses /faudit [box] [n]: the numeric argument is the limit.

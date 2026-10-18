@@ -1075,3 +1075,103 @@ describe("capability binding (approval TOCTOU)", () => {
     expect(store.getDenial("bind-3")).toEqual({ id: "bind-3", denied_at: FIXED_NOW });
   });
 });
+
+describe("enrollment code claim (typed code from Telegram)", () => {
+  const CODE = "typed-code-abc-123";
+  const CLAIM_ADMIN = "claimed-admin-secret-9";
+  const NOW = 1700000100;
+  const SECRETS = { capSecret: "test-cap-secret", sealKey: "test-seal-key" };
+
+  async function issue(store: MemStore, id = "code-1", hostname = "code-1.buyallmemes.com", token: string = CODE) {
+    const rec = recorder();
+    const res = await requestEnrollment(store, { id, hostname, enroll_token: token }, rec.notify, () => NOW, SECRETS);
+    expect(res.status).toBe("pending");
+    return rec;
+  }
+
+  it("typed code enrolls immediately with no second ping", async () => {
+    const store = new MemStore();
+    const first = await issue(store);
+    expect(first.texts).toHaveLength(1);
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "code-1", hostname: "code-1.buyallmemes.com", enroll_token: CODE, admin_token: CLAIM_ADMIN },
+      rec.notify,
+      () => NOW + 60,
+      SECRETS,
+    );
+    expect(res).toEqual({ status: "enrolled", id: "code-1", rotated: false });
+    expect(rec.texts).toHaveLength(0);
+    expect(store.getPending("code-1")).toBeUndefined();
+    const box = store.getBox("code-1");
+    expect(box?.enrolled).toBe(1);
+    expect(box?.heartbeat_token_hash).toBe(await hashToken(CODE));
+    expect(await unsealAdminToken("test-seal-key", box?.admin_token_sealed ?? "")).toBe(CLAIM_ADMIN);
+  });
+
+  it("wrong code overwrites pending and re-pings", async () => {
+    const store = new MemStore();
+    await issue(store);
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "code-1", hostname: "code-1.buyallmemes.com", enroll_token: "wrong-code" },
+      rec.notify,
+      () => NOW + 60,
+      SECRETS,
+    );
+    expect(res.status).toBe("pending");
+    expect(store.getBox("code-1")).toBeUndefined();
+    expect(store.getPending("code-1")?.heartbeat_token_hash).toBe(await hashToken("wrong-code"));
+    expect(rec.texts).toHaveLength(1);
+  });
+
+  it("expired code re-pends instead of enrolling", async () => {
+    const store = new MemStore();
+    await issue(store);
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "code-1", hostname: "code-1.buyallmemes.com", enroll_token: CODE },
+      rec.notify,
+      () => NOW + 901,
+      SECRETS,
+    );
+    expect(res.status).toBe("pending");
+    expect(store.getBox("code-1")).toBeUndefined();
+    expect(rec.texts).toHaveLength(1);
+  });
+
+  it("hostname mismatch does not claim", async () => {
+    const store = new MemStore();
+    await issue(store);
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "code-1", hostname: "other.buyallmemes.com", enroll_token: CODE },
+      rec.notify,
+      () => NOW + 60,
+      SECRETS,
+    );
+    expect(res.status).toBe("pending");
+    expect(store.getBox("code-1")).toBeUndefined();
+  });
+
+  it("claim on a known box rotates admin with a ping", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "known-1");
+    await issue(store, "known-1", "known-1.buyallmemes.com");
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "known-1", hostname: "known-1.buyallmemes.com", enroll_token: CODE, admin_token: CLAIM_ADMIN },
+      rec.notify,
+      () => NOW + 60,
+      SECRETS,
+    );
+    expect(res.status).toBe("enrolled");
+    expect(res.rotated).toBe(true);
+    expect(rec.texts.some((t) => t.includes("known-1"))).toBe(true);
+  });
+});

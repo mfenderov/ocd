@@ -10,11 +10,14 @@ package tg
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/mfenderov/ocd/internal/boxagent"
 	"github.com/mfenderov/ocd/internal/fleet"
+	"github.com/mfenderov/ocd/internal/onboard"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -134,6 +137,37 @@ func FleetNukeText(ctx context.Context, confirmed bool) (string, error) {
 		_, _ = fmt.Fprintf(&sb, "• <code>%s</code>: %s\n", esc(r.ID), esc(r.Status))
 	}
 	return fmt.Sprintf("💀 nuke: %d revoked, %d offline-blocked\n%s", revoked, blocked, sb.String()), nil
+}
+
+// FleetEnrollCodeText issues a single-use enroll code for a new box.
+// The code is displayed in the owner-only chat (that display IS the
+// approval); the new box types it into `ocd onboard --enroll-code` and is
+// enrolled with no approve tap. Default hostname follows the oc-<box>
+// tunnel convention; pass an explicit one to override.
+func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, error) {
+	if os.Getenv("OCD_FLEET_TOKEN") == "" {
+		return fleetOff, nil
+	}
+	if err := onboard.ValidateBoxID(box); err != nil {
+		return "Usage: <code>/enrollcode &lt;box&gt; [hostname]</code>", nil
+	}
+	if strings.TrimSpace(hostname) == "" {
+		hostname = "oc-" + box + ".buyallmemes.com"
+	}
+	code, err := onboard.GenerateSecret()
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "")
+	if err != nil {
+		return "", err
+	}
+	if status != "pending" {
+		return fmt.Sprintf("📋 <code>%s</code> is already enrolled.", esc(box)), nil
+	}
+	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (valid 15 min, single use):\n<code>%s</code>\nPaste into:\n<code>ocd onboard --enroll-code …</code>\nAn approve link also arrived — ignore it once the code is used.",
+		esc(box), esc(code)), nil
 }
 
 // FleetAuditText renders recent fleet audit rows, optionally for one box.
