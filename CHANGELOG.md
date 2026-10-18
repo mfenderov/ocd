@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.1 - 2026-10-18
+#### Bug Fixes
+- fleet client tolerates heartbeat-suffixed worker URL - (eb8259f) - mfenderov
+
+- - -
+
 ## v0.5.0 - 2026-10-18
 #### Features
 - fleet scope for the Telegram bot - (74d12d9) - mfenderov
