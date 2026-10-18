@@ -80,6 +80,6 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 			}
 		}()
 		http.Redirect(w, r, link, http.StatusFound)
-		fmt.Fprint(w, link)
+		_, _ = fmt.Fprint(w, link)
 	})
 }

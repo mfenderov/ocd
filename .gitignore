@@ -1,3 +1,5 @@
 .worktrees/
 .superpowers/
 worker/node_modules/
+vendor/
+node_modules/

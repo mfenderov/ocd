@@ -60,11 +60,11 @@ func (s *stubWorker) handler() http.Handler {
 			// Clock-relative rows so the CLI's offline inference is
 			// deterministic: box-1 fresh, box-2 tombstoned, box-3 stale.
 			now := time.Now().Unix()
-			_, _ = w.Write([]byte(fmt.Sprintf(`[
+			_, _ = fmt.Fprintf(w, `[
 				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,"last_seen":%d,"enrolled":1,"tombstoned":false},
 				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,"last_seen":%d,"enrolled":1,"tombstoned":true},
 				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,"last_seen":%d,"enrolled":1,"tombstoned":false}
-			]`, now, now, now-3600)))
+			]`, now, now, now-3600)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/backends/box-1/link":
 			w.Header().Set("Content-Type", "text/plain;charset=utf-8")
 			_, _ = w.Write([]byte(`https://proxy.example/?t=tok-1`))
@@ -282,11 +282,11 @@ func TestFleetNukeRevokeAll401HintsRevokeScope(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/backends":
 			now := time.Now().Unix()
-			_, _ = w.Write([]byte(fmt.Sprintf(`[
+			_, _ = fmt.Fprintf(w, `[
 				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,"last_seen":%d,"enrolled":1,"tombstoned":false},
 				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,"last_seen":%d,"enrolled":1,"tombstoned":true},
 				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,"last_seen":%d,"enrolled":1,"tombstoned":false}
-			]`, now, now, now-3600)))
+			]`, now, now, now-3600)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/revoke-all":
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))

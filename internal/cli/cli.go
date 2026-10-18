@@ -45,7 +45,7 @@ func Root() *cobra.Command {
 		Use:   "ocd",
 		Short: "OpenCode link dispenser",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "TUI coming in Task 6 — use: ocd mint --device mac | ocd devices list | ocd status | ocd serve")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "TUI coming in Task 6 — use: ocd mint --device mac | ocd devices list | ocd status | ocd serve")
 			return nil
 		},
 	}
@@ -72,7 +72,7 @@ func Root() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(cmd.OutOrStdout(), link)
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), link)
 			return nil
 		},
 	}
@@ -94,7 +94,7 @@ func Root() *cobra.Command {
 			defer st.Close()
 			for _, name := range st.ListDevices() {
 				d, _ := st.GetDevice(name)
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\texpires=%d\n", d.Name, d.Platform, d.ExpiresAt)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\texpires=%d\n", d.Name, d.Platform, d.ExpiresAt)
 			}
 			return nil
 		},
@@ -126,7 +126,7 @@ func Root() *cobra.Command {
 			out, err := exec.Command("opencode", "service", "status").Output()
 			_ = out
 			_ = err
-			fmt.Fprint(cmd.OutOrStdout(), admin.Status(st, func(name string, args ...string) (string, error) {
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(st, func(name string, args ...string) (string, error) {
 				o, e := exec.Command(name, args...).Output()
 				return string(o), e
 			}))

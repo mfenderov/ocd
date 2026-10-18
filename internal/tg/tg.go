@@ -155,9 +155,9 @@ func sendDevices(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store)
 	var sb strings.Builder
 	sb.WriteString("📱 <b>Seen clients</b>\n")
 	for _, c := range clients {
-		fmt.Fprintf(&sb, "• <code>%s</code> · %d taps · %s\n", esc(c.IP), c.Count, esc(store.FmtAgo(time.Now().Unix()-c.Last)))
+		_, _ = fmt.Fprintf(&sb, "• <code>%s</code> · %d taps · %s\n", esc(c.IP), c.Count, esc(store.FmtAgo(time.Now().Unix()-c.Last)))
 		if c.UA != "" {
-			fmt.Fprintf(&sb, "<code>%s</code>\n", esc(c.UA))
+			_, _ = fmt.Fprintf(&sb, "<code>%s</code>\n", esc(c.UA))
 		}
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
@@ -173,9 +173,9 @@ func sendAudit(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store) {
 	sb.WriteString("🧾 <b>Trail</b> · last 15\n")
 	for _, r := range rows {
 		ts := time.Unix(r.At, 0).Format("15:04:05")
-		fmt.Fprintf(&sb, "<code>%s</code> %s · %s · %s\n", ts, esc(r.Action), esc(r.IP), esc(r.Result))
+		_, _ = fmt.Fprintf(&sb, "<code>%s</code> %s · %s · %s\n", ts, esc(r.Action), esc(r.IP), esc(r.Result))
 		if r.UA != "" {
-			fmt.Fprintf(&sb, "<code>%s</code>\n", esc(r.UA))
+			_, _ = fmt.Fprintf(&sb, "<code>%s</code>\n", esc(r.UA))
 		}
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: sb.String()})
@@ -336,9 +336,9 @@ func Start(ctx context.Context, st *store.Store, poll bool) error {
 					if p.Note == "used" {
 						when := time.Unix(p.UsedAt, 0).Format("15:04:05")
 						var sb strings.Builder
-						fmt.Fprintf(&sb, "✅ <b>Logged in</b> · %s\n<code>%s</code>", esc(when), esc(p.UsedIP))
+						_, _ = fmt.Fprintf(&sb, "✅ <b>Logged in</b> · %s\n<code>%s</code>", esc(when), esc(p.UsedIP))
 						if ua := strings.TrimSpace(p.UsedUA); ua != "" {
-							fmt.Fprintf(&sb, "\n<code>%s</code>", esc(ua))
+							_, _ = fmt.Fprintf(&sb, "\n<code>%s</code>", esc(ua))
 						}
 						text = sb.String()
 					}

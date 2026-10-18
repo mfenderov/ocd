@@ -39,11 +39,11 @@ func statusCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if len(backs) == 0 {
-				fmt.Fprintln(out, "no boxes enrolled")
+				_, _ = fmt.Fprintln(out, "no boxes enrolled")
 				return nil
 			}
 			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tHOSTNAME\tEPOCH\tLAST_SEEN\tSTATE")
+			_, _ = fmt.Fprintln(w, "ID\tHOSTNAME\tEPOCH\tLAST_SEEN\tSTATE")
 			now := time.Now()
 			for _, b := range backs {
 				state := BoxState(b, now)
@@ -52,7 +52,7 @@ func statusCmd() *cobra.Command {
 				if state == "offline" {
 					state = "offline (synced " + syncAge(b.LastSeen, now.Unix()) + ")"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n", b.ID, b.Hostname, b.Epoch, b.LastSeen, state)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n", b.ID, b.Hostname, b.Epoch, b.LastSeen, state)
 			}
 			return w.Flush()
 		},
@@ -73,7 +73,7 @@ func linkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), link)
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), link)
 			return nil
 		},
 	}
@@ -87,7 +87,7 @@ func formatResult(r RevokeResult) string {
 		sb.WriteString(" (epoch " + strconv.Itoa(r.Epoch) + ")")
 	}
 	if r.BoxStatus != 0 {
-		sb.WriteString(fmt.Sprintf(" [box %d]", r.BoxStatus))
+		_, _ = fmt.Fprintf(&sb, " [box %d]", r.BoxStatus)
 	}
 	if r.Detail != "" {
 		sb.WriteString(": " + r.Detail)
@@ -109,7 +109,7 @@ func revokeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), formatResult(res))
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), formatResult(res))
 			return nil
 		},
 	}
@@ -138,7 +138,7 @@ POST /api/revoke-all. A 401 on either call names the missing scope.`,
 				return nukeErr("count boxes", err, "audit")
 			}
 			want := strconv.Itoa(len(backs))
-			fmt.Fprintf(cmd.OutOrStdout(), "nuke will revoke %s box(es). Type %q to confirm: ", want, want)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "nuke will revoke %s box(es). Type %q to confirm: ", want, want)
 			line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 			if err != nil {
 				return fmt.Errorf("fleet nuke: read confirm: %w", err)
@@ -151,7 +151,7 @@ POST /api/revoke-all. A 401 on either call names the missing scope.`,
 				return nukeErr("revoke all", err, "revoke")
 			}
 			for _, r := range results {
-				fmt.Fprintln(cmd.OutOrStdout(), formatResult(r))
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), formatResult(r))
 			}
 			return nil
 		},
@@ -189,11 +189,11 @@ func auditCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if len(rows) == 0 {
-				fmt.Fprintln(out, "no audit rows")
+				_, _ = fmt.Fprintln(out, "no audit rows")
 				return nil
 			}
 			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "BOX\tAT\tACTOR\tACTION\tRESULT\tFLAGS")
+			_, _ = fmt.Fprintln(w, "BOX\tAT\tACTOR\tACTION\tRESULT\tFLAGS")
 			for _, r := range rows {
 				flags := ""
 				if r.Tainted {
@@ -204,10 +204,10 @@ func auditCmd() *cobra.Command {
 					if r.Detail != "" {
 						detail += ": " + r.Detail
 					}
-					fmt.Fprintf(w, "%s\t%d\t-\t-\terror:%s\t%s\n", r.Box, r.At, detail, flags)
+					_, _ = fmt.Fprintf(w, "%s\t%d\t-\t-\terror:%s\t%s\n", r.Box, r.At, detail, flags)
 					continue
 				}
-				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Box, r.At, r.Actor, r.Action, r.Result, flags)
+				_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Box, r.At, r.Actor, r.Action, r.Result, flags)
 			}
 			return w.Flush()
 		},

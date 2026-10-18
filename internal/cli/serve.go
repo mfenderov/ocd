@@ -52,7 +52,7 @@ func serveAddr() string {
 func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func() (string, error)) {
 	token := os.Getenv("OCD_ADMIN_TOKEN")
 	if token == "" {
-		fmt.Fprintln(w, "admin off (OCD_ADMIN_TOKEN unset)")
+		_, _ = fmt.Fprintln(w, "admin off (OCD_ADMIN_TOKEN unset)")
 		return
 	}
 	publicBase := os.Getenv("OCD_PUBLIC_URL")
@@ -67,7 +67,7 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 	mux.Handle("/admin/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
 	mux.Handle("/admin/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
 	mux.Handle("/admin/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
-	fmt.Fprintln(w, "admin on (/admin/* behind Bearer auth)")
+	_, _ = fmt.Fprintln(w, "admin on (/admin/* behind Bearer auth)")
 }
 
 // startHeartbeat POSTs one box heartbeat to the Worker every heartbeatInterval
@@ -79,11 +79,11 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 	workerURL := os.Getenv("OCD_WORKER_URL")
 	if workerURL == "" {
-		fmt.Fprintln(w, "heartbeat off (OCD_WORKER_URL unset)")
+		_, _ = fmt.Fprintln(w, "heartbeat off (OCD_WORKER_URL unset)")
 		return
 	}
 	interval := heartbeatInterval()
-	fmt.Fprintln(w, "heartbeat on (every "+interval.String()+")")
+	_, _ = fmt.Fprintln(w, "heartbeat on (every "+interval.String()+")")
 	client := &http.Client{} // dedicated: SendOnce clones it, never shares or mutates
 	go func() {
 		tick := time.NewTicker(interval)
@@ -96,7 +96,7 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 			}
 			ok, err := boxagent.SendOnce(st, client, workerURL, os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"), enrollToken, boxadmin.Version)
 			if err != nil {
-				fmt.Fprintln(w, "heartbeat failed:", err)
+				_, _ = fmt.Fprintln(w, "heartbeat failed:", err)
 				return
 			}
 			if ok {
@@ -143,26 +143,26 @@ func RunServe(w io.Writer) error {
 	poll := hookPath == ""
 	go func() {
 		if err := tg.Start(ctx, st, poll); err != nil {
-			fmt.Fprintln(w, "telegram:", err)
+			_, _ = fmt.Fprintln(w, "telegram:", err)
 		}
 	}()
 
 	mux := http.NewServeMux()
 	mux.Handle("/pair", pair.Handler(st, execPair))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 	mountAdmin(mux, w, st, execPair)
 	startHeartbeat(ctx, w, st)
 
 	if poll {
-		fmt.Fprintln(w, "mode: polling")
+		_, _ = fmt.Fprintln(w, "mode: polling")
 	} else {
 		mux.Handle("/webhook/"+hookPath, hook.Handler(st, hookSecret, st.SeenUpdate,
 			func(chatID, fromID int64, chatType, text string) {
 				tg.Dispatch(ctx, st, chatID, fromID, chatType, text)
 			}))
-		fmt.Fprintln(w, "mode: webhook (polling off)")
+		_, _ = fmt.Fprintln(w, "mode: webhook (polling off)")
 	}
 
 	addr := serveAddr()
@@ -170,7 +170,7 @@ func RunServe(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(w, "ocd serve on http://"+ln.Addr().String())
+	_, _ = fmt.Fprintln(w, "ocd serve on http://"+ln.Addr().String())
 	return http.Serve(ln, mux)
 }
 
@@ -195,27 +195,27 @@ func newPath() (string, error) {
 func setupWebhook(ctx context.Context, w io.Writer, st *store.Store) (string, string) {
 	base := os.Getenv("OCD_WEBHOOK_BASE")
 	if base == "" {
-		fmt.Fprintln(w, "webhook off (OCD_WEBHOOK_BASE unset), polling only")
+		_, _ = fmt.Fprintln(w, "webhook off (OCD_WEBHOOK_BASE unset), polling only")
 		return "", ""
 	}
 	secret, err := newSecret()
 	if err != nil {
-		fmt.Fprintln(w, "webhook off (no entropy):", err)
+		_, _ = fmt.Fprintln(w, "webhook off (no entropy):", err)
 		return "", ""
 	}
 	path, err := newPath()
 	if err != nil {
-		fmt.Fprintln(w, "webhook off (no entropy):", err)
+		_, _ = fmt.Fprintln(w, "webhook off (no entropy):", err)
 		return "", ""
 	}
 	url := base + "/webhook/" + path
 	if err := tg.SetWebhook(ctx, url, secret); err != nil {
-		fmt.Fprintln(w, "webhook off (setWebhook failed, polling continues):", err)
+		_, _ = fmt.Fprintln(w, "webhook off (setWebhook failed, polling continues):", err)
 		st.Audit("tg:owner", "webhook_failed", "", "", err.Error())
 		return "", ""
 	}
 	st.Audit("tg:owner", "webhook_on", "", "", url)
-	fmt.Fprintln(w, "webhook on:", url)
+	_, _ = fmt.Fprintln(w, "webhook on:", url)
 	go func() {
 		<-ctx.Done()
 		_ = tg.DeleteWebhook(ctx)

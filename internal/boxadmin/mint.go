@@ -56,11 +56,11 @@ func MintHandler(st *store.Store, exec func() (string, error), publicBase string
 					return
 				}
 				st.AuditUA("admin", "link_issued", "admin", ip, "ok", ua)
-				fmt.Fprint(w, publicBase+"?t="+tok)
+				_, _ = fmt.Fprint(w, publicBase+"?t="+tok)
 				return
 			}
 			if live, ok := st.LookupIdem(key); ok {
-				fmt.Fprint(w, publicBase+"?t="+live)
+				_, _ = fmt.Fprint(w, publicBase+"?t="+live)
 				return
 			}
 		}

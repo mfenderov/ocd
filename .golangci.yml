@@ -1,0 +1,14 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - errcheck
+
+  exclusions:
+    rules:
+      # Test cleanup calls do not need error checks.
+      - path: _test\.go
+        linters: [errcheck]
+      # Deferred Close calls: immaterial here, always ignore the result.
+      - text: 'Error return value of `.*\.Close`'
+        linters: [errcheck]
