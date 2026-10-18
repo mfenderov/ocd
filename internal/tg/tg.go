@@ -229,7 +229,87 @@ func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, c
 		})
 	case strings.HasPrefix(text, "/revoke"):
 		handleRevoke(ctx, b, st, chatID, text)
+	case text == "/fleet":
+		sendFleetReply(ctx, b, st, chatID, "", "status", func() (string, error) {
+			return FleetStatusText(ctx)
+		})
+	case strings.HasPrefix(text, "/flink"):
+		box := firstFleetArg(text, "/flink")
+		sendFleetReply(ctx, b, st, chatID, box, "link", func() (string, error) {
+			return FleetLinkText(ctx, box)
+		})
+	case strings.HasPrefix(text, "/frevoke"):
+		box, confirmed := fleetBoxConfirm(text, "/frevoke")
+		sendFleetReply(ctx, b, st, chatID, box, "revoke", func() (string, error) {
+			return FleetRevokeText(ctx, box, confirmed)
+		})
+	case strings.HasPrefix(text, "/fnuke"):
+		confirmed := hasFleetYes(text, "/fnuke")
+		sendFleetReply(ctx, b, st, chatID, "", "nuke", func() (string, error) {
+			return FleetNukeText(ctx, confirmed)
+		})
+	case strings.HasPrefix(text, "/faudit"):
+		box, n := fleetAuditArgs(text, "/faudit")
+		sendFleetReply(ctx, b, st, chatID, box, "audit", func() (string, error) {
+			return FleetAuditText(ctx, box, n)
+		})
 	}
+}
+
+// sendFleetReply delivers one fleet command result, auditing failures.
+func sendFleetReply(ctx context.Context, b *bot.Bot, st *store.Store, chatID int64, box, action string, text func() (string, error)) {
+	msg, err := text()
+	if err != nil {
+		st.Audit("tg:owner", "fleet_failed", box, action, err.Error())
+		msg = "⚠️ <b>Fleet failed:</b> " + esc(err.Error())
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: msg})
+}
+
+// firstFleetArg returns the argument after a bare command (/flink <box>).
+func firstFleetArg(text, cmd string) string {
+	fields := strings.Fields(text)
+	if len(fields) != 2 || fields[0] != cmd {
+		return ""
+	}
+	return fields[1]
+}
+
+// fleetBoxConfirm parses /frevoke <box> [YES]: trailing YES confirms.
+func fleetBoxConfirm(text, cmd string) (string, bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 || fields[0] != cmd {
+		return "", false
+	}
+	box := fields[1]
+	if box == "YES" {
+		return "", false
+	}
+	return box, len(fields) > 2 && fields[len(fields)-1] == "YES"
+}
+
+// hasFleetYes reports a trailing YES (/fnuke YES).
+func hasFleetYes(text, cmd string) bool {
+	fields := strings.Fields(text)
+	return len(fields) == 2 && fields[0] == cmd && fields[1] == "YES"
+}
+
+// fleetAuditArgs parses /faudit [box] [n]: the numeric argument is the limit.
+func fleetAuditArgs(text, cmd string) (string, int) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || fields[0] != cmd {
+		return "", 0
+	}
+	box, n := "", 0
+	for _, a := range fields[1:] {
+		var v int
+		if _, err := fmt.Sscanf(a, "%d", &v); err == nil {
+			n = v
+		} else if box == "" {
+			box = a
+		}
+	}
+	return box, n
 }
 
 func handleRevoke(ctx context.Context, b *bot.Bot, st *store.Store, chatID int64, text string) {
