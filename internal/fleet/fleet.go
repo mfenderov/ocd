@@ -37,8 +37,12 @@ type Client struct {
 
 // NewClientFromEnv builds a Client from OCD_WORKER_URL + OCD_FLEET_TOKEN.
 // Keychain integration is explicitly out of scope (see package doc).
+// The Worker URL accepts both the bare origin and the heartbeat endpoint:
+// a trailing /api/heartbeat (the heartbeat sender's canonical form) is
+// stripped so fleet paths resolve under the origin either way.
 func NewClientFromEnv() (*Client, error) {
 	base := strings.TrimSuffix(os.Getenv("OCD_WORKER_URL"), "/")
+	base = strings.TrimSuffix(base, "/api/heartbeat")
 	if base == "" {
 		return nil, fmt.Errorf("fleet: OCD_WORKER_URL is empty; point it at the fleet Worker origin")
 	}
