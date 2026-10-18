@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.7.0 - 2026-10-18
+#### Features
+- typed enroll codes replace the approve tap - (c64919e) - mfenderov
+
+- - -
+
 ## v0.6.0 - 2026-10-18
 #### Features
 - ocd onboard TUI for single-command box enrollment - (8935f54) - mfenderov
