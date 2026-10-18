@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mfenderov/ocd/internal/admin"
+	"github.com/mfenderov/ocd/internal/fleet"
 	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/store"
 )
@@ -154,6 +155,6 @@ func Root() *cobra.Command {
 	}
 	revoke.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
 
-	root.AddCommand(serve, mintCmd, devices, status, revoke)
+	root.AddCommand(serve, mintCmd, devices, status, revoke, fleet.NewCommand())
 	return root
 }

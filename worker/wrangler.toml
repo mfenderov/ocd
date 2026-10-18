@@ -10,5 +10,17 @@ class_name = "FleetState"
 tag = "v1"
 new_sqlite_classes = ["FleetState"]
 
+# Task 3 console page: the static root ships with the Worker. Binding form
+# (no automatic serving): /console is served by the Worker route from the
+# bundled import so the Access gate cannot be bypassed via a direct asset
+# path; the binding reserves explicit asset fetches for later.
+[assets]
+directory = "./static"
+binding = "ASSETS"
+
 [vars]
 ENROLL_BASE_URL = "https://ocd-fleet.fenderovlol.workers.dev"
+# No ACCESS_* defaults here by design: unset means deny-all fail-closed
+# for browsers (see accessConfig in src/state.ts + src/index.ts). Set all
+# three via secrets/dashboard before deploy; test values live ONLY in
+# vitest.config.ts miniflare bindings and must never go live.

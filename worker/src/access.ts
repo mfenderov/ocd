@@ -1,0 +1,309 @@
+import { extractBearer } from "./heartbeat";
+import { requireScope, type CliScope, type TokenStore } from "./tokens";
+
+// Task 2 guards: CLI-token scopes for API routes plus a Cloudflare Access
+// JWT bypass for browser paths. Both layers consult this module: the Worker
+// edge (index.ts) short-circuits credential-less requests to guarded routes,
+// and the DO (state.ts) enforces validity via authorizeRequest. Denials are
+// uniform 401s — a valid-token-wrong-scope is indistinguishable from an
+// unknown token, so there is no scope oracle.
+
+// Browser assertion header set by Cloudflare Access in front of the Worker.
+export const ACCESS_ASSERTION_HEADER = "cf-access-jwt-assertion";
+
+export interface AccessConfig {
+  // Team domain, e.g. "team.cloudflareaccess.com". The JWKS is derived as
+  // https://<team>/cdn-cgi/access/certs (standard Access pattern).
+  teamDomain?: string;
+  // Access application AUD tag the JWT must carry.
+  aud?: string;
+  // Single allowlisted email. Unset/empty = deny-all fail-closed.
+  allowedEmail?: string;
+}
+
+export interface AccessDeps {
+  fetcher?: typeof fetch;
+  nowSec?: () => number;
+}
+
+// JWKS cache: one entry per team URL, 10-minute TTL, refetched once on a
+// kid miss so key rotation heals without waiting out the TTL.
+const ACCESS_JWKS_TTL_SEC = 600;
+
+interface JwksEntry {
+  fetchedAtSec: number;
+  keys: JwksKey[];
+}
+
+// workers-types JsonWebKey predates kid; Access JWKS entries always carry one.
+interface JwksKey extends JsonWebKey {
+  kid?: string;
+}
+
+const jwksCache = new Map<string, JwksEntry>();
+
+export function clearAccessCache(): void {
+  jwksCache.clear();
+}
+
+export function unauthorized(): Response {
+  return Response.json({ error: "unauthorized" }, { status: 401 });
+}
+
+// Edge route -> required CLI scope, mirroring the router predicates in
+// index.ts exactly (degenerate empty ids match no mutating route there or
+// here). Box, enrollment, and token-lifecycle routes are unguarded: boxes
+// carry their own tokens and enroll approves via capability links.
+export function scopeForEdgeRoute(method: string, pathname: string): CliScope | null {
+  if (method === "GET" && pathname === "/api/backends") {
+    return "audit";
+  }
+  if (method === "GET" && pathname === "/api/audit") {
+    return "audit";
+  }
+  if (method === "POST" && pathname === "/api/revoke-all") {
+    return "revoke";
+  }
+  if (
+    method === "POST" &&
+    pathname.startsWith("/api/backends/") &&
+    pathname.endsWith("/revoke") &&
+    pathname.length > "/api/backends//revoke".length
+  ) {
+    return "revoke";
+  }
+  if (
+    method === "POST" &&
+    pathname.startsWith("/api/backends/") &&
+    pathname.endsWith("/link") &&
+    pathname.length > "/api/backends//link".length
+  ) {
+    return "link";
+  }
+  return null;
+}
+
+// DO-internal path -> required CLI scope, mirroring state.ts dispatch.
+export function scopeForDoRoute(method: string, pathname: string): CliScope | null {
+  if (method === "GET" && pathname === "/backends") {
+    return "audit";
+  }
+  if (method === "GET" && pathname === "/audit") {
+    return "audit";
+  }
+  if (method === "POST" && pathname === "/revoke-all") {
+    return "revoke";
+  }
+  if (method === "POST" && pathname.startsWith("/revoke/")) {
+    return "revoke";
+  }
+  if (method === "POST" && pathname.startsWith("/link/")) {
+    return "link";
+  }
+  return null;
+}
+
+// Choke point for guarded routes: a bearer token with the route scope
+// allows, else a valid Access JWT allows (browser bypass). Anything else —
+// no credential, unknown token, insufficient scope, bad JWT — denies with
+// false. OR semantics: a valid CLI token still allows when a stale JWT rides
+// along (CLI automation must not break on proxy-injected headers), and a
+// forged JWT alone grants nothing. Returns a plain boolean (never a wrapper
+// object) so call-site negation cannot mistake it for truthy. Never throws;
+// never logs the assertion.
+export async function authorizeRequest(
+  request: Request,
+  store: TokenStore,
+  scope: CliScope,
+  config: AccessConfig = {},
+  deps: AccessDeps = {},
+): Promise<boolean> {
+  try {
+    const bearer = extractBearer(request);
+    if (bearer && (await requireScope(store, bearer, scope))) {
+      return true;
+    }
+    const assertion = request.headers.get(ACCESS_ASSERTION_HEADER);
+    if (assertion && (await verifyAccessJwt(assertion, config, deps))) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Validates Cf-Access-Jwt-Assertion: RS256 signature against the team's
+// JWKS (fetched + cached), then aud + expiry + allowlisted email. Returns
+// the email on success, null on any failure — including incomplete config
+// (unset allowlist/aud/team = deny-all fail-closed). Never throws.
+export async function verifyAccessJwt(
+  assertion: string,
+  config: AccessConfig,
+  deps: AccessDeps = {},
+): Promise<string | null> {
+  try {
+    if (!config.teamDomain || !config.aud || !config.allowedEmail) {
+      return null;
+    }
+    const parts = assertion.split(".");
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+      return null;
+    }
+    const header = parseJwtHeader(parts[0]);
+    if (!header) {
+      return null;
+    }
+    const nowSec = deps.nowSec ?? defaultNowSec;
+    if (!validClaims(parts[1], config, nowSec())) {
+      return null;
+    }
+    const key = await findJwkKey(config.teamDomain, header.kid, deps);
+    if (!key) {
+      return null;
+    }
+    return (await verifyRs256(parts[0], parts[1], parts[2], key))
+      ? validClaimsEmail(parts[1], config)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultNowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function b64urlToBytes(input: string): Uint8Array | null {
+  try {
+    const padded = input.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(input.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function b64urlToJson(input: string): Record<string, unknown> | null {
+  const bytes = b64urlToBytes(input);
+  if (!bytes) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+// Header must pin RS256 + a kid: anything else (none, HS256, missing kid)
+// fails closed against alg confusion.
+function parseJwtHeader(segment: string): { kid: string } | null {
+  const json = b64urlToJson(segment);
+  if (!json || json["alg"] !== "RS256" || typeof json["kid"] !== "string" || !json["kid"]) {
+    return null;
+  }
+  return { kid: json["kid"] };
+}
+
+function claimAudMatches(claim: unknown, aud: string): boolean {
+  if (typeof claim === "string") {
+    return claim === aud;
+  }
+  return Array.isArray(claim) && claim.includes(aud);
+}
+
+function validClaims(segment: string, config: AccessConfig, now: number): boolean {
+  const json = b64urlToJson(segment);
+  if (!json) {
+    return false;
+  }
+  if (!claimAudMatches(json["aud"], config.aud ?? "")) {
+    return false;
+  }
+  if (typeof json["exp"] !== "number" || !(json["exp"] > now)) {
+    return false;
+  }
+  return typeof json["email"] === "string" && json["email"].length > 0;
+}
+
+function validClaimsEmail(segment: string, config: AccessConfig): string | null {
+  const json = b64urlToJson(segment);
+  const email = json?.["email"];
+  if (typeof email !== "string" || email.toLowerCase() !== (config.allowedEmail ?? "").toLowerCase()) {
+    return null;
+  }
+  return email;
+}
+
+function jwksUrl(teamDomain: string): string {
+  return `https://${teamDomain}/cdn-cgi/access/certs`;
+}
+
+async function fetchJwks(url: string, fetcher: typeof fetch): Promise<JwksKey[] | null> {
+  try {
+    const res = await fetcher(url);
+    if (!res.ok) {
+      return null;
+    }
+    const doc: unknown = await res.json();
+    if (typeof doc !== "object" || doc === null || !Array.isArray((doc as Record<string, unknown>)["keys"])) {
+      return null;
+    }
+    return (doc as { keys: JwksKey[] }).keys;
+  } catch {
+    return null;
+  }
+}
+
+async function findJwkKey(teamDomain: string, kid: string, deps: AccessDeps): Promise<JwksKey | null> {
+  const url = jwksUrl(teamDomain);
+  const fetcher = deps.fetcher ?? fetch;
+  const now = (deps.nowSec ?? defaultNowSec)();
+  const cached = jwksCache.get(url);
+  let keys = cached && now - cached.fetchedAtSec < ACCESS_JWKS_TTL_SEC ? cached.keys : await fetchJwks(url, fetcher);
+  if (!keys) {
+    return null;
+  }
+  if (!cached || keys !== cached.keys) {
+    jwksCache.set(url, { fetchedAtSec: now, keys });
+  }
+  let match = keys.find((k) => k.kid === kid && k.kty === "RSA");
+  if (!match) {
+    // Possible rotation since the cache fill: one refetch, then give up.
+    const fresh = await fetchJwks(url, fetcher);
+    if (!fresh) {
+      return null;
+    }
+    jwksCache.set(url, { fetchedAtSec: (deps.nowSec ?? defaultNowSec)(), keys: fresh });
+    match = fresh.find((k) => k.kid === kid && k.kty === "RSA");
+  }
+  return match ?? null;
+}
+
+async function verifyRs256(h: string, p: string, sigB64: string, jwk: JwksKey): Promise<boolean> {
+  try {
+    const sig = b64urlToBytes(sigB64);
+    if (!sig) {
+      return false;
+    }
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    return await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, sig, new TextEncoder().encode(`${h}.${p}`));
+  } catch {
+    return false;
+  }
+}

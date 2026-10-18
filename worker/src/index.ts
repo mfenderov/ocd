@@ -1,12 +1,56 @@
+import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute, unauthorized, verifyAccessJwt, type AccessConfig } from "./access";
+import { extractBearer } from "./heartbeat";
 import { FleetState } from "./state";
+import type { CliScope } from "./tokens";
+import consoleHtml from "../static/console.html";
 
 export { FleetState };
 
 export interface Env {
   FLEET_STATE: DurableObjectNamespace;
+  // Cloudflare Access browser bypass (Task 2): same vars the DO reads.
+  // Unset = deny-all fail-closed for /console, mirroring the API guards.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  ACCESS_ALLOWED_EMAIL?: string;
 }
 
-async function handleBackends(env?: Env): Promise<Response> {
+function accessConfigFromEnv(env: Env | undefined): AccessConfig {
+  return {
+    teamDomain: env?.ACCESS_TEAM_DOMAIN,
+    aud: env?.ACCESS_AUD,
+    allowedEmail: env?.ACCESS_ALLOWED_EMAIL,
+  };
+}
+
+// Task 3 console page: browser-only path behind the Access JWT check (no
+// CLI-token bypass — the page itself needs no token; its fetch calls ride
+// the browser Access session). Verified before serving so /console* never
+// leaks the shell to unauthenticated callers.
+async function serveConsole(request: Request, env: Env | undefined): Promise<Response> {
+  const assertion = request.headers.get(ACCESS_ASSERTION_HEADER);
+  if (!assertion || !(await verifyAccessJwt(assertion, accessConfigFromEnv(env)))) {
+    return unauthorized();
+  }
+  if (request.method !== "GET") {
+    return new Response("Not Found", { status: 404 });
+  }
+  return new Response(consoleHtml, {
+    status: 200,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+// Single choke point for every plain DO passthrough: binding check, then
+// forward method + mapped path + headers + body verbatim. Backends reads go
+// through here too so the Authorization/Access headers reach the DO scope
+// guard. Routes needing more (query preservation in enroll/audit, id
+// extraction in link) keep their own helpers.
+export async function forwardToDo(
+  request: Request,
+  env: Env | undefined,
+  doPath: string,
+): Promise<Response> {
   if (!env?.FLEET_STATE) {
     console.error("FLEET_STATE binding is not configured");
     return new Response("FLEET_STATE binding is not configured", {
@@ -14,18 +58,7 @@ async function handleBackends(env?: Env): Promise<Response> {
     });
   }
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch("http://do/backends");
-}
-
-async function handleHeartbeatApi(request: Request, env?: Env): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request("http://do/heartbeat", request));
+  return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
 async function handleEnrollApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
@@ -56,17 +89,6 @@ async function handleLinkApi(request: Request, env: Env | undefined): Promise<Re
   );
 }
 
-async function handleRevokeApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return await stub.fetch(new Request(`http://do${doPath}`, request));
-}
-
 async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
   if (!env?.FLEET_STATE) {
     console.error("FLEET_STATE binding is not configured");
@@ -83,14 +105,33 @@ async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Task 2 edge fast-path: a guarded route with no credential at all (no
+    // bearer, no Access assertion) cannot authorize — 401 without a DO
+    // roundtrip. Scope/JWT validity is enforced DO-side in state.ts. With no
+    // binding the route handlers still fail loud 500 below, so this yields
+    // to them when env is missing.
+    const scope: CliScope | null = scopeForEdgeRoute(request.method, url.pathname);
+    if (
+      scope &&
+      env?.FLEET_STATE &&
+      !extractBearer(request) &&
+      !request.headers.get(ACCESS_ASSERTION_HEADER)
+    ) {
+      return unauthorized();
+    }
     if (request.method === "GET" && url.pathname === "/api/backends") {
-      return handleBackends(env);
+      return forwardToDo(request, env, "/backends");
+    }
+    // Console page (Task 3): every /console* method is Access-gated inside
+    // serveConsole (401 anon); GET serves the page, others 404.
+    if (url.pathname === "/console" || url.pathname.startsWith("/console/")) {
+      return serveConsole(request, env);
     }
     if (request.method === "GET" && url.pathname === "/api/audit") {
       return handleAuditApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/revoke-all") {
-      return handleRevokeApi(request, env, "/revoke-all");
+      return forwardToDo(request, env, "/revoke-all");
     }
     if (
       request.method === "POST" &&
@@ -99,7 +140,7 @@ export default {
       url.pathname.length > "/api/backends//revoke".length
     ) {
       const id = url.pathname.slice(0, -"/revoke".length).slice("/api/backends/".length);
-      return handleRevokeApi(request, env, `/revoke/${encodeURIComponent(id)}`);
+      return forwardToDo(request, env, `/revoke/${encodeURIComponent(id)}`);
     }
     if (
       request.method === "POST" &&
@@ -110,7 +151,7 @@ export default {
       return handleLinkApi(request, env);
     }
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
-      return handleHeartbeatApi(request, env);
+      return forwardToDo(request, env, "/heartbeat");
     }
     if (request.method === "POST" && url.pathname === "/api/enroll") {
       return handleEnrollApi(request, env, "/enroll");
@@ -120,6 +161,27 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/enroll/deny") {
       return handleEnrollApi(request, env, "/enroll/deny");
+    }
+    if (request.method === "POST" && url.pathname === "/api/tokens") {
+      return forwardToDo(request, env, "/tokens");
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/api/tokens/") &&
+      url.pathname.endsWith("/rotate") &&
+      url.pathname.length > "/api/tokens//rotate".length
+    ) {
+      const id = url.pathname.slice("/api/tokens/".length, -"/rotate".length);
+      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}/rotate`);
+    }
+    if (
+      request.method === "DELETE" &&
+      url.pathname.startsWith("/api/tokens/") &&
+      !url.pathname.slice("/api/tokens/".length).includes("/") &&
+      url.pathname.length > "/api/tokens/".length
+    ) {
+      const id = url.pathname.slice("/api/tokens/".length);
+      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}`);
     }
     return new Response("Not Found", { status: 404 });
   },

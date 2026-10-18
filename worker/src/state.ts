@@ -1,4 +1,5 @@
 import { handleAudit } from "./audit";
+import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
@@ -11,8 +12,14 @@ import {
   type PendingRow,
 } from "./enroll";
 import { handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
-import { handleMintLink, type TombstoneRow } from "./mint";
+import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
+import {
+  handleDeleteToken,
+  handleMintToken,
+  handleRotateToken,
+  type TokenRow,
+} from "./tokens";
 
 export interface BoxRow {
   id: string;
@@ -29,7 +36,10 @@ export interface BoxRow {
 
 // Public backends shape: everything the console needs, none of the secret
 // material. GET /backends serves exactly this — token hashes and the sealed
-// admin blob never leave the DO over that route.
+// admin blob never leave the DO over that route. `tombstoned` is the
+// server-side pending-revoke marker (same isTainted rule as mint/audit), so
+// the console renders it on fresh load instead of guessing offline vs
+// blocked.
 export interface BoxPublic {
   id: string;
   hostname: string;
@@ -38,6 +48,7 @@ export interface BoxPublic {
   last_ts: number;
   last_seen: number;
   enrolled: number;
+  tombstoned: boolean;
 }
 
 // Deny marker: a refused enrollment leaves id + timestamp (never tokens) so
@@ -92,8 +103,15 @@ interface FleetEnv {
   TELEGRAM_OWNER_CHAT_ID?: string;
   ENROLL_CAPABILITY_SECRET?: string;
   ADMIN_SEAL_SECRET?: string;
+  FLEET_BOOTSTRAP_SECRET?: string;
   ENROLL_BASE_URL?: string;
   FLEET_HOST_SUFFIXES?: string;
+  // Cloudflare Access browser bypass (Task 2): team domain derives the JWKS
+  // URL, aud is the Access application tag, allowlist is the single owner
+  // email. All unset in test/dev — the JWT path then denies fail-closed.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  ACCESS_ALLOWED_EMAIL?: string;
 }
 
 export class FleetState implements DurableObject {
@@ -102,8 +120,12 @@ export class FleetState implements DurableObject {
   private ownerChatId?: string;
   private capSecret?: string;
   private sealKey?: string;
+  private bootstrapSecret?: string;
   private baseUrl?: string;
   private hostSuffixes?: string;
+  private teamDomain?: string;
+  private accessAud?: string;
+  private allowedEmail?: string;
   private mismatchPinged = new Map<string, number>();
 
   constructor(state: DurableObjectState, env?: FleetEnv) {
@@ -112,8 +134,12 @@ export class FleetState implements DurableObject {
     this.ownerChatId = env?.TELEGRAM_OWNER_CHAT_ID;
     this.capSecret = env?.ENROLL_CAPABILITY_SECRET;
     this.sealKey = env?.ADMIN_SEAL_SECRET;
+    this.bootstrapSecret = env?.FLEET_BOOTSTRAP_SECRET;
     this.baseUrl = env?.ENROLL_BASE_URL;
     this.hostSuffixes = env?.FLEET_HOST_SUFFIXES;
+    this.teamDomain = env?.ACCESS_TEAM_DOMAIN;
+    this.accessAud = env?.ACCESS_AUD;
+    this.allowedEmail = env?.ACCESS_ALLOWED_EMAIL;
   }
 
   private notifier(): NotifyFn {
@@ -126,6 +152,14 @@ export class FleetState implements DurableObject {
       baseUrl: this.baseUrl,
       sealKey: this.sealKey,
       hostSuffixes: parseHostSuffixes(this.hostSuffixes),
+    };
+  }
+
+  private accessConfig(): AccessConfig {
+    return {
+      teamDomain: this.teamDomain,
+      aud: this.accessAud,
+      allowedEmail: this.allowedEmail,
     };
   }
 
@@ -146,12 +180,26 @@ export class FleetState implements DurableObject {
     if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
       this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
     }
+    // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
+    // a missing table reads as zero columns, so fresh and existing DBs
+    // converge here instead of in the one-shot SCHEMA string.
+    const tokenCols = this.state.storage.sql.exec("PRAGMA table_info(cli_tokens)").toArray() as Array<{
+      name: string;
+    }>;
+    if (tokenCols.length === 0) {
+      this.state.storage.sql.exec(
+        "CREATE TABLE cli_tokens(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)",
+      );
+    }
   }
 
   listBackends(): BoxPublic[] {
     this.ensureSchema();
     const cursor = this.state.storage.sql.exec(`SELECT ${PUBLIC_COLUMNS} FROM boxes ORDER BY id`);
-    return cursor.toArray() as unknown as BoxPublic[];
+    const rows = cursor.toArray() as unknown as Array<Omit<BoxPublic, "tombstoned">>;
+    // One tombstone read per box (fleets are small): same isTainted rule the
+    // mint gate and audit markers use — no duplicated state, no second table.
+    return rows.map((row) => ({ ...row, tombstoned: isTainted(row.epoch, this.getTombstone(row.id)) }));
   }
 
   // Full rows stay inside the DO: audit/revoke relays decrypt the sealed
@@ -250,6 +298,45 @@ export class FleetState implements DurableObject {
     );
   }
 
+  // CLI token rows (Task 1): hashes and scope JSON only — plaintext values
+  // never reach SQLite. No listing endpoint serves these rows.
+  getToken(id: string): TokenRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT id, token_hash, scopes, created_at FROM cli_tokens WHERE id = ? LIMIT 1", id);
+    return cursor.toArray()[0] as unknown as TokenRow | undefined;
+  }
+
+  getTokenByHash(hash: string): TokenRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT id, token_hash, scopes, created_at FROM cli_tokens WHERE token_hash = ? LIMIT 1",
+      hash,
+    );
+    return cursor.toArray()[0] as unknown as TokenRow | undefined;
+  }
+
+  putToken(row: TokenRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO cli_tokens (id, token_hash, scopes, created_at) VALUES (?, ?, ?, ?)",
+      row.id,
+      row.token_hash,
+      row.scopes,
+      row.created_at,
+    );
+  }
+
+  deleteToken(id: string): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("DELETE FROM cli_tokens WHERE id = ?", id);
+  }
+
+  countTokens(): number {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT COUNT(*) AS n FROM cli_tokens");
+    return (cursor.toArray()[0] as unknown as { n: number }).n;
+  }
+
   deleteTombstone(boxId: string): void {
     this.ensureSchema();
     this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
@@ -257,6 +344,15 @@ export class FleetState implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // Task 2 guards: link needs link scope, revoke/revoke-all need revoke,
+    // backends/audit reads need audit — or a valid Access JWT (browser
+    // bypass). Auth runs before existence checks, so unknown ids with bad
+    // credentials read 401, never 404. Heartbeat/enroll/token routes keep
+    // their own auth and are untouched.
+    const scope = scopeForDoRoute(request.method, url.pathname);
+    if (scope && !(await authorizeRequest(request, this, scope, this.accessConfig()))) {
+      return unauthorized();
+    }
     if (request.method === "GET" && url.pathname === "/backends") {
       return Response.json(this.listBackends());
     }
@@ -305,6 +401,27 @@ export class FleetState implements DurableObject {
       return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
         sealKey: this.sealKey,
       });
+    }
+    if (request.method === "POST" && url.pathname === "/tokens") {
+      return handleMintToken(request, this, { bootstrapSecret: this.bootstrapSecret });
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/tokens/") && url.pathname.endsWith("/rotate")) {
+      const id = decodeURIComponent(url.pathname.slice("/tokens/".length, -"/rotate".length));
+      if (!id) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleRotateToken(id, request, this);
+    }
+    if (
+      request.method === "DELETE" &&
+      url.pathname.startsWith("/tokens/") &&
+      !url.pathname.slice("/tokens/".length).includes("/")
+    ) {
+      const id = decodeURIComponent(url.pathname.slice("/tokens/".length));
+      if (!id) {
+        return Response.json({ error: "bad_request" }, { status: 400 });
+      }
+      return handleDeleteToken(id, request, this);
     }
     return new Response("Not Found", { status: 404 });
   }
