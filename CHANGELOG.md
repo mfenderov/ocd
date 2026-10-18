@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.0 - 2026-10-18
+#### Features
+- fleet scope for the Telegram bot - (74d12d9) - mfenderov
+
+- - -
+
 ## v0.4.0 - 2026-10-18
 #### Features
 - remove web console, Telegram is the UI - (83d3de6) - mfenderov
