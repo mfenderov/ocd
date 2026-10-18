@@ -45,3 +45,44 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v3
+
+  bump:
+    name: bump version and trigger release
+    needs: [go, worker, secrets]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Record latest tag
+        id: before
+        run: echo "tag=$(git describe --tags --abbrev=0)" >> "$GITHUB_OUTPUT"
+      - name: Auto bump version and tag
+        uses: cocogitto/cocogitto-action@v4
+        with:
+          command: bump
+          args: --auto
+          git-user: 'github-actions[bot]'
+          git-user-email: 'github-actions[bot]@users.noreply.github.com'
+      # Bot pushes made with GITHUB_TOKEN do not trigger push-event workflows,
+      # but GITHUB_TOKEN with actions:write CAN trigger workflow_dispatch events.
+      # We push the version commit and tag, then dispatch release.yml explicitly.
+      - name: Push version commit and tag, then trigger release
+        run: |
+          BEFORE="${{ steps.before.outputs.tag }}"
+          AFTER="$(git describe --tags --abbrev=0)"
+          if [ "$AFTER" = "$BEFORE" ]; then
+            echo "No new version — nothing to release."
+          else
+            git push origin master
+            git push origin "$AFTER"
+            echo "Triggering release workflow for $AFTER..."
+            gh workflow run release.yml --ref "$AFTER"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
