@@ -1,44 +1,17 @@
-import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute, unauthorized, verifyAccessJwt, type AccessConfig } from "./access";
+import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute, unauthorized } from "./access";
 import { extractBearer } from "./heartbeat";
 import { FleetState } from "./state";
 import type { CliScope } from "./tokens";
-import consoleHtml from "../static/console.html";
 
 export { FleetState };
 
 export interface Env {
   FLEET_STATE: DurableObjectNamespace;
-  // Cloudflare Access browser bypass (Task 2): same vars the DO reads.
-  // Unset = deny-all fail-closed for /console, mirroring the API guards.
+  // Cloudflare Access browser bypass (API dual-auth): same vars the DO reads.
+  // Unset = deny-all fail-closed for JWT-bearer API calls, mirroring the CLI-token guards.
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   ACCESS_ALLOWED_EMAIL?: string;
-}
-
-function accessConfigFromEnv(env: Env | undefined): AccessConfig {
-  return {
-    teamDomain: env?.ACCESS_TEAM_DOMAIN,
-    aud: env?.ACCESS_AUD,
-    allowedEmail: env?.ACCESS_ALLOWED_EMAIL,
-  };
-}
-
-// Task 3 console page: browser-only path behind the Access JWT check (no
-// CLI-token bypass — the page itself needs no token; its fetch calls ride
-// the browser Access session). Verified before serving so /console* never
-// leaks the shell to unauthenticated callers.
-async function serveConsole(request: Request, env: Env | undefined): Promise<Response> {
-  const assertion = request.headers.get(ACCESS_ASSERTION_HEADER);
-  if (!assertion || !(await verifyAccessJwt(assertion, accessConfigFromEnv(env)))) {
-    return unauthorized();
-  }
-  if (request.method !== "GET") {
-    return new Response("Not Found", { status: 404 });
-  }
-  return new Response(consoleHtml, {
-    status: 200,
-    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
-  });
 }
 
 // Single choke point for every plain DO passthrough: binding check, then
@@ -121,11 +94,6 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/backends") {
       return forwardToDo(request, env, "/backends");
-    }
-    // Console page (Task 3): every /console* method is Access-gated inside
-    // serveConsole (401 anon); GET serves the page, others 404.
-    if (url.pathname === "/console" || url.pathname.startsWith("/console/")) {
-      return serveConsole(request, env);
     }
     if (request.method === "GET" && url.pathname === "/api/audit") {
       return handleAuditApi(request, env);
