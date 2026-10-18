@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.0 - 2026-10-18
+#### Features
+- remove web console, Telegram is the UI - (83d3de6) - mfenderov
+
+- - -
+
 ## v0.3.0 - 2026-10-18
 #### Features
 - self-releasing pipeline via cog bump and release dispatch - (4536316) - mfenderov
