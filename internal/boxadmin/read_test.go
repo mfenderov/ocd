@@ -40,8 +40,8 @@ func TestPresenceShape(t *testing.T) {
 	if body["id"] != "box-7" {
 		t.Fatalf("want id box-7, got %v", body["id"])
 	}
-	if body["version"] != "0.3.0" {
-		t.Fatalf("want version 0.3.0, got %v", body["version"])
+	if body["version"] != boxadmin.Version {
+		t.Fatalf("want version == boxadmin.Version %q, got %v", boxadmin.Version, body["version"])
 	}
 	// Box id is read at request time, not handler construction time.
 	t.Setenv("OCD_BOX_ID", "box-8")
@@ -167,7 +167,10 @@ func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
 func TestPresenceVersionIsCanonical(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
-	if boxadmin.Version != "0.3.0" {
+	// Unstamped dev builds report "dev". Release binaries carry the tag
+	// via ldflags (see .goreleaser.yml). If this default moves, the
+	// release stamp contract changed: review before touching.
+	if boxadmin.Version != "dev" {
 		t.Fatalf("canonical version moved without review: %q", boxadmin.Version)
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.PresenceHandler(st))

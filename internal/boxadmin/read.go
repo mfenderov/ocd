@@ -13,7 +13,13 @@ import (
 // Version is the single canonical box software version reported by the
 // presence endpoint and sent in heartbeats. Callers (e.g. the serve
 // heartbeat wiring) must use this, never a copy, so a bump lands once.
-const Version = "0.3.0"
+//
+// It is a var, not a const, so goreleaser can stamp it at release time:
+//
+//	ldflags: -X github.com/mfenderov/ocd/internal/boxadmin.Version={{.Version}}
+//
+// Local/dev builds report "dev"; only stamped release binaries report tags.
+var Version = "dev"
 
 // AuditHandler serves recent audit rows as a JSON array. Query param n
 // sets the row count (default 50, capped at 200). Nothing from the
