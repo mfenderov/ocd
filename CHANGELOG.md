@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.8.3 - 2026-10-19
+#### Bug Fixes
+- clear macOS quarantine on cask install - (85c146a) - mfenderov
+
+- - -
+
 ## v0.8.2 - 2026-10-19
 #### Bug Fixes
 - enroll tolerates heartbeat-suffixed worker URL - (cece393) - mfenderov
