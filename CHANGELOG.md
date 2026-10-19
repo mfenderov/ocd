@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.16.0 - 2026-10-19
+#### Features
+- /link is the box menu - (17c89eb) - mfenderov
+
+- - -
+
 ## v0.15.0 - 2026-10-19
 #### Features
 - button-driven Telegram UI (fleet board + one-tap links) - (685a5ee) - mfenderov
