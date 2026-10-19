@@ -1174,4 +1174,19 @@ describe("enrollment code claim (typed code from Telegram)", () => {
     expect(res.rotated).toBe(true);
     expect(rec.texts.some((t) => t.includes("known-1"))).toBe(true);
   });
+
+  it("quiet enroll parks pending with no approve/deny ping", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    const res = await requestEnrollment(
+      store,
+      { id: "quiet-1", hostname: "quiet-1.buyallmemes.com", enroll_token: NEW_TOKEN, quiet: true },
+      rec.notify,
+      () => 1700000100,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
+    );
+    expect(res.status).toBe("pending");
+    expect(store.getPending("quiet-1")).toBeDefined();
+    expect(rec.texts).toHaveLength(0);
+  });
 });

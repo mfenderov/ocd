@@ -36,7 +36,7 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	status, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret")
+	status, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", false)
 	if err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestEnrollRefusesEmptyIdentity(t *testing.T) {
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "", "h.example.com", "tok", ""); err == nil {
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "", "h.example.com", "tok", "", false); err == nil {
 		t.Fatal("want error for empty box id")
 	}
 	if hit {
@@ -84,7 +84,7 @@ func TestEnrollToleratesHeartbeatSuffixedOrigin(t *testing.T) {
 	defer cancel()
 	// Home's OCD_WORKER_URL ends in /api/heartbeat; enroll must still land
 	// on /api/enroll (bot /enrollcode 404 regression, 2026-10-19).
-	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL+"/api/heartbeat", "box-9", "h.example.com", "tok", ""); err != nil {
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL+"/api/heartbeat", "box-9", "h.example.com", "tok", "", false); err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
 	if gotPath != "/api/enroll" {

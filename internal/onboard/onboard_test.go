@@ -3,6 +3,7 @@ package onboard_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -326,23 +327,6 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 	}
 }
 
-func TestFormValuesWithDefaults(t *testing.T) {
-	got := onboard.FormValues{BoxID: "mac"}.WithDefaults()
-	if got.PublicHost != "oc-tap-mac.buyallmemes.com" {
-		t.Fatalf("tap host default = %q", got.PublicHost)
-	}
-	if got.TunnelName != "oc-mac" || got.UIHost != "oc-mac.buyallmemes.com" {
-		t.Fatalf("tunnel defaults = %q %q", got.TunnelName, got.UIHost)
-	}
-	if got.WorkerURL != onboard.DefaultWorkerURL {
-		t.Fatalf("worker default = %q", got.WorkerURL)
-	}
-	keep := onboard.FormValues{BoxID: "mac", PublicHost: "tap.example.com", TunnelName: "t", UIHost: "u.example.com", WorkerURL: "https://w.example"}.WithDefaults()
-	if keep.PublicHost != "tap.example.com" || keep.TunnelName != "t" || keep.UIHost != "u.example.com" || keep.WorkerURL != "https://w.example" {
-		t.Fatalf("explicit values must survive: %+v", keep)
-	}
-}
-
 func TestExistingBox(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "env")
@@ -364,14 +348,61 @@ func TestExistingBox(t *testing.T) {
 	}
 }
 
-func TestFormValuesComplete(t *testing.T) {
-	if !(onboard.FormValues{BoxID: "mac", PublicHost: "h.example.com"}.Complete()) {
-		t.Fatal("box+host means no form needed")
+func TestTapHostAndUIHost(t *testing.T) {
+	if got := onboard.TapHost("mac"); got != "oc-tap-mac.buyallmemes.com" {
+		t.Fatalf("tap host = %q", got)
 	}
-	if (onboard.FormValues{BoxID: "mac"}.Complete()) {
-		t.Fatal("host is required input (or derived later, not complete yet)")
+	if got := onboard.UIHost("mac"); got != "oc-mac.buyallmemes.com" {
+		t.Fatalf("ui host = %q", got)
 	}
-	if (onboard.FormValues{}.Complete()) {
-		t.Fatal("empty means form needed")
+}
+
+func TestResolveEnrollCodeUsesPastedCode(t *testing.T) {
+	box, code, err := onboard.ResolveEnrollCode(context.Background(), io.Discard, "  abc123 ")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if box != "" || code != "abc123" {
+		t.Fatalf("pasted code must be used verbatim, got %q %q", box, code)
+	}
+}
+
+// The code the bot issued IS the box's heartbeat secret: the Worker binds
+// the box to the token presented at enrollment. A locally minted token in
+// the env file would 401 on every heartbeat.
+func TestDoOnboardCodeBecomesHeartbeatSecret(t *testing.T) {
+	var presented string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s, ok := body["enroll_token"].(string); ok {
+			presented = s
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env")
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-tap-mac.buyallmemes.com",
+		EnrollCode: "code-abc", EnvPath: envPath, DBPath: filepath.Join(dir, "ocd.db"),
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	if presented != "code-abc" {
+		t.Fatalf("enroll must present the code, got %q", presented)
+	}
+	vals, err := onboard.LoadEnvFile(envPath)
+	if err != nil {
+		t.Fatalf("load env: %v", err)
+	}
+	if vals["OCD_HEARTBEAT_TOKEN"] != "code-abc" {
+		t.Fatalf("heartbeat secret must be the code, got %q", vals["OCD_HEARTBEAT_TOKEN"])
+	}
+	if vals["OCD_ENROLL_TOKEN"] != "code-abc" {
+		t.Fatalf("enroll token must be the code, got %q", vals["OCD_ENROLL_TOKEN"])
 	}
 }

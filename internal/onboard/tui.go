@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -64,111 +63,19 @@ func AskInstallService() (bool, error) {
 	return install, nil
 }
 
-// Complete reports whether no form is needed: box id plus tap hostname are
-// present, so everything else derives. Pasted Telegram commands land here.
-func (f FormValues) Complete() bool {
-	return f.BoxID != "" && f.PublicHost != ""
+// newForm builds a single-group form. Every prompt in onboarding is one
+// question, so the form is a thin wrapper over huh.
+func newForm(fields ...huh.Field) *huh.Form {
+	return huh.NewForm(huh.NewGroup(fields...))
 }
 
-// WithDefaults fills every derivable blank: worker origin, tap hostname
-// (oc-tap-<box>), tunnel name (oc-<box>), and UI host from the tap domain.
-// Explicit values always win, so pasted commands and flags pass through
-// untouched. Empty box id derives nothing (validation rejects it later).
-func (f FormValues) WithDefaults() FormValues {
-	out := f
-	if out.WorkerURL == "" {
-		out.WorkerURL = DefaultWorkerURL
-	}
-	if out.BoxID == "" {
-		return out
-	}
-	if out.PublicHost == "" {
-		out.PublicHost = DefaultTunnelPlan(out.BoxID).TapHost
-	}
-	defName, defUI := TunnelDefaults(out.BoxID, out.PublicHost)
-	if out.TunnelName == "" {
-		out.TunnelName = defName
-	}
-	if out.UIHost == "" {
-		out.UIHost = defUI
-	}
-	return out
-}
-
-// FormValues collects wizard inputs. Pre-fill from flags; empty means ask.
-// WithDefaults resolves every derivable blank, so callers apply it after
-// the form (or flags) and never prompt for what can be derived.
-// Empty EnrollCode keeps the Telegram approve-tap flow; a typed code
-// (from /enrollcode) enrolls immediately with no approve tap.
-type FormValues struct {
-	BoxID      string
-	WorkerURL  string
-	PublicHost string
-	EnrollCode string
-	TunnelName string
-	UIHost     string
-	CFToken    string
-}
-
-// RunForm prompts for the three onboarding inputs, validating as it goes.
-// Flag-provided values pre-fill their fields.
-func RunForm(pre FormValues) (FormValues, error) {
-	out := pre
-	if out.WorkerURL == "" {
-		out.WorkerURL = DefaultWorkerURL
-	}
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("ocd onboard").
-				Description("Fastest: send /enrollcode <box-id> to the bot and paste back the command it replies — the form is skipped entirely. Otherwise answer box id below and leave the rest empty for sane defaults."),
-			huh.NewInput().
-				Title("Box id").
-				Description("Lowercase letters, digits, dashes (e.g. mac). Everything else derives from it.").
-				Value(&out.BoxID).
-				Validate(ValidateBoxID),
-			huh.NewInput().
-				Title("Worker URL").
-				Value(&out.WorkerURL).
-				Validate(func(s string) error {
-					if !strings.HasPrefix(s, "https://") {
-						return fmt.Errorf("must start with https://")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Public hostname (optional)").
-				Description("Tap hostname; empty derives oc-tap-<box-id>.buyallmemes.com.").
-				Value(&out.PublicHost).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) != "" && strings.ContainsAny(s, " /:") {
-						return fmt.Errorf("bare hostname, e.g. oc-tap-mac.buyallmemes.com")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Enroll code (optional)").
-				Description("From /enrollcode in Telegram; empty waits for an approve tap instead.").
-				Value(&out.EnrollCode),
-			huh.NewInput().
-				Title("Tunnel name (optional)").
-				Description("Empty derives oc-<box-id>; created if missing, reused if present.").
-				Value(&out.TunnelName),
-			huh.NewInput().
-				Title("UI hostname (optional)").
-				Description("Empty derives oc-<box-id>.<tap-domain>; empty tap domain skips it.").
-				Value(&out.UIHost),
-			huh.NewInput().
-				Title("Cloudflare API token (optional)").
-				Description("Only if cloudflared never logged in here; used once, never stored.").
-				EchoMode(huh.EchoModePassword).
-				Value(&out.CFToken),
-		),
-	)
-	if err := form.Run(); err != nil {
-		return FormValues{}, err
-	}
-	return out.WithDefaults(), nil
+// newInput builds a validated text input.
+func newInput(title, description string, value *string, validate func(string) error) huh.Field {
+	return huh.NewInput().
+		Title(title).
+		Description(description).
+		Value(value).
+		Validate(validate)
 }
 
 type statusMsg string

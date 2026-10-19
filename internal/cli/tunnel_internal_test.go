@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,23 +25,5 @@ func TestShouldManageTunnel(t *testing.T) {
 	t.Setenv("OCD_MANAGE_TUNNEL", "0")
 	if shouldManageTunnel() {
 		t.Fatal("opt-out must win over config")
-	}
-}
-
-func TestOnboardTunnelDefaultsAndSkip(t *testing.T) {
-	tp, err := onboardTunnel(context.Background(), "", "", "", "mac", "oc-tap-mac.buyallmemes.com", false, io.Discard)
-	if err != nil {
-		t.Fatalf("defaults: %v", err)
-	}
-	if tp == nil || tp.Name != "oc-mac" || tp.UIHost != "oc-mac.buyallmemes.com" || tp.TapHost != "oc-tap-mac.buyallmemes.com" || tp.Port != 49400 {
-		t.Fatalf("bad defaults: %+v", tp)
-	}
-	tp, err = onboardTunnel(context.Background(), "custom", "ui.example.com", "tok", "mac", "tap.example.com", false, io.Discard)
-	if err != nil || tp.Name != "custom" || tp.UIHost != "ui.example.com" || tp.APIToken != "tok" {
-		t.Fatalf("explicit values must win: %+v %v", tp, err)
-	}
-	tp, err = onboardTunnel(context.Background(), "", "", "", "mac", "tap.example.com", true, io.Discard)
-	if err != nil || tp != nil {
-		t.Fatalf("skip must yield nil plan: %+v %v", tp, err)
 	}
 }

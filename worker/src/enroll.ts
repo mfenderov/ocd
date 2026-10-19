@@ -14,6 +14,11 @@ export interface EnrollBody {
   hostname: string;
   enroll_token: string;
   admin_token?: string;
+  // quiet suppresses the approve/ --deny Telegram ping on a fresh pending
+  // row. Used by /enrollcode: the code message IS the approval channel,
+  // so a second message would only confuse. Claim and rotation paths
+  // never ping here.
+  quiet?: boolean;
 }
 
 export interface PendingRow {
@@ -121,6 +126,9 @@ export function parseEnrollBody(value: unknown, suffixes: string[] = DEFAULT_HOS
   const body: EnrollBody = { id: v["id"], hostname: v["hostname"], enroll_token: v["enroll_token"] };
   if (typeof v["admin_token"] === "string") {
     body.admin_token = v["admin_token"];
+  }
+  if (v["quiet"] === true) {
+    body.quiet = true;
   }
   return body;
 }
@@ -514,7 +522,9 @@ export async function requestEnrollment(
   if (!config.baseUrl) {
     console.error("enroll: public base URL not configured; ping carries relative links");
   }
-  await notify(enrollPingText(body, { approve, deny }, exp));
+  if (!body.quiet) {
+    await notify(enrollPingText(body, { approve, deny }, exp));
+  }
   return { status: "pending", id: body.id, rotated: false };
 }
 

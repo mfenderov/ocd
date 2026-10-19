@@ -163,15 +163,15 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 		return "", err
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "")
+	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "", true)
 	if err != nil {
 		return "", err
 	}
 	if status != "pending" {
 		return fmt.Sprintf("📋 <code>%s</code> is already enrolled.", esc(box)), nil
 	}
-	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (valid 15 min, single use):\n<code>%s</code>\nPaste to onboard in one shot:\n<code>ocd onboard --box-id %s --public-host %s --enroll-code %s</code>\nAn approve link also arrived — ignore it once the code is used.",
-		esc(box), esc(code), esc(box), esc(hostname), esc(code)), nil
+	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n<code>%s</code>\nPaste it into <code>ocd</code> on that machine.",
+		esc(box), esc(code)), nil
 }
 
 // FleetAuditText renders recent fleet audit rows, optionally for one box.

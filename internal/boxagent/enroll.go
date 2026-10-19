@@ -19,6 +19,9 @@ type enrollRequest struct {
 	Hostname    string `json:"hostname"`
 	EnrollToken string `json:"enroll_token"`
 	AdminToken  string `json:"admin_token,omitempty"`
+	// Quiet suppresses the Worker-side approve/deny ping. Used by the
+	// code flow: the token message is the only message the owner needs.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 type enrollResponse struct {
@@ -42,7 +45,7 @@ func enrollURL(base string) string {
 // when the box is known, "pending" awaiting owner approval). The enroll
 // token travels in the body: first contact has no bearer credentials yet.
 // Any non-200 is an error, no local retry.
-func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string) (string, error) {
+func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, quiet bool) (string, error) {
 	if strings.TrimSpace(id) == "" {
 		return "", errors.New("boxagent: box id is empty; refusing to enroll without an id")
 	}
@@ -57,6 +60,7 @@ func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname
 		Hostname:    hostname,
 		EnrollToken: enrollToken,
 		AdminToken:  adminToken,
+		Quiet:       quiet,
 	})
 	if err != nil {
 		return "", fmt.Errorf("boxagent: encode enroll: %w", err)

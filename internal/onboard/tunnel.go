@@ -27,6 +27,16 @@ type TunnelPlan struct {
 	APIToken string
 }
 
+// TapHost is the hostname serving this box's tap (pair) links.
+func TapHost(boxID string) string {
+	return "oc-tap-" + boxID + ".buyallmemes.com"
+}
+
+// UIHost is the hostname serving this box's editor UI.
+func UIHost(boxID string) string {
+	return "oc-" + boxID + ".buyallmemes.com"
+}
+
 // DefaultTunnelPlan derives the conventional names from a box id:
 // oc-<box> tunnel, oc-tap-<box> tap host, oc-<box> UI host.
 func DefaultTunnelPlan(boxID string) TunnelPlan {

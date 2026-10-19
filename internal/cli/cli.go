@@ -50,9 +50,10 @@ func Root() *cobra.Command {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			onboard.ApplyEnvDefaults()
 		},
+		// Bare `ocd` is the whole product: it enrolls this machine, or
+		// reports the current one. Subcommands cover the rest.
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "TUI coming in Task 6 — use: ocd mint --device mac | ocd devices list | ocd status | ocd serve")
-			return nil
+			return runOnboard(cmd.OutOrStdout(), onboard.Options{})
 		},
 	}
 

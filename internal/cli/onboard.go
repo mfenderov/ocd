@@ -11,55 +11,123 @@ import (
 	"github.com/mfenderov/ocd/internal/onboard"
 )
 
-// onboardTunnel resolves the tunnel plan: skip flag wins, otherwise the
-// name defaults to oc-<box> and the UI hostname derives from the tap
-// domain. A nil plan means `ocd serve` stays tunnel-free.
-func onboardTunnel(ctx context.Context, tunnelName, uiHost, cfToken, boxID, publicHost string, skip bool, w interface {
-	Write([]byte) (int, error)
-},
-) (*onboard.TunnelPlan, error) {
-	_ = ctx
-	if skip {
-		return nil, nil
+// onboardCmd implements `ocd onboard`: enroll this machine. It asks one
+// question (the name), prints the Telegram command to run, and finishes
+// once the bot's code is pasted back.
+func onboardCmd() *cobra.Command {
+	var workerURL, cfToken string
+	var skipTunnel, installService, force bool
+	cmd := &cobra.Command{
+		Use:   "onboard",
+		Short: "Enroll this box in the fleet",
+		// Runtime failures (bad code, refused config) report the error
+		// without dumping the full usage text.
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runOnboard(cmd.OutOrStdout(), onboard.Options{
+				WorkerURL:      workerURL,
+				CFToken:        cfToken,
+				SkipTunnel:     skipTunnel,
+				InstallService: installService,
+				Force:          force,
+			})
+		},
 	}
-	defName, defUI := onboard.TunnelDefaults(boxID, publicHost)
-	if tunnelName == "" {
-		tunnelName = defName
-	}
-	if uiHost == "" {
-		uiHost = defUI
-	}
-	if cfToken == "" {
-		_, _ = fmt.Fprintln(w, "tunnel: using existing cloudflared login (or --cf-token)")
-	}
-	return &onboard.TunnelPlan{
-		Name:     tunnelName,
-		TapHost:  publicHost,
-		UIHost:   uiHost,
-		APIToken: cfToken,
-		Port:     49400,
-	}, nil
+	cmd.Flags().StringVar(&workerURL, "worker-url", "", "fleet Worker origin (default "+onboard.DefaultWorkerURL+")")
+	cmd.Flags().StringVar(&cfToken, "cf-token", "", "Cloudflare API token for tunnel+DNS (default: existing cloudflared login)")
+	cmd.Flags().BoolVar(&skipTunnel, "skip-tunnel", false, "skip tunnel and DNS provisioning")
+	cmd.Flags().BoolVar(&installService, "install-service", false, "install macOS login service")
+	cmd.Flags().BoolVar(&force, "force", false, "re-onboard even if this machine already has an identity")
+	return cmd
 }
 
-// onboardService installs the macOS login service when asked (TUI prompt
-// or --install-service). Other platforms print manual guidance instead.
-func onboardService(interactive, flag bool, w interface {
+// runOnboard is the whole enrollment: one question, one Telegram round
+// trip, then everything else automatic.
+func runOnboard(w interface {
+	Write([]byte) (int, error)
+}, opts onboard.Options,
+) error {
+	ctx := context.Background()
+	envPath, err := onboard.DefaultEnvPath()
+	if err != nil {
+		return err
+	}
+	if existing, ok := onboard.ExistingBox(envPath); ok && !opts.Force {
+		if !onboard.IsTTY() {
+			return fmt.Errorf("already onboarded as %q — re-onboard interactively, or pass --force", existing)
+		}
+		again, err := onboard.AskReonboard(existing)
+		if err != nil {
+			return err
+		}
+		if !again {
+			_, _ = fmt.Fprintf(w, "keeping existing setup for %s\n", existing)
+			return nil
+		}
+	}
+	boxID, code, err := onboard.ResolveEnrollCode(ctx, w, "")
+	if err != nil {
+		return err
+	}
+	host := onboard.TapHost(boxID)
+	tunnel := &onboard.TunnelPlan{
+		Name:     "oc-" + boxID,
+		TapHost:  host,
+		UIHost:   onboard.UIHost(boxID),
+		APIToken: opts.CFToken,
+		Port:     49400,
+	}
+	if opts.SkipTunnel {
+		tunnel = nil
+	} else {
+		credDir, err := onboard.DefaultCredDir()
+		if err == nil {
+			if err := onboard.EnsureCloudflaredLogin(ctx, credDir, opts.CFToken, onboard.IsTTY(), w); err != nil {
+				return err
+			}
+		}
+	}
+	workerURL := opts.WorkerURL
+	if workerURL == "" {
+		workerURL = onboard.DefaultWorkerURL
+	}
+	cfg := onboard.Config{
+		BoxID:      boxID,
+		WorkerURL:  workerURL,
+		PublicHost: host,
+		EnrollCode: code,
+		Quiet:      true,
+		Tunnel:     tunnel,
+		EnvPath:    envPath,
+		Timeout:    10 * time.Minute,
+	}
+	if onboard.IsTTY() {
+		err = onboard.RunSpinner(ctx, cfg)
+	} else {
+		err = onboard.RunPlain(ctx, w, cfg)
+	}
+	if err != nil {
+		return err
+	}
+	serviced := false
+	if opts.InstallService || onboard.IsTTY() {
+		serviced, err = installService(w)
+		if err != nil {
+			return err
+		}
+	}
+	onboard.RenderResult(w, cfg, serviced)
+	return nil
+}
+
+// installService installs the macOS login service. Other platforms print
+// manual guidance instead.
+func installService(w interface {
 	Write([]byte) (int, error)
 },
 ) (bool, error) {
 	if runtime.GOOS != "darwin" {
 		_, _ = fmt.Fprintln(w, "service: automatic install supports macOS only — run ocd serve via your supervisor")
-		return false, nil
-	}
-	want := flag
-	if interactive {
-		var err error
-		want, err = onboard.AskInstallService()
-		if err != nil {
-			return false, err
-		}
-	}
-	if !want {
 		return false, nil
 	}
 	path, err := onboard.InstallLoginService()
@@ -68,119 +136,4 @@ func onboardService(interactive, flag bool, w interface {
 	}
 	_, _ = fmt.Fprintln(w, "service installed: "+path)
 	return true, nil
-}
-
-// onboardCmd implements `ocd onboard`: interactive TUI box enrollment with
-// a flags-driven plain path when stdin is not a terminal.
-func onboardCmd() *cobra.Command {
-	var boxID, workerURL, publicHost, enrollCode, tunnelName, uiHost, cfToken string
-	var timeout time.Duration
-	var nonInteractive, skipTunnel, installService, force bool
-	cmd := &cobra.Command{
-		Use:   "onboard",
-		Short: "Enroll this box in the fleet (interactive TUI)",
-		// Runtime failures (bad token, refused config) report the error
-		// without dumping the full usage text.
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			envPath, err := onboard.DefaultEnvPath()
-			if err != nil {
-				return err
-			}
-			if existing, ok := onboard.ExistingBox(envPath); ok && !force {
-				if !onboard.IsTTY() || nonInteractive {
-					return fmt.Errorf("already onboarded as %q — re-run interactively to confirm, or pass --force", existing)
-				}
-				again, err := onboard.AskReonboard(existing)
-				if err != nil {
-					return err
-				}
-				if !again {
-					_, _ = fmt.Fprintln(cmd.OutOrStdout(), "keeping existing setup for "+existing)
-					return nil
-				}
-			}
-			vals := onboard.FormValues{
-				BoxID:      boxID,
-				WorkerURL:  workerURL,
-				PublicHost: publicHost,
-				EnrollCode: enrollCode,
-				TunnelName: tunnelName,
-				UIHost:     uiHost,
-				CFToken:    cfToken,
-			}
-			formShown := false
-			if !vals.Complete() {
-				if !onboard.IsTTY() || nonInteractive {
-					return fmt.Errorf("non-interactive onboard needs --box-id (tap hostname derives from it)")
-				}
-				vals, err = onboard.RunForm(vals)
-				if err != nil {
-					return err
-				}
-				formShown = true
-			}
-			vals = vals.WithDefaults()
-			boxID, workerURL, publicHost, enrollCode = vals.BoxID, vals.WorkerURL, vals.PublicHost, vals.EnrollCode
-			tunnelName, uiHost, cfToken = vals.TunnelName, vals.UIHost, vals.CFToken
-			tunnel, err := onboardTunnel(ctx, tunnelName, uiHost, cfToken, boxID, publicHost, skipTunnel, cmd.OutOrStdout())
-			if err != nil {
-				return err
-			}
-			if tunnel != nil {
-				credDir, err := onboard.DefaultCredDir()
-				if err == nil {
-					if err := onboard.EnsureCloudflaredLogin(ctx, credDir, cfToken, onboard.IsTTY() && !nonInteractive, cmd.OutOrStdout()); err != nil {
-						return err
-					}
-				}
-			}
-			cfg := onboard.Config{
-				BoxID:      boxID,
-				WorkerURL:  workerURL,
-				PublicHost: publicHost,
-				EnrollCode: enrollCode,
-				Tunnel:     tunnel,
-				EnvPath:    envPath,
-				Timeout:    timeout,
-			}
-			if onboard.IsTTY() && !nonInteractive {
-				if err := onboard.RunSpinner(ctx, cfg); err != nil {
-					return err
-				}
-			} else if err := onboard.RunPlain(ctx, cmd.OutOrStdout(), cfg); err != nil {
-				return err
-			}
-			serviced := false
-			if formShown {
-				var err error
-				serviced, err = onboardService(true, false, cmd.OutOrStdout())
-				if err != nil {
-					return err
-				}
-			} else if onboard.IsTTY() && !nonInteractive || installService {
-				var err error
-				serviced, err = onboardService(false, true, cmd.OutOrStdout())
-				if err != nil {
-					return err
-				}
-			}
-			onboard.RenderResult(cmd.OutOrStdout(), cfg, serviced)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&boxID, "box-id", "", "box id (a-z 0-9 -)")
-	cmd.Flags().StringVar(&workerURL, "worker-url", "", "fleet Worker origin (default "+onboard.DefaultWorkerURL+")")
-	cmd.Flags().StringVar(&publicHost, "public-host", "", "tunnel hostname serving this box")
-	cmd.Flags().StringVar(&enrollCode, "enroll-code", "", "one-time code from /enrollcode (skips the approve tap)")
-	cmd.Flags().StringVar(&tunnelName, "tunnel-name", "", "tunnel name (default oc-<box-id>)")
-	cmd.Flags().StringVar(&uiHost, "ui-host", "", "extra tunnel hostname for the web UI (default oc-<box-id>.<domain>)")
-	cmd.Flags().StringVar(&cfToken, "cf-token", "", "Cloudflare API token for tunnel+DNS (default: existing cloudflared login)")
-	cmd.Flags().BoolVar(&skipTunnel, "skip-tunnel", false, "skip tunnel and DNS provisioning")
-	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "approval wait timeout")
-	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "skip the TUI even on a terminal")
-	cmd.Flags().BoolVar(&installService, "install-service", false, "install macOS login service (non-interactive only; TUI asks)")
-	cmd.Flags().BoolVar(&force, "force", false, "re-onboard even if this machine already has an identity")
-	return cmd
 }

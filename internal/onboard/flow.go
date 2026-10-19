@@ -13,6 +13,16 @@ import (
 	"github.com/mfenderov/ocd/internal/store"
 )
 
+// Options are the non-interactive knobs of `ocd onboard`. Everything
+// else is derived or asked for.
+type Options struct {
+	WorkerURL      string
+	CFToken        string
+	SkipTunnel     bool
+	InstallService bool
+	Force          bool
+}
+
 // Config gathers everything DoOnboard needs. EnvPath/DBPath are explicit so
 // tests stay hermetic; the command fills them from ~/.ocd defaults.
 // EnrollCode, when set, replaces the approve-tap flow with the typed code
@@ -22,6 +32,9 @@ type Config struct {
 	WorkerURL  string
 	PublicHost string
 	EnrollCode string
+	// Quiet suppresses the Worker's approve/deny ping: the owner already
+	// holds the token, so a second message would only confuse.
+	Quiet bool
 	// Tunnel, when non-nil, provisions the Cloudflare tunnel + DNS after
 	// the env file is written and before enrollment.
 	Tunnel       *TunnelPlan
@@ -70,9 +83,16 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		cfg.PollInterval = 5 * time.Second
 	}
 	say("minting box secrets")
-	heartbeatToken, err := GenerateSecret()
-	if err != nil {
-		return err
+	// The code the bot issued IS the box's heartbeat secret: the Worker
+	// binds the box to the token presented at enrollment, so anything
+	// else here would 401 on every heartbeat.
+	var err error
+	heartbeatToken := strings.TrimSpace(cfg.EnrollCode)
+	if heartbeatToken == "" {
+		heartbeatToken, err = GenerateSecret()
+		if err != nil {
+			return err
+		}
 	}
 	adminToken, err := GenerateSecret()
 	if err != nil {
@@ -105,11 +125,7 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	enrollToken := heartbeatToken
-	if code := strings.TrimSpace(cfg.EnrollCode); code != "" {
-		enrollToken = code
-	}
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, enrollToken, adminToken)
+	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, cfg.Quiet)
 	if err != nil {
 		return err
 	}
