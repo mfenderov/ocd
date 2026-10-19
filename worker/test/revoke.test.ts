@@ -158,7 +158,7 @@ describe("revoke single box (unit)", () => {
     });
     expect(result).toMatchObject({ id: "rev-ok", status: "revoked", epoch: 2 });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe("https://rev-ok.example.com/admin/revoke");
+    expect(calls[0].url).toBe("https://rev-ok.example.com/_oc/revoke");
     expect(calls[0].init.method).toBe("POST");
     expect(await new Request(calls[0].url, calls[0].init).json()).toEqual({ confirm: true });
     expect(new Headers(calls[0].init.headers).get("authorization")).toBe(`Bearer ${ADMIN_PLAIN}`);

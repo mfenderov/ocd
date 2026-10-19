@@ -19,7 +19,7 @@ func TestBadBearerGets401AndAuditRow(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
 	h := boxadmin.RequireAdmin(st, "s3cr3t", okHandler())
-	req := httptest.NewRequest("POST", "/admin/mint", nil)
+	req := httptest.NewRequest("POST", "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer wrong")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -36,7 +36,7 @@ func TestMissingBearerGets401(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
 	h := boxadmin.RequireAdmin(st, "s3cr3t", okHandler())
-	req := httptest.NewRequest("POST", "/admin/mint", nil)
+	req := httptest.NewRequest("POST", "/_oc/mint", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {

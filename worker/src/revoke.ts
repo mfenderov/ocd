@@ -2,6 +2,7 @@ import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { TombstoneRow } from "./mint";
 import type { BoxRow } from "./state";
+import { BOX_API } from "./boxapi";
 
 // Revoke relay: console POST /api/backends/:id/revoke (or POST
 // /api/revoke-all) → box POST /admin/revoke with {"confirm": true}.
@@ -114,7 +115,7 @@ export async function revokeOneBox(
     boxRes = await fetchBox(
       pinnedRegistry([box]),
       boxId,
-      "/admin/revoke",
+      BOX_API.revoke,
       {
         method: "POST",
         headers: {

@@ -90,7 +90,7 @@ describe("mint relay idempotency (unit)", () => {
     expect(second.status).toBe(200);
     expect(await second.text()).toBe("https://proxy.example/?t=tok-1");
     expect(calls).toHaveLength(2);
-    expect(calls[0].url).toBe("https://mint-retry.example.com/admin/mint");
+    expect(calls[0].url).toBe("https://mint-retry.example.com/_oc/mint");
     const keys = calls.map((c) => new Headers(c.init.headers).get("idempotency-key"));
     expect(keys).toEqual(["console-key-abc", "console-key-abc"]);
     expect(new Headers(calls[0].init.headers).get("authorization")).toBe(`Bearer ${ADMIN_PLAIN}`);

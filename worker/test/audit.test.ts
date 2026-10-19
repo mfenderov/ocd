@@ -242,7 +242,7 @@ describe("audit merge (unit)", () => {
     const fetcher = rowsFetcher([["audit-only-b", [seedRow(1699999900, "b-only")]]], calls);
     const rows = await fetchAudits(store, { boxId: "audit-only-b", n: 50 }, { sealKey: SEAL_KEY, fetcher });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe("https://audit-only-b.example.com/admin/audit?n=50");
+    expect(calls[0].url).toBe("https://audit-only-b.example.com/_oc/audit?n=50");
     expect(new Headers(calls[0].init.headers).get("authorization")).toBe("Bearer audit-admin-plaintext-6");
     expect(rows).toEqual([
       {
@@ -284,7 +284,7 @@ describe("audit merge (unit)", () => {
       expect(res.status).toBe(200);
       expect(Object.keys(await res.json())).toEqual(["rows"]);
       expect(calls).toHaveLength(1);
-      expect(calls[0].url).toBe(`https://audit-n.example.com/admin/audit?${want}`);
+      expect(calls[0].url).toBe(`https://audit-n.example.com/_oc/audit?${want}`);
     }
   });
 

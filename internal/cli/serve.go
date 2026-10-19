@@ -46,7 +46,9 @@ func serveAddr() string {
 	return "127.0.0.1:49400"
 }
 
-// mountAdmin puts /admin/* behind Bearer auth when OCD_ADMIN_TOKEN is set.
+// mountAdmin puts the box API behind Bearer auth when OCD_ADMIN_TOKEN is set.
+// The /_oc prefix avoids "/admin": Cloudflare's managed WAF challenges any path
+// containing that segment, which would answer the worker instead of the box.
 // An unset token skips mounting cleanly: the daemon stays healthy without
 // an admin listener, and the skip is logged for the boot log.
 func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func() (string, error)) {
@@ -63,11 +65,11 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 		out, err := exec.Command(name, args...).Output()
 		return string(out), err
 	}
-	mux.Handle("/admin/mint", boxadmin.RequireAdmin(st, token, boxadmin.MintHandler(st, execPair, publicBase)))
-	mux.Handle("/admin/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
-	mux.Handle("/admin/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
-	mux.Handle("/admin/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
-	_, _ = fmt.Fprintln(w, "admin on (/admin/* behind Bearer auth)")
+	mux.Handle("/_oc/mint", boxadmin.RequireAdmin(st, token, boxadmin.MintHandler(st, execPair, publicBase)))
+	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
+	mux.Handle("/_oc/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
+	mux.Handle("/_oc/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
+	_, _ = fmt.Fprintln(w, "admin on (/_oc/* behind Bearer auth)")
 }
 
 // startHeartbeat POSTs one box heartbeat to the Worker every heartbeatInterval

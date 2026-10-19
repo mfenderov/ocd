@@ -40,7 +40,7 @@ func TestRevokeBumpsEpochAndFixedArgv(t *testing.T) {
 		return "", nil
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
-	rec := postAdmin(t, h, "/admin/revoke", map[string]bool{"confirm": true})
+	rec := postAdmin(t, h, "/_oc/revoke", map[string]bool{"confirm": true})
 	if rec.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -75,7 +75,7 @@ func TestRevokeBodyIsSnakeCaseEpoch(t *testing.T) {
 		return "", nil
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
-	rec := postAdmin(t, h, "/admin/revoke", map[string]bool{"confirm": true})
+	rec := postAdmin(t, h, "/_oc/revoke", map[string]bool{"confirm": true})
 	if rec.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -104,7 +104,7 @@ func TestRevokeMissingConfirmGets400(t *testing.T) {
 		return "", nil
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
-	rec := postAdmin(t, h, "/admin/revoke", map[string]bool{})
+	rec := postAdmin(t, h, "/_oc/revoke", map[string]bool{})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -123,7 +123,7 @@ func TestRevokeExecFailureDoesNotBumpEpoch(t *testing.T) {
 		return "", errTestRevoke
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
-	rec := postAdmin(t, h, "/admin/revoke", map[string]bool{"confirm": true})
+	rec := postAdmin(t, h, "/_oc/revoke", map[string]bool{"confirm": true})
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("want 502, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -152,7 +152,7 @@ func TestRevokeNonTrueConfirmGets400(t *testing.T) {
 				return "", nil
 			}
 			h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.RevokeHandler(st, exec))
-			req := httptest.NewRequest("POST", "/admin/revoke", strings.NewReader(tc.raw))
+			req := httptest.NewRequest("POST", "/_oc/revoke", strings.NewReader(tc.raw))
 			req.Header.Set("Authorization", "Bearer s3cr3t")
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()

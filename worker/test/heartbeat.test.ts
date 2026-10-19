@@ -136,7 +136,7 @@ describe("heartbeat ingest", () => {
     expect(() => pinnedHostname(registry, "ghost")).toThrow();
     // Heartbeat-supplied URL is never fetched: refused before any network call.
     await expect(fetchUrlPinned(registry, "https://evil.example/pwn")).rejects.toThrow();
-    await expect(fetchBox(registry, "ghost", "/admin/audit")).rejects.toThrow();
+    await expect(fetchBox(registry, "ghost", "/_oc/audit")).rejects.toThrow();
   });
 
   it("ignores heartbeat-supplied hostname/URL and keeps the pinned one", async () => {

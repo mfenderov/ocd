@@ -2,6 +2,7 @@ import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import { isTainted, type TombstoneRow } from "./mint";
 import type { BoxRow } from "./state";
+import { BOX_API } from "./boxapi";
 
 // Audit merge: console GET /api/audit?box=&n= fans out in parallel to each
 // enrolled box's GET /admin/audit?n= over pinned hostnames only. Per-box
@@ -137,7 +138,7 @@ async function fetchOneBox(
     boxRes = await fetchBox(
       pinnedRegistry([box]),
       box.id,
-      `/admin/audit?n=${n}`,
+      `${BOX_API.audit}?n=${n}`,
       { headers: { authorization: `Bearer ${adminToken}` }, signal },
       deps.fetcher,
     );

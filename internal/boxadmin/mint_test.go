@@ -15,7 +15,7 @@ import (
 
 func postMint(t *testing.T, h http.Handler, key string) string {
 	t.Helper()
-	req := httptest.NewRequest("POST", "/admin/mint", nil)
+	req := httptest.NewRequest("POST", "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	req.Header.Set("Idempotency-Key", key)
 	rec := httptest.NewRecorder()
@@ -48,7 +48,7 @@ func TestMissingIdempotencyKeyGets400(t *testing.T) {
 	defer st.Close()
 	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
-	req := httptest.NewRequest("POST", "/admin/mint", nil)
+	req := httptest.NewRequest("POST", "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

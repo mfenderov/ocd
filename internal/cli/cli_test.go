@@ -234,7 +234,7 @@ func TestServeWithWorkerURLBeatsAndServesAdmin(t *testing.T) {
 	}
 
 	presenceStatus := func(authHeader string) int {
-		req, err := http.NewRequest("GET", "http://"+addr+"/admin/presence", nil)
+		req, err := http.NewRequest("GET", "http://"+addr+"/_oc/presence", nil)
 		if err != nil {
 			t.Fatalf("build presence request: %v", err)
 		}
@@ -243,16 +243,16 @@ func TestServeWithWorkerURLBeatsAndServesAdmin(t *testing.T) {
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatalf("GET /admin/presence: %v", err)
+			t.Fatalf("GET /_oc/presence: %v", err)
 		}
 		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return resp.StatusCode
 	}
 	if code := presenceStatus("Bearer admin-secret"); code != http.StatusOK {
-		t.Fatalf("GET /admin/presence with token: want 200, got %d", code)
+		t.Fatalf("GET /_oc/presence with token: want 200, got %d", code)
 	}
 	if code := presenceStatus(""); code != http.StatusUnauthorized {
-		t.Fatalf("GET /admin/presence without token: want 401, got %d", code)
+		t.Fatalf("GET /_oc/presence without token: want 401, got %d", code)
 	}
 }

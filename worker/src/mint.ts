@@ -1,6 +1,7 @@
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { BoxRow } from "./state";
+import { BOX_API } from "./boxapi";
 
 // Mint relay: console POST /api/backends/:id/link → box POST /admin/mint.
 // One idempotency key per console request: the console's own
@@ -83,7 +84,7 @@ export async function handleMintLink(
     boxRes = await fetchBox(
       pinnedRegistry([box]),
       boxId,
-      "/admin/mint",
+      BOX_API.mint,
       {
         method: "POST",
         headers: { authorization: `Bearer ${adminToken}`, "idempotency-key": key },
