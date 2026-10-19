@@ -281,8 +281,14 @@ func TestLaunchdPlist(t *testing.T) {
 	if err := onboard.WriteLaunchdPlist(p, "/opt/homebrew/bin/ocd", "/Users/x"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := onboard.WriteLaunchdPlist(p, "/opt/homebrew/bin/ocd", "/Users/x"); err == nil {
-		t.Fatal("must refuse to overwrite an installed service")
+	// Refresh is expected: the plist is generated, and a stale copy may
+	// point at a binary that moved.
+	if err := onboard.WriteLaunchdPlist(p, "/opt/homebrew/bin/ocd2", "/Users/x"); err != nil {
+		t.Fatalf("refresh must succeed: %v", err)
+	}
+	raw, _ := os.ReadFile(p)
+	if !strings.Contains(string(raw), "/opt/homebrew/bin/ocd2") {
+		t.Fatalf("plist must carry the new binary path, got:\n%s", raw)
 	}
 }
 

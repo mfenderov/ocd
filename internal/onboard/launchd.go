@@ -58,11 +58,10 @@ func LaunchdPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", LaunchdLabel+".plist"), nil
 }
 
-// WriteLaunchdPlist writes the plist (0600). Refuses to overwrite.
+// WriteLaunchdPlist writes the plist (0600). The plist is fully generated
+// by us, so refreshing it is expected: an older copy may point at a
+// binary that moved or miss environment entries we have since added.
 func WriteLaunchdPlist(path, exe, home string) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("onboard: %s exists — remove it first to reinstall", path)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("onboard: mkdir: %w", err)
 	}
@@ -91,7 +90,9 @@ func BootstrapLaunchd(path string) error {
 }
 
 // InstallLoginService writes the plist and bootstraps it for this login
-// session. macOS only; callers gate on runtime.GOOS.
+// session. macOS only; callers gate on runtime.GOOS. Re-running refreshes
+// the plist: an already-loaded copy is booted out first so the new
+// content takes effect.
 func InstallLoginService() (string, error) {
 	exe, err := ServiceExecutable()
 	if err != nil {
@@ -105,6 +106,7 @@ func InstallLoginService() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	_ = UnloadLoginService()
 	if err := WriteLaunchdPlist(path, exe, home); err != nil {
 		return "", err
 	}
