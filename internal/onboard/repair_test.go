@@ -24,8 +24,8 @@ func TestRepairEnvFixesDerivedValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repair: %v", err)
 	}
-	if len(changed) != 2 {
-		t.Fatalf("want 2 changed keys, got %v", changed)
+	if len(changed) != 3 {
+		t.Fatalf("want 3 changed keys, got %v", changed)
 	}
 	vals, err := onboard.LoadEnvFile(envPath)
 	if err != nil {
@@ -36,6 +36,9 @@ func TestRepairEnvFixesDerivedValues(t *testing.T) {
 	}
 	if vals["OCD_PAIR_URL"] != "https://oc-mac.buyallmemes.com" {
 		t.Fatalf("pair url = %q", vals["OCD_PAIR_URL"])
+	}
+	if vals["OCD_PAIR_OPEN"] != "1" {
+		t.Fatalf("pair open must be enabled, got %q", vals["OCD_PAIR_OPEN"])
 	}
 	if vals["OCD_HEARTBEAT_TOKEN"] != "keepme" {
 		t.Fatalf("unrelated values must survive, got %q", vals["OCD_HEARTBEAT_TOKEN"])

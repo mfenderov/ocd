@@ -38,6 +38,8 @@ func RepairEnv(envPath, boxID string) ([]string, error) {
 	want := map[string]string{
 		"OCD_PUBLIC_URL": "https://" + TapHost(boxID) + "/pair",
 		"OCD_PAIR_URL":   "https://" + UIHost(boxID),
+		// A box without this answers 401 to every tap link.
+		"OCD_PAIR_OPEN": "1",
 	}
 	changed := []string{}
 	for k, v := range want {

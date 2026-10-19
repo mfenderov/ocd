@@ -111,6 +111,9 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		// must point at — different hosts, different services.
 		"OCD_PUBLIC_URL": tapBase(cfg.PublicHost) + "/pair",
 		"OCD_PAIR_URL":   cfg.PairURL,
+		// The tap endpoint is protected by the one-time token itself;
+		// without this the browser gets 401 and no link ever works.
+		"OCD_PAIR_OPEN": "1",
 	}
 	if cfg.Tunnel != nil {
 		// Onboard-provisioned tunnel => onboard-supervised tunnel:
