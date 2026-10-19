@@ -98,7 +98,6 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	if err != nil {
 		return err
 	}
-	say("writing " + cfg.EnvPath)
 	envVals := map[string]string{
 		"OCD_BOX_ID":          cfg.BoxID,
 		"OCD_WORKER_URL":      cfg.WorkerURL,
@@ -112,10 +111,6 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		// Onboard-provisioned tunnel => onboard-supervised tunnel:
 		// `ocd serve` manages cloudflared itself, no external service.
 		envVals["OCD_MANAGE_TUNNEL"] = "1"
-	}
-	err = WriteEnvFile(cfg.EnvPath, envVals)
-	if err != nil {
-		return err
 	}
 	if cfg.Tunnel != nil {
 		say("setting up tunnel " + cfg.Tunnel.Name)
@@ -131,7 +126,8 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	}
 	if status == "enrolled" {
 		say("enrolled")
-		return nil
+		say("writing " + cfg.EnvPath)
+		return writeEnv(cfg, envVals)
 	}
 	if strings.TrimSpace(cfg.EnrollCode) != "" {
 		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
@@ -152,5 +148,16 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	say("waiting for Telegram approval…")
 	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	return WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval)
+	if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
+		return err
+	}
+	say("writing " + cfg.EnvPath)
+	return writeEnv(cfg, envVals)
+}
+
+// writeEnv persists the box identity. It runs only after the enrollment
+// bound, so a failed enroll never leaves the box heartbeating with a
+// token the worker does not know (the "auth mismatch" clone warning).
+func writeEnv(cfg Config, envVals map[string]string) error {
+	return WriteEnvFile(cfg.EnvPath, envVals)
 }

@@ -418,3 +418,15 @@ func TestServiceStatusWithoutPlist(t *testing.T) {
 		t.Fatalf("want 'not installed', got %q", state)
 	}
 }
+
+// launchd gives a bare environment: without HOME the daemon cannot find
+// ~/.ocd/env or the cloudflared config, and without PATH it cannot find
+// cloudflared or opencode. The plist must carry both.
+func TestLaunchdPlistCarriesHomeAndPath(t *testing.T) {
+	out := onboard.LaunchdPlist("/opt/homebrew/bin/ocd", "/Users/x")
+	for _, want := range []string{"<key>HOME</key>", "/Users/x", "<key>PATH</key>", "/opt/homebrew/bin"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plist must contain %q, got:\n%s", want, out)
+		}
+	}
+}

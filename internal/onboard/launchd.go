@@ -33,6 +33,13 @@ func LaunchdPlist(exe, home string) string {
   <true/>
   <key>WorkingDirectory</key>
   <string>` + home + `</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>` + home + `</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>` + filepath.Join(home, ".ocd", "daemon.log") + `</string>
   <key>StandardErrorPath</key>
