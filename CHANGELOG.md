@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.8.2 - 2026-10-19
+#### Bug Fixes
+- enroll tolerates heartbeat-suffixed worker URL - (cece393) - mfenderov
+
+- - -
+
 ## v0.8.1 - 2026-10-19
 #### Bug Fixes
 - verify release assets via gh download, not browser URLs - (6b76adc) - mfenderov
