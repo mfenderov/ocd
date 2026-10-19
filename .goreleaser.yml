@@ -30,6 +30,17 @@ homebrew_casks:
     description: "Remote OpenCode access via Cloudflare Tunnel and Telegram bot"
     binaries:
       - ocd
+    # Homebrew 7 deprecates `postflight` emitted by `hooks.post.install`.
+    # Emit `postflight_steps` via custom_block until
+    # goreleaser/goreleaser#6873 ships `hooks.post.install_steps`.
+    # `chdir: "."` resolves to staged_path, keeps Homebrew `{{ }}` tokens
+    # out of the goreleaser template.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "ocd"], chdir: "."
+        end
+      end
 
 changelog:
   sort: asc
