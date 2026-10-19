@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // LaunchdLabel is the single per-machine login service.
@@ -111,4 +112,56 @@ func ServiceExecutable() (string, error) {
 		return "", fmt.Errorf("onboard: executable: %w", err)
 	}
 	return exe, nil
+}
+
+// UnloadLoginService stops and removes the login service. Missing service
+// is not an error: the goal state is "not installed".
+func UnloadLoginService() error {
+	path, err := LaunchdPath()
+	if err != nil {
+		return err
+	}
+	uid := os.Getenv("UID")
+	if uid == "" {
+		out, err := exec.Command("id", "-u").Output()
+		if err != nil {
+			return fmt.Errorf("onboard: uid: %w", err)
+		}
+		uid = string(out[:len(out)-1])
+	}
+	_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+LaunchdLabel).Run()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("onboard: remove plist: %w", err)
+	}
+	return nil
+}
+
+// ServiceStatus reports the launchd service state ("running", "not
+// loaded", or the raw state string) and whether the plist exists.
+func ServiceStatus() (string, error) {
+	path, err := LaunchdPath()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "not installed", nil
+	}
+	uid := os.Getenv("UID")
+	if uid == "" {
+		out, err := exec.Command("id", "-u").Output()
+		if err != nil {
+			return "installed", nil
+		}
+		uid = string(out[:len(out)-1])
+	}
+	out, err := exec.Command("launchctl", "print", "gui/"+uid+"/"+LaunchdLabel).CombinedOutput()
+	if err != nil {
+		return "installed (not loaded)", nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "state =") {
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "state =")), nil
+		}
+	}
+	return "installed", nil
 }

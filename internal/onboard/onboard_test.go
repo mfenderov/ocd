@@ -406,3 +406,15 @@ func TestDoOnboardCodeBecomesHeartbeatSecret(t *testing.T) {
 		t.Fatalf("enroll token must be the code, got %q", vals["OCD_ENROLL_TOKEN"])
 	}
 }
+
+func TestServiceStatusWithoutPlist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	state, err := onboard.ServiceStatus()
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if state != "not installed" {
+		t.Fatalf("want 'not installed', got %q", state)
+	}
+}
