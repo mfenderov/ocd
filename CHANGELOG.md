@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.13.0 - 2026-10-19
+#### Features
+- name the cause when bot protection blocks the box relay - (80fe39d) - mfenderov
+
+- - -
+
 ## v0.12.0 - 2026-10-19
 #### Features
 - bare 'ocd' is the whole onboarding - (9151752) - mfenderov
