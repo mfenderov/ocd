@@ -70,12 +70,14 @@ func runOnboard(w interface {
 		return err
 	}
 	host := onboard.TapHost(boxID)
+	uiHost := onboard.UIHost(boxID)
 	tunnel := &onboard.TunnelPlan{
 		Name:     "oc-" + boxID,
 		TapHost:  host,
-		UIHost:   onboard.UIHost(boxID),
+		UIHost:   uiHost,
 		APIToken: opts.CFToken,
-		Port:     49400,
+		Port:     onboard.DaemonPort,
+		UIPort:   onboard.OpenCodePort,
 	}
 	if opts.SkipTunnel {
 		tunnel = nil
@@ -95,6 +97,7 @@ func runOnboard(w interface {
 		BoxID:      boxID,
 		WorkerURL:  workerURL,
 		PublicHost: host,
+		PairURL:    "https://" + uiHost,
 		EnrollCode: code,
 		Quiet:      true,
 		Tunnel:     tunnel,

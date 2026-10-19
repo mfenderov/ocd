@@ -19,13 +19,24 @@ import (
 // TunnelPlan describes the per-box tunnel. UIHost is optional: empty
 // skips the UI hostname entirely.
 type TunnelPlan struct {
-	Name     string
-	TapHost  string
-	UIHost   string
-	CredDir  string
-	Port     int
+	Name    string
+	TapHost string
+	UIHost  string
+	CredDir string
+	// Port serves the ocd daemon (pair links, box API).
+	Port int
+	// UIPort serves the OpenCode web UI. It is a different service from
+	// the daemon, so the editor hostname must point at it — pointing it
+	// at the daemon yields a UI host that serves 404.
+	UIPort   int
 	APIToken string
 }
+
+// DaemonPort is the ocd daemon's loopback port (pair links, box API).
+const DaemonPort = 49400
+
+// OpenCodePort is the OpenCode web UI's loopback port.
+const OpenCodePort = 49374
 
 // TapHost is the hostname serving this box's tap (pair) links.
 func TapHost(boxID string) string {
@@ -44,7 +55,8 @@ func DefaultTunnelPlan(boxID string) TunnelPlan {
 		Name:    "oc-" + boxID,
 		TapHost: "oc-tap-" + boxID + ".buyallmemes.com",
 		UIHost:  "oc-" + boxID + ".buyallmemes.com",
-		Port:    49400,
+		Port:    DaemonPort,
+		UIPort:  OpenCodePort,
 	}
 }
 
@@ -140,12 +152,12 @@ func RouteDNS(ctx context.Context, apiToken, tunnel, hostname string) error {
 
 // renderTunnelConfig is the whole config.yml content: tunnel identity plus
 // one ingress rule per hostname, closed by a 404 catch-all.
-func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port int) string {
+func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port, uiPort int) string {
 	var sb strings.Builder
 	_, _ = fmt.Fprintf(&sb, "tunnel: %s\ncredentials-file: %s\ningress:\n", tunnelID, credFile)
 	_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", tapHost, port)
 	if strings.TrimSpace(uiHost) != "" {
-		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", strings.TrimSpace(uiHost), port)
+		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", strings.TrimSpace(uiHost), uiPort)
 	}
 	_, _ = fmt.Fprintf(&sb, "  - service: http_status:404\n")
 	return sb.String()
@@ -154,18 +166,18 @@ func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port int) st
 // WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
 // file: tunnel config is hand-tuned infrastructure, never silently replaced.
 // Use EnsureTunnelConfig when reruns should pass through unchanged files.
-func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port int) error {
+func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
 	}
-	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port))
+	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort))
 }
 
 // EnsureTunnelConfig writes config.yml unless an identical one is already
 // there (re-runs pass through silently). A differing file still refuses:
 // pass --skip-tunnel to reuse existing infra untouched.
-func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port int) (reused bool, err error) {
-	want := renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port)
+func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
+	want := renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort)
 	if raw, err := os.ReadFile(path); err == nil {
 		if string(raw) == want {
 			return true, nil
@@ -228,7 +240,10 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 		return "", fmt.Errorf("onboard: tap hostname is required")
 	}
 	if plan.Port <= 0 {
-		plan.Port = 49400
+		plan.Port = DaemonPort
+	}
+	if plan.UIPort <= 0 {
+		plan.UIPort = OpenCodePort
 	}
 	if strings.TrimSpace(plan.CredDir) == "" {
 		dir, err := DefaultCredDir()
@@ -257,7 +272,7 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 	}
 	cfgPath := filepath.Join(plan.CredDir, "config.yml")
 	credFile := filepath.Join(plan.CredDir, id+".json")
-	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port)
+	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port, plan.UIPort)
 	if err != nil {
 		return "", err
 	}

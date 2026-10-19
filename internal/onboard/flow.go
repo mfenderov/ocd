@@ -35,6 +35,8 @@ type Config struct {
 	// Quiet suppresses the Worker's approve/deny ping: the owner already
 	// holds the token, so a second message would only confuse.
 	Quiet bool
+	// PairURL is the OpenCode UI origin the pairing link points at.
+	PairURL string
 	// Tunnel, when non-nil, provisions the Cloudflare tunnel + DNS after
 	// the env file is written and before enrollment.
 	Tunnel       *TunnelPlan
@@ -104,8 +106,11 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		"OCD_HEARTBEAT_TOKEN": heartbeatToken,
 		"OCD_ENROLL_TOKEN":    heartbeatToken,
 		"OCD_ADMIN_TOKEN":     adminToken,
-		"OCD_PUBLIC_URL":      tapBase(cfg.PublicHost),
-		"OCD_PAIR_URL":        tapBase(cfg.PublicHost),
+		// PUBLIC_URL is the tap endpoint the worker hands out as a
+		// one-time link, PAIR_URL is the OpenCode UI the pairing link
+		// must point at — different hosts, different services.
+		"OCD_PUBLIC_URL": tapBase(cfg.PublicHost) + "/pair",
+		"OCD_PAIR_URL":   cfg.PairURL,
 	}
 	if cfg.Tunnel != nil {
 		// Onboard-provisioned tunnel => onboard-supervised tunnel:

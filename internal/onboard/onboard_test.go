@@ -436,3 +436,40 @@ func TestLaunchdPlistCarriesHomeAndPath(t *testing.T) {
 		}
 	}
 }
+
+// The tap link, the pairing link and the tunnel UI rule must point at
+// three different things: the tap endpoint (daemon), the OpenCode UI
+// (editor), and the editor's own port in the tunnel.
+func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	plan := onboard.DefaultTunnelPlan("mac")
+	plan.CredDir = filepath.Join(dir, ".cloudflared")
+	plan.APIToken = "test-token" // no cloudflared login needed
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: onboard.TapHost("mac"),
+		PairURL: "https://" + onboard.UIHost("mac"),
+		Tunnel:  &plan,
+		EnvPath: filepath.Join(dir, "env"), DBPath: filepath.Join(dir, "ocd.db"),
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	vals, err := onboard.LoadEnvFile(filepath.Join(dir, "env"))
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if vals["OCD_PUBLIC_URL"] != "https://oc-tap-mac.buyallmemes.com/pair" {
+		t.Fatalf("tap url = %q", vals["OCD_PUBLIC_URL"])
+	}
+	if vals["OCD_PAIR_URL"] != "https://oc-mac.buyallmemes.com" {
+		t.Fatalf("pair url = %q", vals["OCD_PAIR_URL"])
+	}
+}
