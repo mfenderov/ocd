@@ -429,7 +429,7 @@ export async function requestEnrollment(
   notify: NotifyFn,
   nowSec: () => number = defaultNowSec,
   config: EnrollConfig = {},
-): Promise<{ status: EnrollStatus; id: string; rotated: boolean }> {
+): Promise<{ status: EnrollStatus; id: string; rotated: boolean; trusted: boolean }> {
   const suffixes = config.hostSuffixes ?? DEFAULT_HOST_SUFFIXES;
   if (!isPinnedHostname(body.hostname, suffixes)) {
     throw new Error(`enroll: bad_request (hostname "${body.hostname}" not allowed)`);
@@ -439,7 +439,7 @@ export async function requestEnrollment(
     // Bound-token fast path. A supplied admin_token is a rotation, never a
     // drop: seal + store it, or fail loud when sealing is unconfigured.
     if (body.admin_token === undefined) {
-      return { status: "enrolled", id: body.id, rotated: false };
+      return { status: "enrolled", id: body.id, rotated: false, trusted: true };
     }
     if (!config.sealKey) {
       throw new Error("enroll: seal key not configured");
@@ -451,14 +451,14 @@ export async function requestEnrollment(
       current = null; // unreadable binding counts as different: rotation heals it
     }
     if (current === body.admin_token) {
-      return { status: "enrolled", id: body.id, rotated: false };
+      return { status: "enrolled", id: body.id, rotated: false, trusted: true };
     }
     const now = nowSec();
     store.putBox({ ...known, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
     // A rotation nobody hears about is a silent credential change: ping the
     // owner channel exactly like enrollment pings (id + time, never tokens).
     await notify(rotationPingText(body.id, now));
-    return { status: "enrolled", id: body.id, rotated: true };
+    return { status: "enrolled", id: body.id, rotated: true, trusted: true };
   }
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
@@ -490,7 +490,7 @@ export async function requestEnrollment(
         tokenHash: pending.heartbeat_token_hash,
         hostname: pending.hostname,
       });
-      return { status: "enrolled", id: body.id, rotated };
+      return { status: "enrolled", id: body.id, rotated, trusted: true };
     }
   }
   let sealed = "";
@@ -536,7 +536,7 @@ export async function requestEnrollment(
   if (!body.quiet) {
     await notify(enrollPingText(body, { approve, deny }, exp));
   }
-  return { status: "pending", id: body.id, rotated: false };
+  return { status: "pending", id: body.id, rotated: false, trusted: config.trusted === true };
 }
 
 async function noopNotify(): Promise<void> {}
@@ -652,6 +652,10 @@ export async function handleEnrollRequest(
       id: result.id,
       enrolled: result.status === "enrolled",
       rotated: result.rotated,
+      // Whether the box may be claimed by typing the code. False means
+      // the request lacked the "enroll" scope, so the box needs the
+      // approve tap instead — the bot says so instead of failing later.
+      trusted: result.trusted,
     });
   } catch (err) {
     // Defense in depth: direct requestEnrollment callers hit the hostname

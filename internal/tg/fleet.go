@@ -163,7 +163,7 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 		return "", err
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "", boxagent.EnrollOptions{
+	status, trusted, err := boxagent.EnrollBoxTrusted(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "", boxagent.EnrollOptions{
 		Quiet:  true,
 		Bearer: os.Getenv("OCD_FLEET_TOKEN"),
 	})
@@ -172,6 +172,9 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 	}
 	if status != "pending" {
 		return fmt.Sprintf("📋 <code>%s</code> is already enrolled.", esc(box)), nil
+	}
+	if !trusted {
+		return fmt.Sprintf("⚠️ Could not issue a code for <code>%s</code>: this bot's fleet token lacks the <code>enroll</code> scope.\nRe-mint it with scopes link, revoke, audit, enroll.", esc(box)), nil
 	}
 	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n<code>%s</code>\nPaste it into <code>ocd</code> on that machine.",
 		esc(box), esc(code)), nil

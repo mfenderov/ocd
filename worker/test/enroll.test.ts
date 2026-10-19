@@ -121,7 +121,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       () => 1700000100,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
-    expect(result).toEqual({ status: "pending", id: "nb-1", rotated: false });
+    expect(result).toEqual({ status: "pending", id: "nb-1", rotated: false, trusted: false });
     const row = store.getPending("nb-1");
     expect(row).toMatchObject({ id: "nb-1", hostname: "nb-1.buyallmemes.com", first_seen: 1700000100 });
     expect(row?.heartbeat_token_hash).toBe(await hashToken(NEW_TOKEN));
@@ -143,7 +143,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       { id: "bound-1", hostname: "bound-1.buyallmemes.com", enroll_token: KNOWN_TOKEN },
       rec.notify,
     );
-    expect(result).toEqual({ status: "enrolled", id: "bound-1", rotated: false });
+    expect(result).toEqual({ status: "enrolled", id: "bound-1", rotated: false, trusted: true });
     expect(store.getPending("bound-1")).toBeUndefined();
     expect(rec.texts).toHaveLength(0);
   });
@@ -159,7 +159,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       undefined,
       { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
     );
-    expect(result).toEqual({ status: "pending", id: "clone-1", rotated: false });
+    expect(result).toEqual({ status: "pending", id: "clone-1", rotated: false, trusted: false });
     expect(store.getPending("clone-1")?.heartbeat_token_hash).toBe(await hashToken(CLONE_TOKEN));
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).not.toContain(CLONE_TOKEN);
@@ -663,7 +663,7 @@ describe("admin token sealed at rest (AES-GCM)", () => {
       fixedNow,
       { capSecret: CAP_TEST_KEY },
     );
-    expect(result).toEqual({ status: "pending", id: "seal-none", rotated: false });
+    expect(result).toEqual({ status: "pending", id: "seal-none", rotated: false, trusted: false });
     expect(store.getPending("seal-none")?.admin_token_sealed).toBe("");
     const row = await approveEnrollment(store, "seal-none");
     expect(row?.admin_token_sealed).toBe("");
@@ -714,7 +714,7 @@ describe("enrolled fast-path admin rotation", () => {
       fixedNow,
       TEST_SECRETS,
     );
-    expect(result).toEqual({ status: "enrolled", id: "rot-1", rotated: true });
+    expect(result).toEqual({ status: "enrolled", id: "rot-1", rotated: true, trusted: true });
     expect(store.getPending("rot-1")).toBeUndefined();
     const row = store.getBox("rot-1");
     expect(row?.admin_token_sealed).not.toContain("fresh-admin-rotation-1");
@@ -731,7 +731,7 @@ describe("enrolled fast-path admin rotation", () => {
       fixedNow,
       TEST_SECRETS,
     );
-    expect(again).toEqual({ status: "enrolled", id: "rot-1", rotated: false });
+    expect(again).toEqual({ status: "enrolled", id: "rot-1", rotated: false, trusted: true });
     expect(rec.texts).toHaveLength(1);
   });
 
@@ -746,7 +746,7 @@ describe("enrolled fast-path admin rotation", () => {
       fixedNow,
       TEST_SECRETS,
     );
-    expect(result).toEqual({ status: "enrolled", id: "rot-2", rotated: true });
+    expect(result).toEqual({ status: "enrolled", id: "rot-2", rotated: true, trusted: true });
     expect(await unsealAdminToken(SEAL_KEY, store.getBox("rot-2")?.admin_token_sealed ?? "")).toBe("new-admin-2");
   });
 
@@ -782,7 +782,7 @@ describe("enrolled fast-path admin rotation", () => {
       TEST_SECRETS,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: "enrolled", id: "rot-4", enrolled: true, rotated: true });
+    expect(await res.json()).toEqual({ status: "enrolled", id: "rot-4", enrolled: true, rotated: true, trusted: true });
   });
 });
 
@@ -1111,7 +1111,7 @@ describe("enrollment code claim (typed code from Telegram)", () => {
       () => NOW + 60,
       TRUSTED,
     );
-    expect(res).toEqual({ status: "enrolled", id: "code-1", rotated: false });
+    expect(res).toEqual({ status: "enrolled", id: "code-1", rotated: false, trusted: true });
     expect(rec.texts).toHaveLength(0);
     expect(store.getPending("code-1")).toBeUndefined();
     const box = store.getBox("code-1");

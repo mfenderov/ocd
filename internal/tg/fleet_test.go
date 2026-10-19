@@ -233,7 +233,7 @@ func TestFleetEnrollCode(t *testing.T) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"pending","id":"mac"}`))
+		_, _ = w.Write([]byte(`{"status":"pending","id":"mac","trusted":true}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OCD_WORKER_URL", srv.URL)
@@ -271,5 +271,23 @@ func TestFleetEnrollCodeUsage(t *testing.T) {
 	}
 	if !strings.Contains(got, "/enrollcode") {
 		t.Fatalf("must show usage, got:\n%s", got)
+	}
+}
+
+func TestFleetEnrollCodeWarnsWhenTokenLacksEnrollScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The worker could not mark the pending row trusted.
+		_, _ = w.Write([]byte(`{"status":"pending","id":"mac","trusted":false}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OCD_WORKER_URL", srv.URL)
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+	got, err := tg.FleetEnrollCodeText(context.Background(), "mac", "")
+	if err != nil {
+		t.Fatalf("enrollcode: %v", err)
+	}
+	if !strings.Contains(got, "enroll") || !strings.Contains(got, "scope") {
+		t.Fatalf("reply must name the missing scope, got:\n%s", got)
 	}
 }
