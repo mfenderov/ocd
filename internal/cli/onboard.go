@@ -71,13 +71,17 @@ func runOnboard(w interface {
 	}
 	host := onboard.TapHost(boxID)
 	uiHost := onboard.UIHost(boxID)
+	uiPort, note := onboard.OpenCodePortOrDefault(ctx)
+	if note != "" {
+		_, _ = fmt.Fprintf(w, "opencode: %s — assuming port %d\n", note, uiPort)
+	}
 	tunnel := &onboard.TunnelPlan{
 		Name:     "oc-" + boxID,
 		TapHost:  host,
 		UIHost:   uiHost,
 		APIToken: opts.CFToken,
 		Port:     onboard.DaemonPort,
-		UIPort:   onboard.OpenCodePort,
+		UIPort:   uiPort,
 	}
 	if opts.SkipTunnel {
 		tunnel = nil

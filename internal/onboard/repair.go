@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,8 +60,13 @@ func RepairEnv(envPath, boxID string) ([]string, error) {
 // RepairTunnel rewrites the tunnel config so the tap hostname serves the
 // daemon and the editor hostname serves OpenCode. It keeps the same
 // tunnel id and credentials file, so the tunnel stays the same one
-// Cloudflare knows. Returns true when the file changed.
+// Cloudflare knows. The OpenCode port is discovered from the running
+// service, because it is not fixed. Returns true when the file changed.
 func RepairTunnel(cfgPath, boxID string) (bool, error) {
+	uiPort := OpenCodePort
+	if p, err := DiscoverOpenCodePort(context.Background()); err == nil {
+		uiPort = p
+	}
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return false, fmt.Errorf("onboard: read tunnel config: %w", err)
@@ -74,7 +80,7 @@ func RepairTunnel(cfgPath, boxID string) (bool, error) {
 	if cred != nil {
 		credPath = string(cred[1])
 	}
-	want := renderTunnelConfig(string(id[1]), credPath, TapHost(boxID), UIHost(boxID), DaemonPort, OpenCodePort)
+	want := renderTunnelConfig(string(id[1]), credPath, TapHost(boxID), UIHost(boxID), DaemonPort, uiPort)
 	if string(raw) == want {
 		return false, nil
 	}
