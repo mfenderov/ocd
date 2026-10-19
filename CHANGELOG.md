@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.8.0 - 2026-10-19
+#### Features
+- single-command tunnel provisioning in onboard - (60da9c5) - mfenderov
+#### Bug Fixes
+- hermetic cloudflared login check in onboard tests - (6be8821) - mfenderov
+
+- - -
+
 ## v0.7.0 - 2026-10-18
 #### Features
 - typed enroll codes replace the approve tap - (c64919e) - mfenderov
