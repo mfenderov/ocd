@@ -81,9 +81,10 @@ jobs:
     name: verify release downloads
     runs-on: ubuntu-latest
     needs: release
-    # Every release proves its own artifacts: authenticated download of
-    # each tarball (works for private repos too). A green release with
-    # 404 assets failed the pipeline, never the user.
+    # Every release proves its own artifacts with the same tool users
+    # install from. Private-repo browser URLs 404 even with a token
+    # header, so download through the API exactly like `brew` would
+    # through the public object store.
     steps:
       - name: Download every published archive
         env:
@@ -91,16 +92,8 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          VER="${TAG#v}"
-          for OS in darwin linux; do
-            for ARCH in amd64 arm64; do
-              FILE="ocd_${VER}_${OS}_${ARCH}.tar.gz"
-              URL="https://github.com/${REPO}/releases/download/${TAG}/${FILE}"
-              echo "GET $URL"
-              curl -sfSL -H "Authorization: Bearer $GH_TOKEN" -o /dev/null "$URL" || {
-                echo "::error::download failed: $URL"
-                exit 1
-              }
-            done
-          done
-          echo "4/4 archives download cleanly"
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          gh release download "$TAG" --repo "$REPO" --dir /tmp/verify --pattern 'ocd_*.tar.gz'
+          count=$(ls /tmp/verify/ocd_*.tar.gz | wc -l)
+          [ "$count" -eq 4 ] || { echo "::error::expected 4 archives, got $count"; exit 1; }
+          echo "$count/4 archives download cleanly"
