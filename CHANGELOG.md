@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.14.0 - 2026-10-19
+#### Features
+- ocd service install/uninstall/status - (a812906) - mfenderov
+
+- - -
+
 ## v0.13.3 - 2026-10-19
 #### Bug Fixes
 - derive scope validation from ALL_SCOPES - (17e4201) - mfenderov
