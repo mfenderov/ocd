@@ -1,7 +1,8 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { hashToken } from "../src/heartbeat";
 import app from "../src/index";
+import { inState } from "./helpers";
 import {
   ALL_SCOPES,
   handleDeleteToken,
@@ -255,14 +256,14 @@ describe("requireScope (unit)", () => {
 describe("token store through the real DO (SQLite backend)", () => {
   it("mint + requireScope round-trip through FleetState SQL", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tokens-sql"));
-    const minted = await runInDurableObject(stub, async (instance) => {
+    const minted = await inState(stub, async (instance) => {
       const res = await handleMintToken(tokenRequest("/tokens", "POST", { scopes: ["link"] }, BOOTSTRAP), instance, {
         bootstrapSecret: BOOTSTRAP,
       });
       expect(res.status).toBe(200);
       return (await res.json()) as { token: string; id: string; scopes: string[] };
     });
-    const checked = await runInDurableObject(stub, async (instance) => {
+    const checked = await inState(stub, async (instance) => {
       const ok = await requireScope(instance, minted.token, "link");
       const denied = await requireScope(instance, minted.token, "revoke");
       return { ok: ok?.id ?? null, denied: denied?.id ?? null, count: instance.countTokens() };

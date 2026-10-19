@@ -1,10 +1,11 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { hashToken } from "../src/heartbeat";
 import { sealAdminToken } from "../src/enroll";
 import { handleMintLink, isTainted, type MintStore, type TombstoneRow } from "../src/mint";
 import type { BoxRow } from "../src/state";
 import { handleMintToken } from "../src/tokens";
+import { inState } from "./helpers";
 
 const SEAL_KEY = "test-seal-key-mint-4";
 const ADMIN_PLAIN = "mint-admin-plaintext-9";
@@ -16,7 +17,7 @@ let routeToken = "";
 
 beforeAll(async () => {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  routeToken = await runInDurableObject(stub, async (instance) => {
+  routeToken = await inState(stub, async (instance) => {
     const res = await handleMintToken(
       new Request("https://fleet.local/tokens", {
         method: "POST",
@@ -229,7 +230,7 @@ describe("mint route through the worker + DO", () => {
 
   it("POST /api/backends/:id/link on a tainted box is 409 without box contact", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    await runInDurableObject(stub, async (instance) => {
+    await inState(stub, async (instance) => {
       instance.putBox({
         id: "route-tainted",
         hostname: "route-tainted.example.com",

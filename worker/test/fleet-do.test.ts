@@ -1,7 +1,8 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { BoxRow } from "../src/state";
 import { handleMintToken } from "../src/tokens";
+import { inState } from "./helpers";
 
 const BOX: BoxRow = {
   id: "box-1",
@@ -38,7 +39,7 @@ describe("fleet DO (real SQLite backend)", () => {
     const anon = await SELF.fetch("https://fleet.local/api/backends");
     expect(anon.status).toBe(401);
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    const routeToken = await runInDurableObject(stub, async (instance) => {
+    const routeToken = await inState(stub, async (instance) => {
       const res = await handleMintToken(
         new Request("https://fleet.local/tokens", {
           method: "POST",
@@ -59,7 +60,7 @@ describe("fleet DO (real SQLite backend)", () => {
 
     // Seed the real "fleet" DO behind the route. If the route served the
     // no-env fallback instead of the DO, this row would never appear.
-    await runInDurableObject(stub, async (instance) => {
+    await inState(stub, async (instance) => {
       instance.putBox(BOX);
     });
 
@@ -82,19 +83,19 @@ describe("fleet DO (real SQLite backend)", () => {
     const stub = env.FLEET_STATE.get(
       env.FLEET_STATE.idFromName("fleet-write-read"),
     );
-    const rows = await runInDurableObject(stub, async (instance) => {
+    const rows = await inState(stub, async (instance) => {
       instance.putBox(BOX);
       return instance.listBackends();
     });
     expect(rows).toEqual([PUBLIC_BOX]);
-    const full = await runInDurableObject(stub, async (instance) => instance.listBoxes());
+    const full = await inState(stub, async (instance) => instance.listBoxes());
     expect(full).toEqual([{ ...BOX }]);
   });
 
   it("GET /api/backends marks a server-side tombstoned box tombstoned:true", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
     // Tombstone at the box's own epoch: isTainted holds, no heartbeat heal.
-    await runInDurableObject(stub, async (instance) => {
+    await inState(stub, async (instance) => {
       instance.putBox({ ...BOX, id: "box-tomb-1", hostname: "host-tomb-1" });
       instance.putTombstone({ box_id: "box-tomb-1", epoch: 1 });
     });

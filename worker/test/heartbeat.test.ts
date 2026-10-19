@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   fetchBox,
@@ -12,6 +12,7 @@ import {
   shouldPingMismatch,
 } from "../src/heartbeat";
 import type { BoxRow } from "../src/state";
+import { inState } from "./helpers";
 
 const TOKEN = "hb-test-secret-1";
 const ADMIN_TOKEN = "admin-test-secret-1";
@@ -25,7 +26,7 @@ beforeAll(async () => {
 
 function seedBox(id: string, overrides: Partial<BoxRow> = {}): Promise<BoxRow> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return runInDurableObject(stub, async (instance) => {
+  return inState(stub, async (instance) => {
     const box: BoxRow = {
       id,
       hostname: `${id}.example.com`,
@@ -46,7 +47,7 @@ function seedBox(id: string, overrides: Partial<BoxRow> = {}): Promise<BoxRow> {
 
 function readBox(id: string): Promise<BoxRow | undefined> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return runInDurableObject(stub, async (instance) => instance.getBox(id));
+  return inState(stub, async (instance) => instance.getBox(id));
 }
 
 function postHeartbeat(body: unknown, token: string | null = TOKEN): Promise<Response> {
@@ -129,7 +130,7 @@ describe("heartbeat ingest", () => {
   it("refuses fetches to unknown or heartbeat-supplied hostnames", async () => {
     await seedBox("hb-pin");
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    const registry = await runInDurableObject(stub, async (instance) =>
+    const registry = await inState(stub, async (instance) =>
       pinnedRegistry(instance.listBackends()),
     );
     expect(pinnedHostname(registry, "hb-pin")).toBe("hb-pin.example.com");
@@ -156,12 +157,12 @@ describe("heartbeat ingest", () => {
   it("resolves pinned hostnames from the DO and throws on unknown ids", async () => {
     await seedBox("hb-do");
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    const hostname = await runInDurableObject(stub, async (instance) =>
+    const hostname = await inState(stub, async (instance) =>
       instance.pinnedHostname("hb-do"),
     );
     expect(hostname).toBe("hb-do.example.com");
     await expect(
-      runInDurableObject(stub, async (instance) => instance.pinnedHostname("ghost")),
+      inState(stub, async (instance) => instance.pinnedHostname("ghost")),
     ).rejects.toThrow();
   });
 });

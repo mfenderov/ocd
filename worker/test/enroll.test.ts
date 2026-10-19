@@ -1,4 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
+import type { FleetState } from "../src/state";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveEnrollment,
@@ -390,7 +391,7 @@ describe("telegram ping (Bot API, direct fetch)", () => {
 describe("enroll routes through the worker + DO", () => {
   function readPending(id: string): Promise<PendingRow | undefined> {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    return runInDurableObject(stub, async (instance) => instance.getPending(id));
+    return runInDurableObject<FleetState, PendingRow | undefined>(stub, async (instance) => instance.getPending(id));
   }
 
   // Test env carries no capability/seal secrets (by design — they are Worker

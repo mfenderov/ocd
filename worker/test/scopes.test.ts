@@ -1,8 +1,9 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute } from "../src/access";
 import { handleMintToken } from "../src/tokens";
 import { generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
+import { inState } from "./helpers";
 
 const BOOTSTRAP = "test-bootstrap-scopes-2";
 
@@ -13,7 +14,7 @@ let auditToken = "";
 
 async function mintDirect(scopes: string[] | undefined, bearer: string): Promise<string> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return runInDurableObject(stub, async (instance) => {
+  return inState(stub, async (instance) => {
     const res = await handleMintToken(
       new Request("https://fleet.local/tokens", {
         method: "POST",
@@ -191,7 +192,7 @@ describe("valid Access JWT end-to-end (env threading)", () => {
     // there): anything but the certs URL falls through to the real fetch.
     // Left active across the SELF call below so the full edge + DO path is
     // proven; restored in finally.
-    await runInDurableObject(stub, async () => {
+    await inState(stub, async () => {
       const globals = globalThis as unknown as Record<string, unknown>;
       globals["__prevFetch"] = globalThis.fetch;
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -203,7 +204,7 @@ describe("valid Access JWT end-to-end (env threading)", () => {
     });
     try {
       // Direct DO route: proves constructor env → accessConfig → verify.
-      const direct = await runInDurableObject(stub, async (instance) => {
+      const direct = await inState(stub, async (instance) => {
         const res = await instance.fetch(
           new Request("http://do/link/scope-jwt-ghost", {
             method: "POST",
@@ -224,7 +225,7 @@ describe("valid Access JWT end-to-end (env threading)", () => {
       expect(viaEdge.status).toBe(404);
       expect(await viaEdge.json()).toMatchObject({ error: "unknown_box" });
     } finally {
-      await runInDurableObject(stub, async () => {
+      await inState(stub, async () => {
         const globals = globalThis as unknown as Record<string, unknown>;
         globalThis.fetch = globals["__prevFetch"] as typeof fetch;
         delete globals["__prevFetch"];

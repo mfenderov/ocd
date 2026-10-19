@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   AUDIT_DEADLINE_MS,
@@ -14,6 +14,7 @@ import app from "../src/index";
 import type { TombstoneRow } from "../src/mint";
 import type { BoxRow } from "../src/state";
 import { handleMintToken } from "../src/tokens";
+import { inState } from "./helpers";
 
 const BOOTSTRAP = "test-bootstrap-audit-route-2";
 
@@ -23,7 +24,7 @@ let routeToken = "";
 
 beforeAll(async () => {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  routeToken = await runInDurableObject(stub, async (instance) => {
+  routeToken = await inState(stub, async (instance) => {
     const res = await handleMintToken(
       new Request("https://fleet.local/tokens", {
         method: "POST",
@@ -355,7 +356,7 @@ describe("audit routes through the worker + DO", () => {
 
   it("known box without a seal key yields a misconfigured marker row with 200", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    await runInDurableObject(stub, async (instance) => {
+    await inState(stub, async (instance) => {
       instance.putBox({
         id: "route-audit-known",
         hostname: "route-audit-known.example.com",
