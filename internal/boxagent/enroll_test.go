@@ -71,3 +71,23 @@ func TestEnrollRefusesEmptyIdentity(t *testing.T) {
 		t.Fatal("must not hit the network on invalid input")
 	}
 }
+
+func TestEnrollToleratesHeartbeatSuffixedOrigin(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending","id":"box-9"}`))
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Home's OCD_WORKER_URL ends in /api/heartbeat; enroll must still land
+	// on /api/enroll (bot /enrollcode 404 regression, 2026-10-19).
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL+"/api/heartbeat", "box-9", "h.example.com", "tok", ""); err != nil {
+		t.Fatalf("EnrollBox: %v", err)
+	}
+	if gotPath != "/api/enroll" {
+		t.Fatalf("want /api/enroll, got %q", gotPath)
+	}
+}

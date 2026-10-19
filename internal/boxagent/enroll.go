@@ -25,10 +25,12 @@ type enrollResponse struct {
 	Status string `json:"status"`
 }
 
-// enrollURL tolerates a bare Worker origin: the endpoint path is appended
-// unless already present (same contract as heartbeatURL).
+// enrollURL tolerates the heartbeat-suffixed origin too: OCD_WORKER_URL
+// canonically ends in /api/heartbeat, so strip that before resolving the
+// enroll endpoint (same tolerance as the fleet client).
 func enrollURL(base string) string {
 	trimmed := strings.TrimSuffix(base, "/")
+	trimmed = strings.TrimSuffix(trimmed, "/api/heartbeat")
 	if strings.HasSuffix(trimmed, "/api/enroll") {
 		return trimmed
 	}
