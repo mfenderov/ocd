@@ -11,6 +11,7 @@ import (
 	"github.com/mfenderov/ocd/internal/admin"
 	"github.com/mfenderov/ocd/internal/fleet"
 	"github.com/mfenderov/ocd/internal/mint"
+	"github.com/mfenderov/ocd/internal/onboard"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -44,6 +45,11 @@ func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "ocd",
 		Short: "OpenCode link dispenser",
+		// Explicit environment wins; ~/.ocd/env fills the rest so every
+		// command works without sourcing shell files first.
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			onboard.ApplyEnvDefaults()
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "TUI coming in Task 6 — use: ocd mint --device mac | ocd devices list | ocd status | ocd serve")
 			return nil

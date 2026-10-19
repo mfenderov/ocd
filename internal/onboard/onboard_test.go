@@ -221,3 +221,107 @@ func TestDoOnboardBadCodeFailsFast(t *testing.T) {
 		t.Fatal("rejected code must fail instead of waiting forever")
 	}
 }
+
+func TestLoadEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "env")
+	body := "# comment\n\nOCD_FOO=\"bar baz\"\nOCD_EMPTY=\"\"\nPATH=/usr/bin\nINVALID-KEY=x\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vals, err := onboard.LoadEnvFile(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if vals["OCD_FOO"] != "bar baz" || vals["OCD_EMPTY"] != "" {
+		t.Fatalf("quoting wrong: %v", vals)
+	}
+	if _, ok := vals["PATH"]; ok {
+		t.Fatal("non-OCD keys must be ignored")
+	}
+	if len(vals) != 2 {
+		t.Fatalf("unexpected keys: %v", vals)
+	}
+}
+
+func TestApplyEnvDefaultsSkipsPresent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "env")
+	if err := os.WriteFile(p, []byte("OCD_PROBE_X=\"file\"\nOCD_PROBE_Y=\"file\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("OCD_PROBE_X", "explicit")
+	// Point ApplyEnvDefaults at the temp file by faking home with .ocd/env.
+	if err := os.MkdirAll(filepath.Join(dir, ".ocd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(p, filepath.Join(dir, ".ocd", "env")); err != nil {
+		t.Fatal(err)
+	}
+	onboard.ApplyEnvDefaults()
+	if got := os.Getenv("OCD_PROBE_X"); got != "explicit" {
+		t.Fatalf("explicit env must win, got %q", got)
+	}
+	if got := os.Getenv("OCD_PROBE_Y"); got != "file" {
+		t.Fatalf("missing vars fill from file, got %q", got)
+	}
+}
+
+func TestLaunchdPlist(t *testing.T) {
+	out := onboard.LaunchdPlist("/opt/homebrew/bin/ocd", "/Users/x")
+	for _, want := range []string{"dev.ocd.serve", "/opt/homebrew/bin/ocd", "<string>serve</string>", "RunAtLoad", "KeepAlive", ".ocd/daemon.log"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plist must contain %q", want)
+		}
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "dev.ocd.serve.plist")
+	if err := onboard.WriteLaunchdPlist(p, "/opt/homebrew/bin/ocd", "/Users/x"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := onboard.WriteLaunchdPlist(p, "/opt/homebrew/bin/ocd", "/Users/x"); err == nil {
+		t.Fatal("must refuse to overwrite an installed service")
+	}
+}
+
+func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("CLOUDFLARE_API_TOKEN", "test-token")
+	script := "#!/bin/sh\ncase \"$1 $2\" in\n" +
+		"  \"tunnel list\") echo '[]';;\n" +
+		"  \"tunnel create\") echo 'Created tunnel oc-t9 with id 99999999-0000-0000-0000-000000000000';;\n" +
+		"  \"tunnel route\") exit 0;;\n" +
+		"esac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "cloudflared"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"t9"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	credDir := filepath.Join(dir, ".cloudflared")
+	cfg := onboard.Config{
+		BoxID: "t9", WorkerURL: srv.URL, PublicHost: "oc-tap-t9.example.com",
+		EnvPath: filepath.Join(dir, "env"), DBPath: filepath.Join(dir, "ocd.db"),
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+		Tunnel: &onboard.TunnelPlan{Name: "oc-t9", TapHost: "oc-tap-t9.example.com", CredDir: credDir, Port: 49400},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
+		t.Fatalf("single-command onboard: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "env"))
+	if !strings.Contains(string(raw), "OCD_MANAGE_TUNNEL=\"1\"") {
+		t.Fatalf("env must enable tunnel supervision, got:\n%s", raw)
+	}
+	tpl, _ := os.ReadFile(filepath.Join(credDir, "config.yml"))
+	if !strings.Contains(string(tpl), "aaaaaaaa") && !strings.Contains(string(tpl), "99999999-0000-0000-0000-000000000000") {
+		t.Fatalf("tunnel config must carry the created id, got:\n%s", tpl)
+	}
+}

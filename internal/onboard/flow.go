@@ -79,7 +79,7 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		return err
 	}
 	say("writing " + cfg.EnvPath)
-	err = WriteEnvFile(cfg.EnvPath, map[string]string{
+	envVals := map[string]string{
 		"OCD_BOX_ID":          cfg.BoxID,
 		"OCD_WORKER_URL":      cfg.WorkerURL,
 		"OCD_HEARTBEAT_TOKEN": heartbeatToken,
@@ -87,7 +87,13 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		"OCD_ADMIN_TOKEN":     adminToken,
 		"OCD_PUBLIC_URL":      tapBase(cfg.PublicHost),
 		"OCD_PAIR_URL":        tapBase(cfg.PublicHost),
-	})
+	}
+	if cfg.Tunnel != nil {
+		// Onboard-provisioned tunnel => onboard-supervised tunnel:
+		// `ocd serve` manages cloudflared itself, no external service.
+		envVals["OCD_MANAGE_TUNNEL"] = "1"
+	}
+	err = WriteEnvFile(cfg.EnvPath, envVals)
 	if err != nil {
 		return err
 	}

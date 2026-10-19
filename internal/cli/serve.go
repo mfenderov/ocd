@@ -163,6 +163,10 @@ func RunServe(w io.Writer) error {
 	mountAdmin(mux, w, st, execPair)
 	startHeartbeat(ctx, w, st)
 
+	if shouldManageTunnel() {
+		go runTunnel(ctx, w)
+	}
+
 	if !tgOn {
 		_, _ = fmt.Fprintln(w, "mode: telegram off")
 	} else if poll {

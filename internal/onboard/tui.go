@@ -26,6 +26,24 @@ var (
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
+// AskInstallService confirms the macOS login service install. Non-TTY
+// callers decide with --install-service instead.
+func AskInstallService() (bool, error) {
+	install := true
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Install login service?").
+				Description("Starts ocd serve automatically on login (launchd, macOS only).").
+				Value(&install),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, err
+	}
+	return install, nil
+}
+
 // FormValues collects wizard inputs. Pre-fill from flags; empty means ask.
 // Empty EnrollCode keeps the Telegram approve-tap flow; a typed code
 // (from /enrollcode) enrolls immediately with no approve tap.
@@ -174,8 +192,12 @@ func RunPlain(ctx context.Context, w io.Writer, cfg Config) error {
 }
 
 // RenderResult prints the closing panel: what happened and what is next.
-func RenderResult(w io.Writer, cfg Config) {
+func RenderResult(w io.Writer, cfg Config, serviced bool) {
 	_, _ = fmt.Fprintln(w, titleStyle.Render("Box "+cfg.BoxID+" is in the fleet."))
+	if serviced {
+		_, _ = fmt.Fprintln(w, "Login service installed: ocd serve starts automatically on login.")
+		return
+	}
 	if cfg.Tunnel != nil {
 		_, _ = fmt.Fprintf(w, "Tunnel %s is configured (config.yml written).\n", cfg.Tunnel.Name)
 		_, _ = fmt.Fprintf(w, "  cloudflared tunnel run %s\n", cfg.Tunnel.Name)
