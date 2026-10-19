@@ -1,6 +1,7 @@
 package fleet_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -441,5 +442,29 @@ func TestFleetRequiresToken(t *testing.T) {
 	}
 	if got := stub.hitsFor("GET /api/backends"); got != 0 {
 		t.Fatalf("missing token must never hit the API, got %d hits", got)
+	}
+}
+
+// A 403 carrying a Cloudflare interstitial means the Worker's server-side
+// call to the box never reached it: bot protection answered instead. The
+// error must say so, not just "403".
+func TestForbiddenChallengePageExplainsBotProtection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>"))
+	}))
+	defer srv.Close()
+	t.Setenv("OCD_WORKER_URL", srv.URL)
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+	c, err := fleet.NewClientFromEnv()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	_, err = c.Link(context.Background(), "home")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !strings.Contains(err.Error(), "bot protection") {
+		t.Fatalf("error must name the cause, got: %v", err)
 	}
 }

@@ -140,10 +140,18 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return resp, nil
 }
 
+// botChallengeHint names the usual cause of a 403 whose body is a Cloudflare
+// interstitial instead of JSON: bot protection challenged the Worker's
+// server-side call to the box, so the request never reached it.
+const botChallengeHint = "Cloudflare bot protection blocked the worker→box relay; disable Bot Fight Mode for this zone"
+
 // decodeError drains a non-200 body into an *APIError, preferring the
 // server's {"error": code} shape and falling back to the HTTP status text.
 func decodeError(resp *http.Response) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusForbidden && isChallengePage(raw) {
+		return &APIError{Status: resp.StatusCode, Code: botChallengeHint}
+	}
 	var coded struct {
 		Error string `json:"error"`
 	}
@@ -157,6 +165,14 @@ func decodeError(resp *http.Response) error {
 	return &APIError{Status: resp.StatusCode, Code: http.StatusText(resp.StatusCode)}
 }
 
+// isChallengePage reports whether a body is a Cloudflare challenge page
+// rather than an API response.
+func isChallengePage(raw []byte) bool {
+	body := string(raw)
+	return strings.Contains(body, "<!DOCTYPE html") || strings.Contains(body, "Just a moment")
+}
+
+// checkBoxID escapes a box id into a URL path segment.
 func checkBoxID(boxID string) (string, error) {
 	if strings.TrimSpace(boxID) == "" {
 		return "", fmt.Errorf("fleet: box id is empty")
