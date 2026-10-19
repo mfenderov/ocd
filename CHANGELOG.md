@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.10.0 - 2026-10-19
+#### Features
+- Telegram-first onboarding, form asks almost nothing - (6ce4e8e) - mfenderov
+
+- - -
+
 ## v0.9.0 - 2026-10-19
 #### Features
 - single-command onboard — tunnel, service, self-loading env - (a54b413) - mfenderov
