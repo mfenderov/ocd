@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.14.2 - 2026-10-19
+#### Bug Fixes
+- report enroll trust so a missing scope says so - (d0837e1) - mfenderov
+
+- - -
+
 ## v0.14.1 - 2026-10-19
 #### Bug Fixes
 - launchd env (HOME, PATH) and atomic onboarding - (d839853) - mfenderov
