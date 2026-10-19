@@ -36,6 +36,14 @@ func fakeCloudflared(t *testing.T, handlers map[string]string, fail map[string]b
 
 const listJSON = `[{"id":"11111111-2222-3333-4444-555555555555","name":"oc-mac","created_at":"2026-10-19T00:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]`
 
+func plantCert(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), []byte("fake-cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOUDFLARE_API_TOKEN", "")
+}
+
 func TestListTunnelsParsesNames(t *testing.T) {
 	fakeCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
 	got, err := onboard.ListTunnels(context.Background())
@@ -54,6 +62,7 @@ func TestSetupTunnelFullFlow(t *testing.T) {
 		"tunnel route":  `Added CNAME oc-tap-mac.buyallmemes.com to oc-mac`,
 	}, nil)
 	dir := t.TempDir()
+	plantCert(t, dir)
 	plan := onboard.TunnelPlan{
 		Name: "oc-mac", TapHost: "oc-tap-mac.buyallmemes.com", UIHost: "",
 		CredDir: dir, Port: 49400,
@@ -79,6 +88,7 @@ func TestSetupTunnelFullFlow(t *testing.T) {
 func TestSetupTunnelReusesExisting(t *testing.T) {
 	fakeCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
 	dir := t.TempDir()
+	plantCert(t, dir)
 	plan := onboard.TunnelPlan{
 		Name: "oc-mac", TapHost: "oc-tap-mac.buyallmemes.com",
 		CredDir: dir, Port: 49400,
@@ -95,6 +105,7 @@ func TestSetupTunnelReusesExisting(t *testing.T) {
 func TestSetupTunnelRefusesToClobberConfig(t *testing.T) {
 	fakeCloudflared(t, map[string]string{"tunnel list": `[]`, "tunnel create": "id 99999999-0000-0000-0000-000000000000"}, nil)
 	dir := t.TempDir()
+	plantCert(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("existing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -114,5 +125,14 @@ func TestTunnelDefaults(t *testing.T) {
 	}
 	if _, ui2 := onboard.TunnelDefaults("mac", "localhost"); ui2 != "" {
 		t.Fatalf("bare hostnames get no UI default, got %q", ui2)
+	}
+}
+
+func TestSetupTunnelRequiresLoginOrToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLOUDFLARE_API_TOKEN", "")
+	plan := onboard.TunnelPlan{Name: "oc-x", TapHost: "oc-tap-x.example.com", CredDir: dir, Port: 49400}
+	if _, err := onboard.SetupTunnel(context.Background(), plan, nil); err == nil {
+		t.Fatal("must refuse without login or API token")
 	}
 }

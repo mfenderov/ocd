@@ -149,13 +149,11 @@ func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port in
 	return nil
 }
 
-// HasCert reports whether `cloudflared tunnel login` ran here before.
-func HasCert() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(filepath.Join(home, ".cloudflared", "cert.pem"))
+// HasCert reports whether `cloudflared tunnel login` ran for dir
+// (cert.pem present). dir is explicit so tests stay hermetic; production
+// passes the cloudflared home holding config.yml.
+func HasCert(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "cert.pem"))
 	return err == nil
 }
 
@@ -180,7 +178,7 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 		}
 		plan.CredDir = dir
 	}
-	if !HasCert() && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
+	if !HasCert(plan.CredDir) && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
 		return "", fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
 	}
 	say("listing tunnels")
