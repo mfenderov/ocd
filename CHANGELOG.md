@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.17.0 - 2026-10-19
+#### Features
+- ocd repair fixes a box wired by an older build - (195ecc7) - mfenderov
+
+- - -
+
 ## v0.16.0 - 2026-10-19
 #### Features
 - /link is the box menu - (17c89eb) - mfenderov
