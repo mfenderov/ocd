@@ -34,6 +34,9 @@ type FormValues struct {
 	WorkerURL  string
 	PublicHost string
 	EnrollCode string
+	TunnelName string
+	UIHost     string
+	CFToken    string
 }
 
 // RunForm prompts for the three onboarding inputs, validating as it goes.
@@ -76,6 +79,19 @@ func RunForm(pre FormValues) (FormValues, error) {
 				Title("Enroll code (optional)").
 				Description("From /enrollcode in Telegram; empty waits for an approve tap instead.").
 				Value(&out.EnrollCode),
+			huh.NewInput().
+				Title("Tunnel name").
+				Description("Cloudflare tunnel for this box; created if missing, reused if present.").
+				Value(&out.TunnelName),
+			huh.NewInput().
+				Title("UI hostname (optional)").
+				Description("Second tunnel hostname for the web UI; empty skips it.").
+				Value(&out.UIHost),
+			huh.NewInput().
+				Title("Cloudflare API token (optional)").
+				Description("Only if cloudflared never logged in here; used once, never stored.").
+				EchoMode(huh.EchoModePassword).
+				Value(&out.CFToken),
 		),
 	)
 	if err := form.Run(); err != nil {
@@ -160,7 +176,12 @@ func RunPlain(ctx context.Context, w io.Writer, cfg Config) error {
 // RenderResult prints the closing panel: what happened and what is next.
 func RenderResult(w io.Writer, cfg Config) {
 	_, _ = fmt.Fprintln(w, titleStyle.Render("Box "+cfg.BoxID+" is in the fleet."))
-	_, _ = fmt.Fprintln(w, "Next: point a tunnel at this box, then start the daemon:")
-	_, _ = fmt.Fprintln(w, "  cloudflared tunnel run <name>   # ingress -> :49400")
+	if cfg.Tunnel != nil {
+		_, _ = fmt.Fprintf(w, "Tunnel %s is configured (config.yml written).\n", cfg.Tunnel.Name)
+		_, _ = fmt.Fprintf(w, "  cloudflared tunnel run %s\n", cfg.Tunnel.Name)
+	} else {
+		_, _ = fmt.Fprintln(w, "Next: point a tunnel at this box, then start the daemon:")
+		_, _ = fmt.Fprintln(w, "  cloudflared tunnel run <name>   # ingress -> :49400")
+	}
 	_, _ = fmt.Fprintln(w, "  ocd serve                       # heartbeat + admin + pair")
 }

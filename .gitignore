@@ -4,3 +4,4 @@ worker/node_modules/
 vendor/
 node_modules/
 dist/
+.ocd/

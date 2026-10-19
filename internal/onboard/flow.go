@@ -18,10 +18,13 @@ import (
 // EnrollCode, when set, replaces the approve-tap flow with the typed code
 // from /enrollcode (the pending row already binds it).
 type Config struct {
-	BoxID        string
-	WorkerURL    string
-	PublicHost   string
-	EnrollCode   string
+	BoxID      string
+	WorkerURL  string
+	PublicHost string
+	EnrollCode string
+	// Tunnel, when non-nil, provisions the Cloudflare tunnel + DNS after
+	// the env file is written and before enrollment.
+	Tunnel       *TunnelPlan
 	EnvPath      string
 	DBPath       string
 	Timeout      time.Duration
@@ -87,6 +90,12 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	})
 	if err != nil {
 		return err
+	}
+	if cfg.Tunnel != nil {
+		say("setting up tunnel " + cfg.Tunnel.Name)
+		if _, err := SetupTunnel(ctx, *cfg.Tunnel, say); err != nil {
+			return err
+		}
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
