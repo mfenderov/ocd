@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.15.0 - 2026-10-19
+#### Features
+- button-driven Telegram UI (fleet board + one-tap links) - (685a5ee) - mfenderov
+#### Bug Fixes
+- make the onboarding wiring test hermetic - (88c491e) - mfenderov
+- onboard wires tap link, pair link and UI port correctly - (dcf8027) - mfenderov
+
+- - -
+
 ## v0.14.3 - 2026-10-19
 #### Bug Fixes
 - ocd service install refreshes the plist - (1d834b8) - mfenderov
