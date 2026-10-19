@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.11.0 - 2026-10-19
+#### Features
+- one-command onboarding with re-run guard and auto-login - (10c9228) - mfenderov
+
+- - -
+
 ## v0.10.1 - 2026-10-19
 #### Bug Fixes
 - onboard reruns pass through identical tunnel config - (0c4e4e5) - mfenderov
