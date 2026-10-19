@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.8.1 - 2026-10-19
+#### Bug Fixes
+- verify release assets via gh download, not browser URLs - (6b76adc) - mfenderov
+
+- - -
+
 ## v0.8.0 - 2026-10-19
 #### Features
 - single-command tunnel provisioning in onboard - (60da9c5) - mfenderov
