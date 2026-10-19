@@ -177,6 +177,9 @@ func RunServe(w io.Writer) error {
 		mux.Handle("/webhook/"+hookPath, hook.Handler(st, hookSecret, st.SeenUpdate,
 			func(chatID, fromID int64, chatType, text string) {
 				tg.Dispatch(ctx, st, chatID, fromID, chatType, text)
+			},
+			func(fromID, chatID int64, chatType, data string) {
+				tg.DispatchCallback(ctx, st, fromID, chatID, chatType, data)
 			}))
 		_, _ = fmt.Fprintln(w, "mode: webhook (polling off)")
 	}

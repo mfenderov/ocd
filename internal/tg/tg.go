@@ -126,23 +126,32 @@ func esc(s string) string {
 	return r
 }
 
-func sendProxyLink(ctx context.Context, b *bot.Bot, chatID int64, st *store.Store, device string) {
+func sendProxyLink(ctx context.Context, b *bot.Bot, owner, chatID int64, chatType string, st *store.Store, device string) {
 	tok, err := st.IssueLink(device, "telegram")
 	if err != nil {
 		st.Audit("tg:owner", "link_failed", device, "", err.Error())
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, ParseMode: "HTML", Text: "⚠️ <b>Couldn't issue a link</b> — try again in a moment."})
+		sendDMOrChat(ctx, b, st, owner, chatID, chatType, "⚠️ <b>Couldn't issue a link</b> — try again in a moment.", nil)
 		return
 	}
 	st.Audit("tg:owner", "link_issued", device, "", "ok")
+	link := publicBase() + "?t=" + tok
 	previewOff := true
 	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:             chatID,
+		ChatID:             owner,
 		ParseMode:          "HTML",
-		Text:               "🔑 <b>Tap to log in</b>\none tap · expires in 10 min\n" + publicBase() + "?t=" + tok,
+		Text:               "🔑 <b>OpenCode ready</b> — one tap · expires in 10 min",
+		ReplyMarkup:        openButton("🚀 Open OpenCode", link),
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: &previewOff},
 	})
 	if err == nil {
-		_ = st.SetLinkMessage(tok, chatID, sent.ID)
+		_ = st.SetLinkMessage(tok, owner, sent.ID)
+	}
+	if chatID != 0 && chatID != owner {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			ParseMode: "HTML",
+			Text:      "🔔 Sent to your DM.",
+		})
 	}
 }
 
@@ -205,18 +214,18 @@ func checkGate(st *store.Store, owner int64, update *models.Update) (int64, bool
 	return update.Message.Chat.ID, true
 }
 
-func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, chatID int64, fromID int64, text string) {
+func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, chatID int64, chatType string, fromID int64, text string) {
 	if !IsOwner(fromID, owner) {
 		st.Audit("tg:stranger", "stranger_denied", "", "", "handleText")
 		return
 	}
 	switch {
-	case strings.HasPrefix(text, "/login"):
+	case strings.HasPrefix(text, "/login"), strings.HasPrefix(text, "/link"):
 		reply := HandleLogin(fromID, text, owner)
 		if reply == "" {
 			return
 		}
-		sendProxyLink(ctx, b, chatID, st, strings.TrimPrefix(reply, "mint:"))
+		sendProxyLink(ctx, b, owner, chatID, chatType, st, strings.TrimPrefix(reply, "mint:"))
 	case text == "/devices":
 		sendDevices(ctx, b, chatID, st)
 	case text == "/audit":
@@ -230,9 +239,7 @@ func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, c
 	case strings.HasPrefix(text, "/revoke"):
 		handleRevoke(ctx, b, st, chatID, text)
 	case text == "/fleet":
-		sendFleetReply(ctx, b, st, chatID, "", "status", func() (string, error) {
-			return FleetStatusText(ctx)
-		})
+		sendFleetBoard(ctx, b, st, owner, chatID, chatType)
 	case strings.HasPrefix(text, "/flink"):
 		box := firstFleetArg(text, "/flink")
 		sendFleetReply(ctx, b, st, chatID, box, "link", func() (string, error) {
@@ -373,7 +380,7 @@ func Dispatch(ctx context.Context, st *store.Store, chatID, fromID int64, chatTy
 		st.Audit("tg:owner", "dispatch_failed", "", "", err.Error())
 		return
 	}
-	handleText(ctx, b, st, owner, chatID, fromID, text)
+	handleText(ctx, b, st, owner, chatID, chatType, fromID, text)
 }
 
 // SetWebhook registers the push URL with Telegram.
@@ -417,7 +424,21 @@ func Start(ctx context.Context, st *store.Store, poll bool) error {
 			if !ok {
 				return
 			}
-			handleText(ctx, b, st, owner, chatID, update.Message.From.ID, text)
+			handleText(ctx, b, st, owner, chatID, string(update.Message.Chat.Type), update.Message.From.ID, text)
+		})
+	// Inline-button taps (fleet board). Callback queries carry their own
+	// chat and sender, so the same owner/chat gate applies.
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, callbackFlink, bot.MatchTypePrefix,
+		func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			cq := update.CallbackQuery
+			if cq == nil {
+				return
+			}
+			msg := cq.Message.Message
+			if msg == nil {
+				return
+			}
+			handleCallback(ctx, b, st, owner, cq.From.ID, msg.Chat.ID, string(msg.Chat.Type), cq.Data)
 		})
 	// Sweeper rewrites spent link messages so chat history stays clean
 	// and holds no live links. Runs in both poll and webhook mode.

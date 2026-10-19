@@ -15,7 +15,7 @@ func TestHandleTextRefusesStranger(t *testing.T) {
 	}
 	defer st.Close()
 	// nil bot: must return before touching it.
-	handleText(context.Background(), nil, st, 1, 99, 999, "/audit")
+	handleText(context.Background(), nil, st, 1, 99, "private", 999, "/audit")
 	if n := st.CountRecentMints("", 24*time.Hour); n != 0 {
 		t.Fatalf("stranger must get nothing, got %d", n)
 	}
