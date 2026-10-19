@@ -163,7 +163,10 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 		return "", err
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "", true)
+	status, err := boxagent.EnrollBox(ctx, client, os.Getenv("OCD_WORKER_URL"), box, hostname, code, "", boxagent.EnrollOptions{
+		Quiet:  true,
+		Bearer: os.Getenv("OCD_FLEET_TOKEN"),
+	})
 	if err != nil {
 		return "", err
 	}

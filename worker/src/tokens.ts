@@ -10,9 +10,9 @@ import { extractBearer, hashToken, tokenMatches } from "./heartbeat";
 // token instead, so the bootstrap secret is never a permanent backdoor.
 // Plaintext values are never logged anywhere on this path.
 
-export type CliScope = "link" | "revoke" | "audit" | "manage";
+export type CliScope = "link" | "revoke" | "audit" | "manage" | "enroll";
 
-export const ALL_SCOPES: CliScope[] = ["link", "revoke", "audit", "manage"];
+export const ALL_SCOPES: CliScope[] = ["link", "revoke", "audit", "manage", "enroll"];
 
 const MANAGE_SCOPE: CliScope = "manage";
 

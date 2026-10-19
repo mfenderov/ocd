@@ -125,7 +125,7 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, cfg.Quiet)
+	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet})
 	if err != nil {
 		return err
 	}

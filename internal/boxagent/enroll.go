@@ -24,6 +24,17 @@ type enrollRequest struct {
 	Quiet bool `json:"quiet,omitempty"`
 }
 
+// EnrollOptions tunes one enrollment request.
+type EnrollOptions struct {
+	// Quiet suppresses the Worker's approve/deny ping.
+	Quiet bool
+	// Bearer authenticates the request as owner-issued. A CLI token with
+	// the "enroll" scope marks the pending row trusted, which is what
+	// lets the box claim it by typing the code (no approve tap). Without
+	// it the pending row needs the approve tap.
+	Bearer string
+}
+
 type enrollResponse struct {
 	Status string `json:"status"`
 }
@@ -45,7 +56,7 @@ func enrollURL(base string) string {
 // when the box is known, "pending" awaiting owner approval). The enroll
 // token travels in the body: first contact has no bearer credentials yet.
 // Any non-200 is an error, no local retry.
-func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, quiet bool) (string, error) {
+func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (string, error) {
 	if strings.TrimSpace(id) == "" {
 		return "", errors.New("boxagent: box id is empty; refusing to enroll without an id")
 	}
@@ -60,7 +71,7 @@ func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname
 		Hostname:    hostname,
 		EnrollToken: enrollToken,
 		AdminToken:  adminToken,
-		Quiet:       quiet,
+		Quiet:       opts.Quiet,
 	})
 	if err != nil {
 		return "", fmt.Errorf("boxagent: encode enroll: %w", err)
@@ -70,6 +81,9 @@ func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname
 		return "", fmt.Errorf("boxagent: build enroll request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if opts.Bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.Bearer)
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, enrollTimeout)

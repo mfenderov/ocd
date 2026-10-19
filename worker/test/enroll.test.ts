@@ -48,7 +48,7 @@ class MemStore implements EnrollStore {
     return this.pending.get(id);
   }
   putPending(row: PendingRow): void {
-    this.pending.set(row.id, { ...row });
+    this.pending.set(row.id, { ...row, trusted: row.trusted ?? 0 });
   }
   deletePending(id: string): void {
     this.pending.delete(id);
@@ -196,6 +196,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       heartbeat_token_hash: await hashToken(NEW_TOKEN),
       admin_token_sealed: "",
       first_seen: FIXED_NOW,
+      trusted: 0,
     });
     const row = await approveEnrollment(store, "seqreset-1");
     expect(row?.last_seq).toBe(0);
@@ -1081,10 +1082,19 @@ describe("enrollment code claim (typed code from Telegram)", () => {
   const CLAIM_ADMIN = "claimed-admin-secret-9";
   const NOW = 1700000100;
   const SECRETS = { capSecret: "test-cap-secret", sealKey: "test-seal-key" };
+  // Owner-issued: the bot asked for this box in Telegram, so the pending
+  // row is trusted and the typed code may claim it without an approve tap.
+  const TRUSTED = { ...SECRETS, trusted: true };
 
-  async function issue(store: MemStore, id = "code-1", hostname = "code-1.buyallmemes.com", token: string = CODE) {
+  async function issue(
+    store: MemStore,
+    id = "code-1",
+    hostname = "code-1.buyallmemes.com",
+    token: string = CODE,
+    config = TRUSTED,
+  ) {
     const rec = recorder();
-    const res = await requestEnrollment(store, { id, hostname, enroll_token: token }, rec.notify, () => NOW, SECRETS);
+    const res = await requestEnrollment(store, { id, hostname, enroll_token: token }, rec.notify, () => NOW, config);
     expect(res.status).toBe("pending");
     return rec;
   }
@@ -1099,7 +1109,7 @@ describe("enrollment code claim (typed code from Telegram)", () => {
       { id: "code-1", hostname: "code-1.buyallmemes.com", enroll_token: CODE, admin_token: CLAIM_ADMIN },
       rec.notify,
       () => NOW + 60,
-      SECRETS,
+      TRUSTED,
     );
     expect(res).toEqual({ status: "enrolled", id: "code-1", rotated: false });
     expect(rec.texts).toHaveLength(0);
@@ -1168,11 +1178,53 @@ describe("enrollment code claim (typed code from Telegram)", () => {
       { id: "known-1", hostname: "known-1.buyallmemes.com", enroll_token: CODE, admin_token: CLAIM_ADMIN },
       rec.notify,
       () => NOW + 60,
-      SECRETS,
+      TRUSTED,
     );
     expect(res.status).toBe("enrolled");
     expect(res.rotated).toBe(true);
     expect(rec.texts.some((t) => t.includes("known-1"))).toBe(true);
+  });
+
+  it("untrusted pending cannot be claimed by typing the code", async () => {
+    // An unauthenticated caller may start an enrollment, but it must not
+    // be able to bind a live box: without the owner-issued trust flag the
+    // typed code only re-pends, and the approve tap stays mandatory.
+    const store = new MemStore();
+    await seedEnrolled(store, "live-1");
+    const rec = recorder();
+    const first = await requestEnrollment(
+      store,
+      { id: "live-1", hostname: "live-1.buyallmemes.com", enroll_token: "attacker-token" },
+      rec.notify,
+      () => NOW,
+      SECRETS,
+    );
+    expect(first.status).toBe("pending");
+    const second = await requestEnrollment(
+      store,
+      { id: "live-1", hostname: "live-1.buyallmemes.com", enroll_token: "attacker-token" },
+      rec.notify,
+      () => NOW + 60,
+      SECRETS,
+    );
+    expect(second.status).toBe("pending");
+    const box = store.getBox("live-1");
+    expect(box?.heartbeat_token_hash).toBe(await hashToken(KNOWN_TOKEN));
+  });
+
+  it("trusted claim may repoint the hostname the owner asked for", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "moved-1");
+    await issue(store, "moved-1", "new-host.buyallmemes.com", CODE, TRUSTED);
+    const res = await requestEnrollment(
+      store,
+      { id: "moved-1", hostname: "new-host.buyallmemes.com", enroll_token: CODE },
+      recorder().notify,
+      () => NOW + 60,
+      TRUSTED,
+    );
+    expect(res.status).toBe("enrolled");
+    expect(store.getBox("moved-1")?.hostname).toBe("new-host.buyallmemes.com");
   });
 
   it("quiet enroll parks pending with no approve/deny ping", async () => {

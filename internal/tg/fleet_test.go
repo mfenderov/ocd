@@ -223,7 +223,10 @@ func TestFleetEnrollCode(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if r.Header.Get("Authorization") != "" {
+		// The bot authenticates its issuance: the worker only trusts a
+		// pending row (claimable by typing the code) when the request
+		// carries the fleet token.
+		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}

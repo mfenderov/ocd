@@ -11,13 +11,14 @@ import {
   type NotifyFn,
   type PendingRow,
 } from "./enroll";
-import { handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
+import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import { handleRevoke, handleRevokeAll } from "./revoke";
 import {
   handleDeleteToken,
   handleMintToken,
   handleRotateToken,
+  requireScope,
   type TokenRow,
 } from "./tokens";
 
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS pending(
   hostname TEXT NOT NULL,
   heartbeat_token_hash TEXT NOT NULL,
   admin_token_sealed TEXT NOT NULL DEFAULT '',
-  first_seen INTEGER NOT NULL DEFAULT 0
+  first_seen INTEGER NOT NULL DEFAULT 0,
+  trusted INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tombstones(
   box_id TEXT PRIMARY KEY,
@@ -93,7 +95,7 @@ const COLUMNS =
 
 const PUBLIC_COLUMNS = "id, hostname, epoch, last_seq, last_ts, last_seen, enrolled";
 
-const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen";
+const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen, trusted";
 
 // Subset of Worker env the DO reads. workerd passes env as the second
 // constructor arg; missing values degrade to loud 500s / dropped pings,
@@ -180,6 +182,9 @@ export class FleetState implements DurableObject {
     if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
       this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
     }
+    if (!pendingCols.some((c) => c.name === "trusted")) {
+      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0");
+    }
     // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
     // a missing table reads as zero columns, so fresh and existing DBs
     // converge here instead of in the one-shot SCHEMA string.
@@ -253,12 +258,13 @@ export class FleetState implements DurableObject {
   putPending(row: PendingRow): void {
     this.ensureSchema();
     this.state.storage.sql.exec(
-      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen, trusted) VALUES (?, ?, ?, ?, ?, ?)",
       row.id,
       row.hostname,
       row.heartbeat_token_hash,
       row.admin_token_sealed,
       row.first_seen,
+      row.trusted,
     );
   }
 
@@ -375,7 +381,16 @@ export class FleetState implements DurableObject {
       );
     }
     if (request.method === "POST" && url.pathname === "/enroll") {
-      return handleEnrollRequest(request, this, this.notifier(), undefined, this.enrollConfig());
+      // Trust comes from the caller, not the body: a CLI token with the
+      // "enroll" scope means the owner asked for this box in Telegram.
+      // Unauthenticated requests may still start an enrollment, but their
+      // pending row needs the approve tap.
+      const bearer = extractBearer(request);
+      const trusted = bearer !== null && (await requireScope(this, bearer, "enroll")) !== null;
+      return handleEnrollRequest(request, this, this.notifier(), undefined, {
+        ...this.enrollConfig(),
+        trusted,
+      });
     }
     if (request.method === "GET" && url.pathname === "/enroll/approve") {
       return handleEnrollApprove(request, this, this.enrollConfig(), undefined, this.notifier());

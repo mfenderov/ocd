@@ -27,6 +27,12 @@ export interface PendingRow {
   heartbeat_token_hash: string;
   admin_token_sealed: string;
   first_seen: number;
+  // trusted = 1 when the request that created this pending row carried a
+  // CLI token with the "enroll" scope, i.e. the owner asked for it in
+  // Telegram. Only trusted rows may be claimed by typing the code
+  // (no approve tap). Untrusted rows still need the approve link, so an
+  // unauthenticated caller can never re-bind a live box.
+  trusted: number;
 }
 
 // Resolve-time secrets, all from Worker env (see FleetState). Every field is
@@ -39,6 +45,9 @@ export interface EnrollConfig {
   baseUrl?: string;
   sealKey?: string;
   hostSuffixes?: string[];
+  // trusted marks this request as owner-issued (authenticated with the
+  // "enroll" scope). Set by the DO, never taken from the request body.
+  trusted?: boolean;
 }
 
 export interface EnrollStore {
@@ -463,6 +472,7 @@ export async function requestEnrollment(
   if (pending) {
     const fresh = nowSec() - pending.first_seen <= CAPABILITY_TTL_SEC;
     if (
+      pending.trusted === 1 &&
       fresh &&
       pending.hostname === body.hostname &&
       (await tokenMatches(body.enroll_token, pending.heartbeat_token_hash))
@@ -498,6 +508,7 @@ export async function requestEnrollment(
     heartbeat_token_hash: tokenHash,
     admin_token_sealed: sealed,
     first_seen: now,
+    trusted: config.trusted ? 1 : 0,
   });
   const exp = now + CAPABILITY_TTL_SEC;
   // Bind the pending token hash + hostname into both links so a later
@@ -560,6 +571,10 @@ export async function approveEnrollment(
   const row: BoxRow = known
     ? {
         ...known,
+        // A trusted claim may repoint the box: the owner named this
+        // hostname when asking for the code. Untrusted (approve-link)
+        // claims keep the original hostname.
+        ...(pending.trusted === 1 ? { hostname: pending.hostname } : {}),
         heartbeat_token_hash: pending.heartbeat_token_hash,
         admin_token_sealed: sealed,
         // Re-approval rebinds trust: restart the seq counter so a box that
