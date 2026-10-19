@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { hashToken } from "../src/heartbeat";
 import app from "../src/index";
 import {
+  ALL_SCOPES,
   handleDeleteToken,
   handleMintToken,
   handleRotateToken,
@@ -310,5 +311,29 @@ describe("token routes through the worker + DO", () => {
     const deleted = await app.fetch(new Request("http://x/api/tokens/a", { method: "DELETE" }));
     expect(deleted.status).toBe(500);
     expect(await deleted.text()).toContain("FLEET_STATE");
+  });
+});
+
+describe("scope list", () => {
+  it("accepts every declared scope, including enroll", async () => {
+    for (const scope of ALL_SCOPES) {
+      // Fresh store per scope: the bootstrap secret only authorizes the
+      // first mint, by design.
+      const store = new MemStore();
+      const res = await handleMintToken(tokenRequest("/tokens", "POST", { scopes: [scope] }, BOOTSTRAP), store, {
+        bootstrapSecret: BOOTSTRAP,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { scopes: string[] };
+      expect(body.scopes).toContain(scope);
+    }
+  });
+
+  it("rejects an unknown scope", async () => {
+    const store = new MemStore();
+    const res = await handleMintToken(tokenRequest("/tokens", "POST", { scopes: ["nope"] }, BOOTSTRAP), store, {
+      bootstrapSecret: BOOTSTRAP,
+    });
+    expect(res.status).toBe(400);
   });
 });

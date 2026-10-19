@@ -61,7 +61,9 @@ export function parseTokenScopes(raw: string): CliScope[] {
 }
 
 function isScope(value: unknown): value is CliScope {
-  return value === "link" || value === "revoke" || value === "audit" || value === "manage";
+  // Derived from ALL_SCOPES so a new scope cannot be typed in but
+  // rejected at runtime.
+  return typeof value === "string" && (ALL_SCOPES as string[]).includes(value);
 }
 
 function parseRequestedScopes(value: unknown): CliScope[] | null {
