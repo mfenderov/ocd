@@ -136,3 +136,24 @@ func TestSetupTunnelRequiresLoginOrToken(t *testing.T) {
 		t.Fatal("must refuse without login or API token")
 	}
 }
+
+func TestSetupTunnelReusesIdenticalConfig(t *testing.T) {
+	fakeCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "Created tunnel oc-dup with id 11111111-1111-1111-1111-111111111111",
+		"tunnel route":  `Added CNAME`,
+	}, nil)
+	dir := t.TempDir()
+	plantCert(t, dir)
+	plan := onboard.TunnelPlan{Name: "oc-dup", TapHost: "oc-tap-dup.example.com", CredDir: dir, Port: 49400}
+	if _, err := onboard.SetupTunnel(context.Background(), plan, nil); err != nil {
+		t.Fatalf("first setup: %v", err)
+	}
+	id, err := onboard.SetupTunnel(context.Background(), plan, nil)
+	if err != nil {
+		t.Fatalf("identical rerun must pass through, got: %v", err)
+	}
+	if id != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("want same tunnel id, got %q", id)
+	}
+}

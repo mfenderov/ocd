@@ -79,6 +79,9 @@ func onboardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Enroll this box in the fleet (interactive TUI)",
+		// Runtime failures (bad token, refused config) report the error
+		// without dumping the full usage text.
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			vals := onboard.FormValues{

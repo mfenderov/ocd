@@ -127,12 +127,9 @@ func RouteDNS(ctx context.Context, apiToken, tunnel, hostname string) error {
 	return err
 }
 
-// WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
-// file: tunnel config is hand-tuned infrastructure, never silently replaced.
-func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port int) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
-	}
+// renderTunnelConfig is the whole config.yml content: tunnel identity plus
+// one ingress rule per hostname, closed by a 404 catch-all.
+func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port int) string {
 	var sb strings.Builder
 	_, _ = fmt.Fprintf(&sb, "tunnel: %s\ncredentials-file: %s\ningress:\n", tunnelID, credFile)
 	_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", tapHost, port)
@@ -140,10 +137,38 @@ func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port in
 		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", strings.TrimSpace(uiHost), port)
 	}
 	_, _ = fmt.Fprintf(&sb, "  - service: http_status:404\n")
+	return sb.String()
+}
+
+// WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
+// file: tunnel config is hand-tuned infrastructure, never silently replaced.
+// Use EnsureTunnelConfig when reruns should pass through unchanged files.
+func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port int) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
+	}
+	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port))
+}
+
+// EnsureTunnelConfig writes config.yml unless an identical one is already
+// there (re-runs pass through silently). A differing file still refuses:
+// pass --skip-tunnel to reuse existing infra untouched.
+func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port int) (reused bool, err error) {
+	want := renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port)
+	if raw, err := os.ReadFile(path); err == nil {
+		if string(raw) == want {
+			return true, nil
+		}
+		return false, fmt.Errorf("onboard: %s differs — move it aside to regenerate, or re-run with --skip-tunnel", path)
+	}
+	return false, writeTunnelConfig(path, want)
+}
+
+func writeTunnelConfig(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("onboard: mkdir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("onboard: write tunnel config: %w", err)
 	}
 	return nil
@@ -196,6 +221,17 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 	} else {
 		say("reusing tunnel " + plan.Name)
 	}
+	cfgPath := filepath.Join(plan.CredDir, "config.yml")
+	credFile := filepath.Join(plan.CredDir, id+".json")
+	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port)
+	if err != nil {
+		return "", err
+	}
+	if reused {
+		say("reusing tunnel config")
+		return id, nil
+	}
+	say("writing " + cfgPath)
 	say("routing DNS " + plan.TapHost)
 	if err := RouteDNS(ctx, plan.APIToken, id, plan.TapHost); err != nil {
 		return "", err
@@ -205,12 +241,6 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 		if err := RouteDNS(ctx, plan.APIToken, id, strings.TrimSpace(plan.UIHost)); err != nil {
 			return "", err
 		}
-	}
-	cfgPath := filepath.Join(plan.CredDir, "config.yml")
-	say("writing " + cfgPath)
-	credFile := filepath.Join(plan.CredDir, id+".json")
-	if err := WriteTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port); err != nil {
-		return "", err
 	}
 	return id, nil
 }
