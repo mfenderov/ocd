@@ -220,7 +220,10 @@ func handleText(ctx context.Context, b *bot.Bot, st *store.Store, owner int64, c
 		return
 	}
 	switch {
-	case strings.HasPrefix(text, "/login"), strings.HasPrefix(text, "/link"):
+	case strings.HasPrefix(text, "/link"):
+		// /link is the menu: which machine do you want to work in?
+		sendFleetBoard(ctx, b, st, owner, chatID, chatType)
+	case strings.HasPrefix(text, "/login"):
 		reply := HandleLogin(fromID, text, owner)
 		if reply == "" {
 			return
