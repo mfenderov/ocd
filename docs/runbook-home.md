@@ -35,3 +35,27 @@ Scheduler `ocd-boot` at logon → `scripts/boot.sh`.
 
 Copy the newest backup tarball to USB or password manager. Same-disk
 backups survive deletion and corruption, not disk death or theft.
+
+## Fleet and onboarding (added later)
+
+- The bot is the fleet UI: `/fleet` (all boxes), `/flink <box>` (tap
+  link), `/frevoke <box> YES`, `/fnuke YES`, `/faudit [box]`.
+- `/enrollcode <box>` issues a one-time code for a new box. The reply
+  holds the code; paste it into `ocd` on that machine and the box is
+  enrolled. The code is single-use, valid 15 minutes, and works only
+  for the exact box + hostname it was issued for.
+- Adding a box is one command on the new machine: `ocd`. It creates the
+  tunnel, routes DNS, writes the env file, enrolls, and installs a
+  login service.
+- The box API the worker calls lives under `/_oc/*` (not `/admin/*`):
+  Cloudflare's managed WAF challenges any path containing "/admin", which
+  would answer the worker instead of the box.
+
+## Secrets in this box's env (`~/.ocd/env`, chmod 600)
+
+- `OCD_HEARTBEAT_TOKEN` / `OCD_ENROLL_TOKEN` — same value; the box's
+  heartbeat credential. After enrollment it is the code the bot issued.
+- `OCD_ADMIN_TOKEN` — the worker seals it and calls the box with it.
+- `OCD_FLEET_TOKEN` — CLI token for the fleet API. It needs the
+  `enroll` scope so `/enrollcode` can issue trusted codes; mint it with
+  the manage token: `POST /api/tokens {"scopes":["link","revoke","audit","enroll"]}`.
