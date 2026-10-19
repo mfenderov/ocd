@@ -246,8 +246,11 @@ func TestFleetEnrollCode(t *testing.T) {
 	if !strings.Contains(got, code) || !strings.Contains(got, "--enroll-code") || !strings.Contains(got, "mac") {
 		t.Fatalf("reply must carry the code and its usage, got:\n%s", got)
 	}
-	if body["hostname"] != "oc-mac.buyallmemes.com" {
-		t.Fatalf("default hostname must follow oc-<box> convention, got %v", body["hostname"])
+	if !strings.Contains(got, "ocd onboard --box-id mac --public-host oc-tap-mac.buyallmemes.com --enroll-code "+code) {
+		t.Fatalf("reply must contain a paste-ready onboard command, got:\n%s", got)
+	}
+	if body["hostname"] != "oc-tap-mac.buyallmemes.com" {
+		t.Fatalf("default tap hostname must be oc-tap-<box>, got %v", body["hostname"])
 	}
 	if _, hasAdmin := body["admin_token"]; hasAdmin {
 		t.Fatal("issuer must not seal an admin it cannot know")

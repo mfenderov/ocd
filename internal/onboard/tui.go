@@ -44,7 +44,34 @@ func AskInstallService() (bool, error) {
 	return install, nil
 }
 
+// WithDefaults fills every derivable blank: worker origin, tap hostname
+// (oc-tap-<box>), tunnel name (oc-<box>), and UI host from the tap domain.
+// Explicit values always win, so pasted commands and flags pass through
+// untouched. Empty box id derives nothing (validation rejects it later).
+func (f FormValues) WithDefaults() FormValues {
+	out := f
+	if out.WorkerURL == "" {
+		out.WorkerURL = DefaultWorkerURL
+	}
+	if out.BoxID == "" {
+		return out
+	}
+	if out.PublicHost == "" {
+		out.PublicHost = DefaultTunnelPlan(out.BoxID).TapHost
+	}
+	defName, defUI := TunnelDefaults(out.BoxID, out.PublicHost)
+	if out.TunnelName == "" {
+		out.TunnelName = defName
+	}
+	if out.UIHost == "" {
+		out.UIHost = defUI
+	}
+	return out
+}
+
 // FormValues collects wizard inputs. Pre-fill from flags; empty means ask.
+// WithDefaults resolves every derivable blank, so callers apply it after
+// the form (or flags) and never prompt for what can be derived.
 // Empty EnrollCode keeps the Telegram approve-tap flow; a typed code
 // (from /enrollcode) enrolls immediately with no approve tap.
 type FormValues struct {
@@ -68,10 +95,10 @@ func RunForm(pre FormValues) (FormValues, error) {
 		huh.NewGroup(
 			huh.NewNote().
 				Title("ocd onboard").
-				Description("One box, one fleet. This mints secrets, writes ~/.ocd/env, enrolls, then waits for your Telegram approval."),
+				Description("Fastest: send /enrollcode <box-id> to the bot and paste back the command it replies — the form is skipped entirely. Otherwise answer box id below and leave the rest empty for sane defaults."),
 			huh.NewInput().
 				Title("Box id").
-				Description("Lowercase letters, digits, dashes (e.g. mac).").
+				Description("Lowercase letters, digits, dashes (e.g. mac). Everything else derives from it.").
 				Value(&out.BoxID).
 				Validate(ValidateBoxID),
 			huh.NewInput().
@@ -84,12 +111,12 @@ func RunForm(pre FormValues) (FormValues, error) {
 					return nil
 				}),
 			huh.NewInput().
-				Title("Public hostname").
-				Description("Tunnel hostname serving this box (pair links use it).").
+				Title("Public hostname (optional)").
+				Description("Tap hostname; empty derives oc-tap-<box-id>.buyallmemes.com.").
 				Value(&out.PublicHost).
 				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" || strings.ContainsAny(s, " /:") {
-						return fmt.Errorf("bare hostname, e.g. oc-mac.buyallmemes.com")
+					if strings.TrimSpace(s) != "" && strings.ContainsAny(s, " /:") {
+						return fmt.Errorf("bare hostname, e.g. oc-tap-mac.buyallmemes.com")
 					}
 					return nil
 				}),
@@ -98,12 +125,12 @@ func RunForm(pre FormValues) (FormValues, error) {
 				Description("From /enrollcode in Telegram; empty waits for an approve tap instead.").
 				Value(&out.EnrollCode),
 			huh.NewInput().
-				Title("Tunnel name").
-				Description("Cloudflare tunnel for this box; created if missing, reused if present.").
+				Title("Tunnel name (optional)").
+				Description("Empty derives oc-<box-id>; created if missing, reused if present.").
 				Value(&out.TunnelName),
 			huh.NewInput().
 				Title("UI hostname (optional)").
-				Description("Second tunnel hostname for the web UI; empty skips it.").
+				Description("Empty derives oc-<box-id>.<tap-domain>; empty tap domain skips it.").
 				Value(&out.UIHost),
 			huh.NewInput().
 				Title("Cloudflare API token (optional)").
@@ -115,7 +142,7 @@ func RunForm(pre FormValues) (FormValues, error) {
 	if err := form.Run(); err != nil {
 		return FormValues{}, err
 	}
-	return out, nil
+	return out.WithDefaults(), nil
 }
 
 type statusMsg string

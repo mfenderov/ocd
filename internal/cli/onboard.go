@@ -81,26 +81,28 @@ func onboardCmd() *cobra.Command {
 		Short: "Enroll this box in the fleet (interactive TUI)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			if onboard.IsTTY() && !nonInteractive {
-				vals, err := onboard.RunForm(onboard.FormValues{
-					BoxID:      boxID,
-					WorkerURL:  workerURL,
-					PublicHost: publicHost,
-					EnrollCode: enrollCode,
-					TunnelName: tunnelName,
-					UIHost:     uiHost,
-					CFToken:    cfToken,
-				})
+			vals := onboard.FormValues{
+				BoxID:      boxID,
+				WorkerURL:  workerURL,
+				PublicHost: publicHost,
+				EnrollCode: enrollCode,
+				TunnelName: tunnelName,
+				UIHost:     uiHost,
+				CFToken:    cfToken,
+			}
+			if vals.BoxID == "" || vals.PublicHost == "" {
+				if !onboard.IsTTY() || nonInteractive {
+					return fmt.Errorf("non-interactive onboard needs --box-id (tap hostname derives from it)")
+				}
+				var err error
+				vals, err = onboard.RunForm(vals)
 				if err != nil {
 					return err
 				}
-				boxID, workerURL, publicHost, enrollCode = vals.BoxID, vals.WorkerURL, vals.PublicHost, vals.EnrollCode
-				tunnelName, uiHost, cfToken = vals.TunnelName, vals.UIHost, vals.CFToken
-			} else {
-				if boxID == "" || publicHost == "" {
-					return fmt.Errorf("non-interactive onboard needs --box-id and --public-host")
-				}
 			}
+			vals = vals.WithDefaults()
+			boxID, workerURL, publicHost, enrollCode = vals.BoxID, vals.WorkerURL, vals.PublicHost, vals.EnrollCode
+			tunnelName, uiHost, cfToken = vals.TunnelName, vals.UIHost, vals.CFToken
 			if workerURL == "" {
 				workerURL = onboard.DefaultWorkerURL
 			}

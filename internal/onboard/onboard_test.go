@@ -325,3 +325,20 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 		t.Fatalf("tunnel config must carry the created id, got:\n%s", tpl)
 	}
 }
+
+func TestFormValuesWithDefaults(t *testing.T) {
+	got := onboard.FormValues{BoxID: "mac"}.WithDefaults()
+	if got.PublicHost != "oc-tap-mac.buyallmemes.com" {
+		t.Fatalf("tap host default = %q", got.PublicHost)
+	}
+	if got.TunnelName != "oc-mac" || got.UIHost != "oc-mac.buyallmemes.com" {
+		t.Fatalf("tunnel defaults = %q %q", got.TunnelName, got.UIHost)
+	}
+	if got.WorkerURL != onboard.DefaultWorkerURL {
+		t.Fatalf("worker default = %q", got.WorkerURL)
+	}
+	keep := onboard.FormValues{BoxID: "mac", PublicHost: "tap.example.com", TunnelName: "t", UIHost: "u.example.com", WorkerURL: "https://w.example"}.WithDefaults()
+	if keep.PublicHost != "tap.example.com" || keep.TunnelName != "t" || keep.UIHost != "u.example.com" || keep.WorkerURL != "https://w.example" {
+		t.Fatalf("explicit values must survive: %+v", keep)
+	}
+}

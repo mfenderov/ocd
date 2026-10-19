@@ -152,7 +152,11 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 		return "Usage: <code>/enrollcode &lt;box&gt; [hostname]</code>", nil
 	}
 	if strings.TrimSpace(hostname) == "" {
-		hostname = "oc-" + box + ".buyallmemes.com"
+		hostname = "oc-tap-" + box + ".buyallmemes.com"
+	} else if strings.ContainsAny(strings.TrimSpace(hostname), " /:") {
+		return "Usage: <code>/enrollcode &lt;box&gt; [hostname]</code>", nil
+	} else {
+		hostname = strings.TrimSpace(hostname)
 	}
 	code, err := onboard.GenerateSecret()
 	if err != nil {
@@ -166,8 +170,8 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 	if status != "pending" {
 		return fmt.Sprintf("📋 <code>%s</code> is already enrolled.", esc(box)), nil
 	}
-	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (valid 15 min, single use):\n<code>%s</code>\nPaste into:\n<code>ocd onboard --enroll-code …</code>\nAn approve link also arrived — ignore it once the code is used.",
-		esc(box), esc(code)), nil
+	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (valid 15 min, single use):\n<code>%s</code>\nPaste to onboard in one shot:\n<code>ocd onboard --box-id %s --public-host %s --enroll-code %s</code>\nAn approve link also arrived — ignore it once the code is used.",
+		esc(box), esc(code), esc(box), esc(hostname), esc(code)), nil
 }
 
 // FleetAuditText renders recent fleet audit rows, optionally for one box.
