@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.17.1 - 2026-10-19
+#### Bug Fixes
+- boxes need OCD_PAIR_OPEN or every tap link 401s - (44b0b79) - mfenderov
+
+- - -
+
 ## v0.17.0 - 2026-10-19
 #### Features
 - ocd repair fixes a box wired by an older build - (195ecc7) - mfenderov
