@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.13.2 - 2026-10-19
+#### Bug Fixes
+- owner-issued enroll codes only (closes silent box takeover) - (66bb87e) - mfenderov
+
+- - -
+
 ## v0.13.1 - 2026-10-19
 #### Bug Fixes
 - move the box API off /admin (Cloudflare challenges that path) - (f2c50db) - mfenderov
