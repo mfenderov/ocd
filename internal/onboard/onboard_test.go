@@ -342,3 +342,36 @@ func TestFormValuesWithDefaults(t *testing.T) {
 		t.Fatalf("explicit values must survive: %+v", keep)
 	}
 }
+
+func TestExistingBox(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "env")
+	if _, ok := onboard.ExistingBox(p); ok {
+		t.Fatal("missing file means fresh box")
+	}
+	if err := os.WriteFile(p, []byte("# nothing here\nOCD_WORKER_URL=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := onboard.ExistingBox(p); ok {
+		t.Fatal("env without box id means fresh box")
+	}
+	if err := os.WriteFile(p, []byte("OCD_BOX_ID=\"mac\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, ok := onboard.ExistingBox(p)
+	if !ok || id != "mac" {
+		t.Fatalf("must detect onboarded box, got %q %v", id, ok)
+	}
+}
+
+func TestFormValuesComplete(t *testing.T) {
+	if !(onboard.FormValues{BoxID: "mac", PublicHost: "h.example.com"}.Complete()) {
+		t.Fatal("box+host means no form needed")
+	}
+	if (onboard.FormValues{BoxID: "mac"}.Complete()) {
+		t.Fatal("host is required input (or derived later, not complete yet)")
+	}
+	if (onboard.FormValues{}.Complete()) {
+		t.Fatal("empty means form needed")
+	}
+}

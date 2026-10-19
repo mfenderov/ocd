@@ -75,7 +75,7 @@ func onboardService(interactive, flag bool, w interface {
 func onboardCmd() *cobra.Command {
 	var boxID, workerURL, publicHost, enrollCode, tunnelName, uiHost, cfToken string
 	var timeout time.Duration
-	var nonInteractive, skipTunnel, installService bool
+	var nonInteractive, skipTunnel, installService, force bool
 	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Enroll this box in the fleet (interactive TUI)",
@@ -84,6 +84,23 @@ func onboardCmd() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			envPath, err := onboard.DefaultEnvPath()
+			if err != nil {
+				return err
+			}
+			if existing, ok := onboard.ExistingBox(envPath); ok && !force {
+				if !onboard.IsTTY() || nonInteractive {
+					return fmt.Errorf("already onboarded as %q — re-run interactively to confirm, or pass --force", existing)
+				}
+				again, err := onboard.AskReonboard(existing)
+				if err != nil {
+					return err
+				}
+				if !again {
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), "keeping existing setup for "+existing)
+					return nil
+				}
+			}
 			vals := onboard.FormValues{
 				BoxID:      boxID,
 				WorkerURL:  workerURL,
@@ -93,29 +110,31 @@ func onboardCmd() *cobra.Command {
 				UIHost:     uiHost,
 				CFToken:    cfToken,
 			}
-			if vals.BoxID == "" || vals.PublicHost == "" {
+			formShown := false
+			if !vals.Complete() {
 				if !onboard.IsTTY() || nonInteractive {
 					return fmt.Errorf("non-interactive onboard needs --box-id (tap hostname derives from it)")
 				}
-				var err error
 				vals, err = onboard.RunForm(vals)
 				if err != nil {
 					return err
 				}
+				formShown = true
 			}
 			vals = vals.WithDefaults()
 			boxID, workerURL, publicHost, enrollCode = vals.BoxID, vals.WorkerURL, vals.PublicHost, vals.EnrollCode
 			tunnelName, uiHost, cfToken = vals.TunnelName, vals.UIHost, vals.CFToken
-			if workerURL == "" {
-				workerURL = onboard.DefaultWorkerURL
-			}
-			envPath, err := onboard.DefaultEnvPath()
-			if err != nil {
-				return err
-			}
 			tunnel, err := onboardTunnel(ctx, tunnelName, uiHost, cfToken, boxID, publicHost, skipTunnel, cmd.OutOrStdout())
 			if err != nil {
 				return err
+			}
+			if tunnel != nil {
+				credDir, err := onboard.DefaultCredDir()
+				if err == nil {
+					if err := onboard.EnsureCloudflaredLogin(ctx, credDir, cfToken, onboard.IsTTY() && !nonInteractive, cmd.OutOrStdout()); err != nil {
+						return err
+					}
+				}
 			}
 			cfg := onboard.Config{
 				BoxID:      boxID,
@@ -134,13 +153,13 @@ func onboardCmd() *cobra.Command {
 				return err
 			}
 			serviced := false
-			if onboard.IsTTY() && !nonInteractive {
+			if formShown {
 				var err error
 				serviced, err = onboardService(true, false, cmd.OutOrStdout())
 				if err != nil {
 					return err
 				}
-			} else if installService {
+			} else if onboard.IsTTY() && !nonInteractive || installService {
 				var err error
 				serviced, err = onboardService(false, true, cmd.OutOrStdout())
 				if err != nil {
@@ -162,5 +181,6 @@ func onboardCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "approval wait timeout")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "skip the TUI even on a terminal")
 	cmd.Flags().BoolVar(&installService, "install-service", false, "install macOS login service (non-interactive only; TUI asks)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-onboard even if this machine already has an identity")
 	return cmd
 }

@@ -26,6 +26,26 @@ var (
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
+// AskReonboard confirms wiping a previous onboarding. Default is No:
+// re-running keeps the working box untouched.
+func AskReonboard(box string) (bool, error) {
+	again := false
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Already onboarded as " + box).
+				Description("Start a NEW onboarding? Fresh secrets, fresh enroll — the old identity stops working.").
+				Affirmative("Yes, start over").
+				Negative("No, keep it").
+				Value(&again),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, err
+	}
+	return again, nil
+}
+
 // AskInstallService confirms the macOS login service install. Non-TTY
 // callers decide with --install-service instead.
 func AskInstallService() (bool, error) {
@@ -42,6 +62,12 @@ func AskInstallService() (bool, error) {
 		return false, err
 	}
 	return install, nil
+}
+
+// Complete reports whether no form is needed: box id plus tap hostname are
+// present, so everything else derives. Pasted Telegram commands land here.
+func (f FormValues) Complete() bool {
+	return f.BoxID != "" && f.PublicHost != ""
 }
 
 // WithDefaults fills every derivable blank: worker origin, tap hostname

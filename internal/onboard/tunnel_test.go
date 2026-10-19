@@ -2,6 +2,7 @@ package onboard_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,5 +156,18 @@ func TestSetupTunnelReusesIdenticalConfig(t *testing.T) {
 	}
 	if id != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("want same tunnel id, got %q", id)
+	}
+}
+
+func TestEnsureLoginRequiresProof(t *testing.T) {
+	dir := t.TempDir()
+	if err := onboard.EnsureCloudflaredLogin(context.Background(), dir, "", false, io.Discard); err == nil {
+		t.Fatal("no cert, no token, non-interactive must fail with instructions")
+	} else if !strings.Contains(err.Error(), "tunnel login") {
+		t.Fatalf("error must name the fix, got: %v", err)
+	}
+	plantCert(t, dir)
+	if err := onboard.EnsureCloudflaredLogin(context.Background(), dir, "", false, io.Discard); err != nil {
+		t.Fatalf("cert present means go: %v", err)
 	}
 }

@@ -51,6 +51,17 @@ func validEnvKey(key string) bool {
 	return len(key) > 0
 }
 
+// ExistingBox reports a previous onboarding: the box id stored in the env
+// file, if any. Missing file or no box id means a fresh box.
+func ExistingBox(envPath string) (string, bool) {
+	vals, err := LoadEnvFile(envPath)
+	if err != nil {
+		return "", false
+	}
+	id := strings.TrimSpace(vals["OCD_BOX_ID"])
+	return id, id != ""
+}
+
 // ApplyEnvDefaults fills unset OCD_* vars from the default env file.
 // Missing or unreadable file is not an error: explicit environment and
 // flags always win, this only removes the need to source ~/.ocd/env.

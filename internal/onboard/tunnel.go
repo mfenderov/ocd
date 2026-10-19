@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,7 +175,30 @@ func writeTunnelConfig(path, content string) error {
 	return nil
 }
 
-// HasCert reports whether `cloudflared tunnel login` ran for dir
+// EnsureCloudflaredLogin guarantees tunnel auth before provisioning: an
+// existing login, an API token (flag or env), or — interactive only — a
+// guided `cloudflared tunnel login` run. Never stores anything.
+func EnsureCloudflaredLogin(ctx context.Context, credDir, apiToken string, interactive bool, w io.Writer) error {
+	if HasCert(credDir) || strings.TrimSpace(apiToken) != "" || os.Getenv("CLOUDFLARE_API_TOKEN") != "" {
+		return nil
+	}
+	if !interactive {
+		return fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or set CLOUDFLARE_API_TOKEN")
+	}
+	_, _ = fmt.Fprintln(w, "opening cloudflared login in your browser…")
+	cmd := exec.CommandContext(ctx, "cloudflared", "tunnel", "login")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = w
+	cmd.Stderr = w
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("onboard: cloudflared login failed: %w", err)
+	}
+	if !HasCert(credDir) {
+		return fmt.Errorf("onboard: login did not produce credentials — rerun once finished")
+	}
+	return nil
+}
+
 // (cert.pem present). dir is explicit so tests stay hermetic; production
 // passes the cloudflared home holding config.yml.
 func HasCert(dir string) bool {
