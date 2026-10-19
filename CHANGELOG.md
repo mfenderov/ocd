@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.13.3 - 2026-10-19
+#### Bug Fixes
+- derive scope validation from ALL_SCOPES - (17e4201) - mfenderov
+#### Documentation
+- runbooks match the one-command onboarding - (a4441de) - mfenderov
+
+- - -
+
 ## v0.13.2 - 2026-10-19
 #### Bug Fixes
 - owner-issued enroll codes only (closes silent box takeover) - (66bb87e) - mfenderov
