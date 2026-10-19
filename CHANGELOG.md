@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.17.3 - 2026-10-19
+#### Bug Fixes
+- (**worker**) clear all 12 dependabot advisories - (5624dfb) - mfenderov
+
+- - -
+
 ## v0.17.2 - 2026-10-19
 #### Bug Fixes
 - discover the OpenCode service port instead of assuming 49374 - (5befdda) - mfenderov
