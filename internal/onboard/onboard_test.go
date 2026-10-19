@@ -449,6 +449,13 @@ func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
+	// Hermetic: a fake cloudflared on PATH, so the test never touches
+	// the real binary, the network, or the account.
+	fakeCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "Created tunnel oc-mac with id 11111111-2222-3333-4444-555555555555",
+		"tunnel route":  "Added CNAME",
+	}, nil)
 	plan := onboard.DefaultTunnelPlan("mac")
 	plan.CredDir = filepath.Join(dir, ".cloudflared")
 	plan.APIToken = "test-token" // no cloudflared login needed
