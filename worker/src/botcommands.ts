@@ -1,4 +1,13 @@
 import type { BotCommand } from "./bot";
+import {
+  boxState,
+  fleetBoard,
+  linkMenu,
+  openButton,
+  stateDot,
+  type InlineButton,
+  type Keyboard,
+} from "./botbuttons";
 import type { RevokeResult } from "./revoke";
 import type { BoxPublic } from "./state";
 import { escapeHtml, type TelegramClient } from "./telegram";
@@ -26,7 +35,8 @@ import { escapeHtml, type TelegramClient } from "./telegram";
 //      the Go bot's sendFleetReply turns it.
 //
 //   3. Silence for what it does not know. An unknown command gets no
-//      reply at all: a typo must not make noise.
+//      reply at all: a typo must not make noise. A tap is different: it
+//      is always answered, or the owner's button spins forever.
 
 // AuditRow is one row of the brain's history. The shape matches the Go
 // client's AuditRow so the bot's text and the console's text agree.
@@ -58,14 +68,18 @@ export interface CommandDeps {
   primaryBox: string;
 }
 
+// What a command answers with: the text, and the keyboard that goes
+// with it — the board under the fleet's text, the Open button under a
+// minted link.
+interface Reply {
+  text: string;
+  keyboard?: Keyboard;
+}
+
 // A command handler answers with the message to send, or with nothing
 // when the command has nothing to say (the Go bot stays silent in the
 // same cases).
-type CommandHandler = (cmd: BotCommand, deps: CommandDeps) => Promise<string | undefined>;
-
-// How long a box may go without a heartbeat before it reads offline:
-// three missed beats at the 30 second fleet heartbeat.
-const OFFLINE_AFTER_SEC = 90;
+type CommandHandler = (cmd: BotCommand, deps: CommandDeps) => Promise<Reply | undefined>;
 
 // The row limit of /faudit: ten by default, thirty at most (the Go bot's
 // clamp).
@@ -78,8 +92,10 @@ const AUDIT_ROWS_MAX = 30;
 // reach something that only looks like a command.
 const COMMANDS = new Map<string, CommandHandler>([
   ["/fleet", fleetCommand],
-  // The link menu lands in Task 8; until then /link shows the board.
-  ["/link", fleetCommand],
+  // The Go bot sends one board for /fleet and /link — "/link is the
+  // menu: which machine do you want to work in?" (internal/tg/tg.go) —
+  // so the two views carry the same buttons.
+  ["/link", linkCommand],
   ["/flink", flinkCommand],
   ["/login", loginCommand],
   ["/faudit", auditCommand],
@@ -97,27 +113,54 @@ const COMMANDS = new Map<string, CommandHandler>([
 // runCommand answers one command. It never throws: a failure becomes a
 // short answer, so Telegram never retries the update in a loop.
 export async function runCommand(cmd: BotCommand, deps: CommandDeps): Promise<void> {
+  // A tap is answered before the command runs. Telegram spins the
+  // button until the answer comes, so a tap that takes ten seconds must
+  // not leave the owner watching a spinner for ten seconds. A tap that
+  // fails and a tap for an action the brain does not know are answered
+  // too: an unanswered tap is a spinner that never stops.
+  if (cmd.callbackId) {
+    await answerTap(deps, cmd.callbackId);
+  }
   const handler = COMMANDS.get(commandName(cmd.name));
   if (!handler) {
     // An unknown command is ignored: no reply at all.
     return;
   }
-  let text: string | undefined;
+  let reply: Reply | undefined;
   try {
-    text = await handler(cmd, deps);
+    reply = await handler(cmd, deps);
   } catch (err) {
-    text = fleetFailedText(err);
+    reply = { text: fleetFailedText(err) };
   }
-  if (text === undefined) {
+  if (reply === undefined) {
     return;
   }
   try {
-    await deps.telegram.sendMessage(cmd.chatId, text);
+    await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
   } catch (err) {
     // Telegram is down. Nothing can be said about it, and the answer
     // must not escape: the webhook would be retried forever.
     console.error(`bot: the reply failed (${errorText(err)})`);
   }
+}
+
+// The tap's answer. A failure to answer must not stop the reply: the
+// owner would never learn what the tap did.
+async function answerTap(deps: CommandDeps, callbackId: string): Promise<void> {
+  try {
+    await deps.telegram.answerCallbackQuery(callbackId);
+  } catch (err) {
+    console.error(`bot: the tap was not answered (${errorText(err)})`);
+  }
+}
+
+// The reply's markup: Telegram refuses an empty keyboard, so a fleet
+// with no boxes sends the text alone.
+function replyOptions(reply: Reply): { replyMarkup?: unknown } {
+  if (!reply.keyboard || reply.keyboard.length === 0) {
+    return {};
+  }
+  return { replyMarkup: { inline_keyboard: reply.keyboard } };
 }
 
 // commandName strips the @botname suffix a group chat adds, so
@@ -127,77 +170,100 @@ function commandName(name: string): string {
   return at >= 0 ? name.slice(0, at) : name;
 }
 
-// /fleet: every enrolled box, its state and how long ago it was seen.
-async function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Promise<string> {
-  return fleetText(deps.listBoxes(), nowSec());
+// /fleet: every enrolled box, its state and how long ago it was seen,
+// with the board's buttons under it.
+async function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return boardReply(fleetBoard, deps);
+}
+
+// /link: the menu of boxes the owner picks a machine from. The Go bot
+// sends the same board for /fleet and /link, so the menu and the board
+// are the same buttons.
+async function linkCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return boardReply(linkMenu, deps);
+}
+
+// The board's reply: the fleet's text and the keyboard under it.
+function boardReply(board: (boxes: BoxPublic[]) => InlineButton[][], deps: CommandDeps): Reply {
+  const boxes = deps.listBoxes();
+  return { text: fleetText(boxes, nowSec()), keyboard: board(boxes) };
 }
 
 // /flink <box>: a tap URL for one box. The URL is single-use; it travels
 // as a link target, never as visible text.
-async function flinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<string> {
+async function flinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   const box = cmd.args[0]?.trim() ?? "";
   if (!box) {
-    return "Usage: <code>/flink &lt;box&gt;</code>";
+    return { text: "Usage: <code>/flink &lt;box&gt;</code>" };
   }
-  return linkText(await deps.mintLink(box), box);
+  return { text: linkText(await deps.mintLink(box), box) };
 }
 
 // The tap on a box's button: the same mint, the Go bot's callback
-// wording. A tap that names no box stays silent.
-async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<string | undefined> {
+// wording, and the Open button that carries the link. A tap that names
+// no box stays silent.
+async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | undefined> {
   const box = cmd.args[0]?.trim() ?? "";
   if (!box) {
     return undefined;
   }
-  return tapLinkText(await deps.mintLink(box), box);
+  const now = nowSec();
+  const known = deps.listBoxes().find((b) => b.id === box);
+  if (known && boxState(known, now) === "offline") {
+    // An offline box cannot mint. The tap explains instead of waiting
+    // for the relay to time out.
+    return { text: offlineText(known, now) };
+  }
+  const url = await deps.mintLink(box);
+  return { text: tapLinkText(box), keyboard: [[openButton(`🚀 Open ${box}`, url)]] };
 }
 
 // /login: the primary box, one tap.
-async function loginCommand(_cmd: BotCommand, deps: CommandDeps): Promise<string> {
-  return loginText(await deps.mintLink(deps.primaryBox));
+async function loginCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return { text: loginText(await deps.mintLink(deps.primaryBox)) };
 }
 
 // /faudit [box] [n]: the fleet's history, newest first.
-async function auditCommand(cmd: BotCommand, deps: CommandDeps): Promise<string> {
+async function auditCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   const { box, limit } = auditArgs(cmd.args);
-  return auditText(await deps.audit(box, limit));
+  return { text: auditText(await deps.audit(box, limit)) };
 }
 
 // /frevoke <box> YES: revoke one box. The YES is not optional — the
 // credentials rotate, and the Go bot asks for the same word.
-async function revokeCommand(cmd: BotCommand, deps: CommandDeps): Promise<string> {
+async function revokeCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   const box = cmd.args[0]?.trim() ?? "";
   if (!box || box === "YES") {
-    return "Usage: <code>/frevoke &lt;box&gt; YES</code>";
+    return { text: "Usage: <code>/frevoke &lt;box&gt; YES</code>" };
   }
   if (cmd.args.length < 2 || !confirmedBy(cmd.args)) {
-    return revokeConfirmText(box);
+    return { text: revokeConfirmText(box) };
   }
-  return revokeText(await deps.revoke(box), box);
+  return { text: revokeText(await deps.revoke(box), box) };
 }
 
 // /fnuke YES: revoke every box.
-async function nukeCommand(cmd: BotCommand, deps: CommandDeps): Promise<string> {
+async function nukeCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   if (cmd.args.length !== 1 || !confirmedBy(cmd.args)) {
-    return nukeConfirmText();
+    return { text: nukeConfirmText() };
   }
-  return nukeText(await deps.revokeAll());
+  return { text: nukeText(await deps.revokeAll()) };
 }
 
 // /enrollcode <box>: a one-time code for a new box. The code is shown in
 // the owner-only chat, and that display is the approval.
-async function enrollCodeCommand(cmd: BotCommand, deps: CommandDeps): Promise<string> {
+async function enrollCodeCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   const box = cmd.args[0]?.trim() ?? "";
   if (!isValidBoxId(box)) {
-    return "Usage: <code>/enrollcode &lt;box&gt;</code>";
+    return { text: "Usage: <code>/enrollcode &lt;box&gt;</code>" };
   }
   const { command } = await deps.issueEnrollCode(box);
-  return enrollCodeText(box, command);
+  return { text: enrollCodeText(box, command) };
 }
 
 // /status: the primary box's OpenCode service status, relayed.
-async function statusCommand(_cmd: BotCommand, deps: CommandDeps): Promise<string> {
-  return statusText(await deps.boxStatus(deps.primaryBox));
+async function statusCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return { text: statusText(await deps.boxStatus(deps.primaryBox)) };
 }
 
 // The trailing YES that confirms a destructive command.
@@ -248,25 +314,12 @@ function fleetText(boxes: BoxPublic[], now: number): string {
   const lines = [`🖥 <b>Fleet</b> (${boxes.length})`];
   for (const b of boxes) {
     const state = boxState(b, now);
-    const dot = state === "ok" ? "🟢" : state === "offline" ? "🔴" : "🟠";
+    const dot = stateDot(state);
     lines.push(
       `${dot} <code>${escapeHtml(b.id)}</code> · ${state} · synced ${escapeHtml(fmtAgo(now - b.last_seen))} · epoch ${b.epoch}`,
     );
   }
   return lines.join("\n");
-}
-
-// The state of one box: tombstoned wins over staleness, then a box
-// quieter than the offline threshold reads offline (the Go bot's
-// fleet.BoxState).
-function boxState(box: BoxPublic, now: number): string {
-  if (box.tombstoned) {
-    return "tombstoned";
-  }
-  if (now - box.last_seen < OFFLINE_AFTER_SEC) {
-    return "ok";
-  }
-  return "offline";
 }
 
 // The age of a last-seen timestamp, the Go store's FmtAgo.
@@ -296,9 +349,19 @@ function linkText(url: string, box: string): string {
   return `🔑 <a href="${escapeHtml(url)}">Tap to log in to <code>${escapeHtml(box)}</code></a>`;
 }
 
-// The tapped box, the Go bot's callback answer.
-function tapLinkText(url: string, box: string): string {
-  return `🔗 <b>${escapeHtml(box)}</b> ready — one tap:\n<a href="${escapeHtml(url)}">🚀 Open ${escapeHtml(box)}</a>`;
+// The tapped box, the Go bot's callback answer. The link itself rides
+// the Open button, so the one-time URL never shows as text.
+function tapLinkText(box: string): string {
+  return `🔗 <b>${escapeHtml(box)}</b> ready — one tap:`;
+}
+
+// The offline box: the tap explains instead of failing. The words are
+// the Go's: the box's id, its state and how long ago it was seen.
+function offlineText(box: BoxPublic, now: number): string {
+  return (
+    `🔴 <b>${escapeHtml(box.id)}</b> is offline — synced ${escapeHtml(fmtAgo(now - box.last_seen))}. ` +
+    "It cannot mint a link until it checks in again."
+  );
 }
 
 // The primary box's link, the Go bot's /login answer. The brain does not

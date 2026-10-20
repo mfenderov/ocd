@@ -33,13 +33,19 @@ const AUDIT_ERROR_ROW: AuditRow = {
   error: "box_timeout",
 };
 
+// The keyboard the brain sent, as Telegram reads it.
+interface RecordedMarkup {
+  inline_keyboard?: Array<Array<{ text: string; callback_data?: string; url?: string }>>;
+}
+
 // The command layer owns every reply, so the client is the seam the tests
 // watch: it records what the brain would have sent to Telegram.
 class RecordingTelegram implements TelegramClient {
-  readonly sent: Array<{ chatId: number; text: string }> = [];
+  readonly sent: Array<{ chatId: number; text: string; markup?: RecordedMarkup }> = [];
+  readonly answered: string[] = [];
 
-  async sendMessage(chatId: number, text: string): Promise<{ message_id: number }> {
-    this.sent.push({ chatId, text });
+  async sendMessage(chatId: number, text: string, opts?: { replyMarkup?: unknown }): Promise<{ message_id: number }> {
+    this.sent.push({ chatId, text, markup: opts?.replyMarkup as RecordedMarkup | undefined });
     return { message_id: this.sent.length };
   }
 
@@ -47,7 +53,9 @@ class RecordingTelegram implements TelegramClient {
     return true;
   }
 
-  async answerCallbackQuery(): Promise<void> {}
+  async answerCallbackQuery(callbackId: string): Promise<void> {
+    this.answered.push(callbackId);
+  }
 
   async setWebhook(): Promise<void> {}
 }
@@ -73,6 +81,8 @@ interface HarnessOptions {
   primaryBox?: string;
   // The fleet read that fails: the command layer must survive it.
   listBoxesFails?: Error;
+  // The mint that fails: a tap must still be answered.
+  mintFails?: Error;
 }
 
 function harness(options: HarnessOptions = {}): {
@@ -99,6 +109,9 @@ function harness(options: HarnessOptions = {}): {
     },
     mintLink: async (boxId) => {
       calls.mintLink.push(boxId);
+      if (options.mintFails) {
+        throw options.mintFails;
+      }
       return "https://tap.example/?t=tok-1";
     },
     audit: async (boxId, limit) => {
@@ -187,12 +200,42 @@ describe("/fleet", () => {
 });
 
 describe("/link", () => {
-  it("shows the plain box list for now", async () => {
+  it("shows the menu of boxes", async () => {
     const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
 
     await runCommand({ name: "/link", args: [], chatId: 7 }, deps);
 
     expect(telegram.sent[0].text).toContain("home");
+    // The menu: one button per box.
+    expect(telegram.sent[0].markup?.inline_keyboard?.[0]).toHaveLength(1);
+  });
+});
+
+describe("the keyboards", () => {
+  it("rides the board under the fleet's text", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 3600 })],
+    });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    const keyboard = telegram.sent[0].markup?.inline_keyboard;
+    expect(keyboard).toHaveLength(1);
+    expect(keyboard?.[0]).toHaveLength(2);
+    // Every button names the box it acts on.
+    expect(keyboard?.[0][0].callback_data).toBe("link:home");
+    expect(keyboard?.[0][1].callback_data).toBe("link:mac");
+    // The offline box is marked, not hidden.
+    expect(keyboard?.[0][1].text).toContain("🔴");
+  });
+
+  it("sends no keyboard when no box is enrolled", async () => {
+    const { deps, telegram } = harness({ boxes: [] });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].markup).toBeUndefined();
   });
 });
 
@@ -357,13 +400,47 @@ describe("/status", () => {
 });
 
 describe("the taps", () => {
-  it("mints for the box the tap names", async () => {
+  it("mints for the box the tap names and answers the tap", async () => {
     const { deps, telegram, calls } = harness();
 
     await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
 
     expect(calls.mintLink).toEqual(["mac"]);
-    expect(telegram.sent[0].text).toContain("https://tap.example/?t=tok-1");
+    // The tap is answered, so the button never spins.
+    expect(telegram.answered).toEqual(["cb-1"]);
+    // The link rides the Open button, never the visible text.
+    expect(telegram.sent[0].text).toContain("mac");
+    expect(telegram.sent[0].markup?.inline_keyboard?.[0][0].url).toBe("https://tap.example/?t=tok-1");
+  });
+
+  it("explains an offline box instead of minting", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram, calls } = harness({ boxes: [box({ id: "mac", last_seen: now - 3600 })] });
+
+    await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-2" }, deps);
+
+    expect(calls.mintLink).toEqual([]);
+    expect(telegram.sent[0].text).toContain("offline");
+    expect(telegram.sent[0].text).toContain("mac");
+    expect(telegram.answered).toEqual(["cb-2"]);
+  });
+
+  it("answers a tap whose command fails", async () => {
+    const { deps, telegram } = harness({ mintFails: new Error("boom") });
+
+    await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-3" }, deps);
+
+    expect(telegram.answered).toEqual(["cb-3"]);
+    expect(telegram.sent[0].text).toContain("Fleet failed");
+  });
+
+  it("answers a tap for an action it does not know", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "nope", args: ["mac"], chatId: 7, callbackId: "cb-4" }, deps);
+
+    expect(telegram.answered).toEqual(["cb-4"]);
+    expect(telegram.sent).toEqual([]);
   });
 
   it("shows the board again", async () => {
