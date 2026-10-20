@@ -83,3 +83,47 @@ func TestExpiredLinkTokensOldestFirstAndLimited(t *testing.T) {
 		}
 	}
 }
+
+// A dead token is worth nothing: once the brain has been told the link
+// died, the row goes, so no sweep reports it again.
+func TestDeleteLinkTokensRemovesTheRows(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	dead, err := st.IssueLink("mac", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive, err := st.IssueLink("mac", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteLinkTokens([]string{dead}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := countLinkTokens(t, st, dead); n != 0 {
+		t.Fatalf("want the deleted token gone, got %d rows", n)
+	}
+	if n := countLinkTokens(t, st, alive); n != 1 {
+		t.Fatalf("want the other token untouched, got %d rows", n)
+	}
+	// Deleting a token that is not there is not an error: the sweep may
+	// run twice over the same dead link.
+	if err := st.DeleteLinkTokens([]string{"gone-already"}); err != nil {
+		t.Fatalf("want deleting an unknown token to be harmless, got %v", err)
+	}
+}
+
+func countLinkTokens(t *testing.T, st *Store, tok string) int {
+	t.Helper()
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM link_tokens WHERE token=?`, tok).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}

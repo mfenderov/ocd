@@ -64,32 +64,7 @@ func TestMountAdminServesStatusBehindAuth(t *testing.T) {
 // The box owns the link TTL, so the box tells the brain which links died.
 // The brain decides what to say about them.
 func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "sweep.db")
-	st, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok, err := st.IssueLink("mac", "telegram")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Age the token past the TTL so it counts as dead. The store is closed
-	// first: two open connections to the same file would fight over the
-	// write lock.
-	st.Close()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE link_tokens SET created_at=strftime('%s','now')-3600 WHERE token=?`, tok); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	st, err = store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	st, tok := deadLinkStore(t)
 	defer st.Close()
 
 	var (
@@ -149,4 +124,145 @@ func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
 	if boxID != "mac" {
 		t.Fatalf("want the box id mac, got %q", boxID)
 	}
+}
+
+// A dead link is reported exactly once. The sweep keeps running, but the
+// token is gone after the first report, so the brain hears about it once.
+func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
+	st, tok := deadLinkStore(t)
+	defer st.Close()
+
+	var (
+		mu    sync.Mutex
+		got   []boxagent.Event
+		count int
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		count += len(body.Events)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	t.Setenv("OCD_WORKER_URL", brain.URL)
+	t.Setenv("OCD_BOX_ID", "mac")
+	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startLinkSweep(ctx, io.Discard, st, 10*time.Millisecond)
+
+	// Wait for the first report, then let several more sweeps run: the
+	// fast ticker guarantees they do.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := count
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the brain never heard about the dead link")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 1 {
+		t.Fatalf("want the dead link reported exactly once, got %d reports", count)
+	}
+	if got[0].Token != tok {
+		t.Fatalf("want the dead token %q, got %q", tok, got[0].Token)
+	}
+}
+
+// A dead link is reported once. Once the brain has it, the row goes, so
+// no sweep reports the same dead link again and again.
+func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
+	st, _ := deadLinkStore(t)
+	defer st.Close()
+
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	sweepDeadLinks(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	got, err := st.ExpiredLinkTokens(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want the reported token deleted, got %v", got)
+	}
+}
+
+// A brain outage must not lose the report: the token stays, so the next
+// sweep tries again.
+func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
+	st, tok := deadLinkStore(t)
+	defer st.Close()
+
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer brain.Close()
+
+	sweepDeadLinks(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	got, err := st.ExpiredLinkTokens(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != tok {
+		t.Fatalf("want the unreported token kept for the next sweep, got %v", got)
+	}
+}
+
+// deadLinkStore returns a store holding one link that was never tapped
+// and is past its TTL: a dead link.
+func deadLinkStore(t *testing.T) (*store.Store, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "sweep.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := st.IssueLink("mac", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Age the token past the TTL so it counts as dead. The store is closed
+	// first: two open connections to the same file would fight over the
+	// write lock.
+	st.Close()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE link_tokens SET created_at=strftime('%s','now')-3600 WHERE token=?`, tok); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, tok
+}
+
+// brainConfig is the box's connection to a brain at the given origin.
+func brainConfig(brainURL string) boxagent.BrainConfig {
+	return boxagent.BrainConfig{BrainURL: brainURL, BoxID: "mac", Token: "hb-secret"}
 }

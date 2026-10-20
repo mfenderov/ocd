@@ -68,6 +68,19 @@ func (s *Store) ConsumeLink(tok string) (string, bool) {
 	return device, true
 }
 
+// DeleteLinkTokens removes the given tokens from the store. The caller
+// uses it once the brain has been told a link died: a token past its TTL
+// can no longer be claimed, so nothing else needs the row, and keeping
+// it would make every sweep report the same dead link again.
+func (s *Store) DeleteLinkTokens(tokens []string) error {
+	for _, tok := range tokens {
+		if _, err := s.db.Exec(`DELETE FROM link_tokens WHERE token=?`, tok); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ExpiredLinkTokens returns the tokens that were never used and are past
 // their TTL: the brain has to learn that its links died. At most limit
 // tokens, oldest first. A token that was used is spent, not dead, so it

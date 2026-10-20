@@ -115,8 +115,11 @@ func startLinkSweep(ctx context.Context, w io.Writer, st *store.Store, interval 
 }
 
 // sweepDeadLinks pushes one link-expired event per link that was never
-// used and is past its TTL. The push is best effort: a brain outage is
-// logged, never fatal, and the next sweep reports the same tokens again.
+// used and is past its TTL.
+//
+// The push is best effort: a brain outage is logged, never fatal, and the
+// next sweep reports the same tokens again. Once the brain has them the
+// rows go, so a dead link is reported exactly once.
 func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxagent.BrainConfig, client *http.Client) {
 	tokens, err := st.ExpiredLinkTokens(linkSweepBatch)
 	if err != nil {
@@ -133,7 +136,16 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 	pushCtx, cancel := context.WithTimeout(ctx, linkSweepPushTimeout)
 	defer cancel()
 	if err := boxagent.PushEvents(pushCtx, client, cfg.BrainURL, cfg.BoxID, cfg.Token, events); err != nil {
+		// The brain did not get it. Keep the tokens: a brain outage must
+		// not lose the report, the next sweep tries again.
 		_, _ = fmt.Fprintln(w, "link sweep push failed:", err)
+		return
+	}
+	// The brain has them. A dead link is worth nothing to anyone else —
+	// the claim path refuses it on its TTL — so the rows go and no sweep
+	// reports the same dead link again.
+	if err := st.DeleteLinkTokens(tokens); err != nil {
+		_, _ = fmt.Fprintln(w, "link sweep delete failed:", err)
 	}
 }
 
