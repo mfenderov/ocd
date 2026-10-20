@@ -5,9 +5,11 @@
 // answers ok:false, so the caller decides what a failed message means:
 // the owner ping sink swallows it, the brain logs it.
 //
-// The token rides in the URL, so it never appears in an error message and
-// never in a log line: the errors name the method, and when Telegram
-// answered, its status and its own description.
+// The token rides in the URL, so it is scrubbed out of everything this
+// module reports: the error's message, its stack, the cause chain and
+// Telegram's own description. A cause that is neither an Error nor a
+// string is passed through as it came in. The errors name the method and,
+// when Telegram answered, its status and its own description.
 
 const API_BASE = "https://api.telegram.org";
 
@@ -59,8 +61,9 @@ function redact(text: string, token: string): string {
 }
 
 // A transport failure is worth keeping for debugging, so its cause stays
-// attached — with the token taken out of it, and out of every cause
-// under it, first.
+// attached — with the token taken out of it, and out of every Error cause
+// under it, first. A cause that is neither an Error nor a string is passed
+// through as it came in.
 function redactToken(err: unknown, token: string, depth = 0): unknown {
   if (typeof err === "string") {
     return redact(err, token);
@@ -138,8 +141,11 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
         text,
         ...RENDER_OPTS,
       });
-      // Telegram answers true when the edit landed, false when it did not.
-      return result === true;
+      // Telegram answers a chat edit with the edited Message, and an
+      // inline-message edit with `true`. This method only ever issues a
+      // chat edit, but both shapes mean the edit landed — the Go client
+      // reads them the same way (bot.editMethodRequest).
+      return result === true || (typeof result === "object" && result !== null);
     },
 
     async answerCallbackQuery(callbackId, text) {

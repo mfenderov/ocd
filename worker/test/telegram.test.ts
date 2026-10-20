@@ -55,7 +55,11 @@ describe("telegram client", () => {
 
   it("editMessageText posts the chat, the message and the new text", async () => {
     const calls: FetchCall[] = [];
-    const client = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), calls));
+    // A chat edit is answered with the edited Message, not with `true`.
+    const client = createTelegramClient(
+      "TOKEN",
+      stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: 42, chat: { id: 7 } } }), calls),
+    );
 
     const edited = await client.editMessageText(7, 42, "✅ done");
 
@@ -79,9 +83,18 @@ describe("telegram client", () => {
     await expect(wrongType.sendMessage(7, "hi")).rejects.toThrow(/no message id/);
   });
 
-  it("editMessageText reports what telegram said: true when it edited, false when it did not", async () => {
-    const edited = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), []));
-    await expect(edited.editMessageText(7, 42, "done")).resolves.toBe(true);
+  it("editMessageText reads both answer shapes: the Message and the true", async () => {
+    // A chat edit answers with the edited Message.
+    const chatEdit = createTelegramClient(
+      "TOKEN",
+      stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: 42, chat: { id: 7 } } }), []),
+    );
+    await expect(chatEdit.editMessageText(7, 42, "done")).resolves.toBe(true);
+
+    // An inline-message edit answers `true`. This method never issues
+    // one, but the shape must not read as a failure.
+    const inlineEdit = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), []));
+    await expect(inlineEdit.editMessageText(7, 42, "done")).resolves.toBe(true);
 
     const notEdited = createTelegramClient(
       "TOKEN",
