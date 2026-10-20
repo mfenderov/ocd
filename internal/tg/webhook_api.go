@@ -27,9 +27,11 @@ func setWebhook(ctx context.Context, target, secret string) error {
 		return err
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"url":             target,
-		"secret_token":    secret,
-		"allowed_updates": []string{"message"},
+		"url":          target,
+		"secret_token": secret,
+		// Both update types: Telegram delivers nothing else. Without
+		// callback_query the inline buttons' taps never arrive.
+		"allowed_updates": []string{"message", "callback_query"},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		apiBase()+"/bot"+token+"/setWebhook", bytes.NewReader(payload))

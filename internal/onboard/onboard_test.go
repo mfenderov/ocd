@@ -245,6 +245,24 @@ func TestLoadEnvFile(t *testing.T) {
 	}
 }
 
+// systemd strips single quotes from an EnvironmentFile= value, so the Go
+// reader must strip them too: otherwise the daemon reads a token with
+// the quotes still glued to it and every request is rejected.
+func TestLoadEnvFileStripsSingleQuotes(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "env")
+	if err := os.WriteFile(p, []byte("OCD_TG_TOKEN='123:abc'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vals, err := onboard.LoadEnvFile(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if vals["OCD_TG_TOKEN"] != "123:abc" {
+		t.Fatalf("single quotes must be stripped, got %q", vals["OCD_TG_TOKEN"])
+	}
+}
+
 func TestApplyEnvDefaultsSkipsPresent(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "env")

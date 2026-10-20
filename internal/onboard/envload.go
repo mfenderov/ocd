@@ -18,6 +18,7 @@ func homeDir() string {
 }
 
 // LoadEnvFile parses a KEY="value" env file (comments and blanks ignored).
+// Both quote styles are stripped, as systemd's EnvironmentFile= does.
 // Only OCD_* keys are returned; anything else is left for the shell.
 func LoadEnvFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
@@ -39,9 +40,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 			continue
 		}
 		val = strings.TrimSpace(val)
-		if unq, err := strconv.Unquote(val); err == nil {
-			val = unq
-		}
+		val = unquoteEnvValue(val)
 		// $HOME is expanded here because not every consumer of this file
 		// expands it: systemd's EnvironmentFile= takes values literally,
 		// which once pointed the daemon at a literal "$HOME" directory.
@@ -53,6 +52,21 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("onboard: read env: %w", err)
 	}
 	return out, nil
+}
+
+// unquoteEnvValue removes one layer of quoting from an env file value.
+// systemd's EnvironmentFile= takes both quote styles and strips them, so
+// the Go reader must do the same: a value written KEY='secret' otherwise
+// arrives with its quotes still glued on. A value in neither quoted form
+// stays as it is.
+func unquoteEnvValue(val string) string {
+	if unq, err := strconv.Unquote(val); err == nil {
+		return unq
+	}
+	if len(val) >= 2 && strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+		return val[1 : len(val)-1]
+	}
+	return val
 }
 
 func validEnvKey(key string) bool {
