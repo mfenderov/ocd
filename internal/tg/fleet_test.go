@@ -36,6 +36,9 @@ func stubFleetWorker(t *testing.T, backends string) *httptest.Server {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/backends/home/revoke":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"home","status":"revoked","epoch":2}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/backends/mac/revoke":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"mac","status":"tombstoned","epoch":3,"box_status":502,"detail":"box_revoke_failed: revoke failed"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/revoke-all":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"results":[{"id":"home","status":"revoked","epoch":2},{"id":"mac","status":"tombstoned","epoch":3}]}`))
@@ -159,6 +162,25 @@ func TestFleetRevokeConfirmed(t *testing.T) {
 	}
 	if !strings.Contains(got, "home") || !strings.Contains(got, "revoked") {
 		t.Fatalf("must report the revocation, got:\n%s", got)
+	}
+}
+
+// A box that answered and failed its own revoke is not offline: it is
+// blocked, and the reason is the box's. Saying "offline" sends the
+// owner after the network instead of after the failed rotation.
+func TestFleetRevokeTombstonedKeepsTheRealReason(t *testing.T) {
+	srv := stubFleetWorker(t, fleetBackendsTmpl)
+	defer srv.Close()
+	fleetEnv(t, srv)
+	got, err := tg.FleetRevokeText(context.Background(), "mac", true)
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if strings.Contains(got, "offline") {
+		t.Fatalf("a box that answered is not offline, got:\n%s", got)
+	}
+	if !strings.Contains(got, "box_revoke_failed") || !strings.Contains(got, "revoke failed") {
+		t.Fatalf("must keep the box's own reason, got:\n%s", got)
 	}
 }
 

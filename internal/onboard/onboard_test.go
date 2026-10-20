@@ -421,6 +421,39 @@ func TestResolveEnrollWithoutCodeNeedsATerminal(t *testing.T) {
 	}
 }
 
+// Whatever the bot sends must be what the prompt accepts: the
+// paste-ready command carries the code as its last field.
+func TestAskEnrollCodeAcceptsThePasteReadyCommand(t *testing.T) {
+	old := onboard.Stdin
+	onboard.Stdin = strings.NewReader(onboard.EnrollCommand("mac", "code-abc") + "\n")
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	var sb strings.Builder
+	code, err := onboard.AskEnrollCode(&sb, "mac")
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if code != "code-abc" {
+		t.Fatalf("want the code out of the pasted command, got %q", code)
+	}
+}
+
+// The pasted code may arrive quoted or wrapped in backticks.
+func TestAskEnrollCodeStripsQuotes(t *testing.T) {
+	old := onboard.Stdin
+	onboard.Stdin = strings.NewReader("`code-abc`\n")
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	var sb strings.Builder
+	code, err := onboard.AskEnrollCode(&sb, "mac")
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if code != "code-abc" {
+		t.Fatalf("want the code without the quotes, got %q", code)
+	}
+}
+
 // The pasted code is the one the bot issues; the command printed tells
 // the user which bot command to send.
 func TestAskEnrollCodePrintsCommandAndReadsThePaste(t *testing.T) {

@@ -18,8 +18,8 @@ import (
 type Options struct {
 	// BoxID is the name of this box when the caller already knows it.
 	BoxID string
-	// Code is the one-time enroll code when the caller already has it.
-	Code           string
+	// EnrollCode is the one-time enroll code when the caller already has it.
+	EnrollCode     string
 	WorkerURL      string
 	CFToken        string
 	SkipTunnel     bool

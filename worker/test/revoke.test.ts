@@ -305,7 +305,24 @@ describe("revoke single box (unit)", () => {
     const fetcher = (async () => new Response("error code: 1016", { status: 530 })) as typeof fetch;
     const result = await revokeOneBox("rev-530", store, { sealKey: SEAL_KEY, fetcher });
     expect(result).toMatchObject({ id: "rev-530", status: "tombstoned", epoch: 3, box_status: 530 });
+    expect(result.detail).toContain("box_unreachable");
     expect(store.getTombstone("rev-530")).toEqual({ box_id: "rev-530", epoch: 3 });
+  });
+
+  // The box's own revoke handler answers 502 when the rotation fails:
+  // the box ran, it did not go away. It must still be blocked (its
+  // sessions may be alive) but it must not be reported as unreachable,
+  // and its own reason must survive.
+  it("a box that answers 502 is a failed revoke, not an unreachable box", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-502", 3);
+    const fetcher = (async () => new Response("revoke failed\n", { status: 502 })) as typeof fetch;
+    const result = await revokeOneBox("rev-502", store, { sealKey: SEAL_KEY, fetcher });
+    expect(result).toMatchObject({ id: "rev-502", status: "tombstoned", epoch: 3, box_status: 502 });
+    expect(result.detail).toContain("box_revoke_failed");
+    expect(result.detail).toContain("revoke failed");
+    expect(result.detail).not.toContain("box_unreachable");
+    expect(store.getTombstone("rev-502")).toEqual({ box_id: "rev-502", epoch: 3 });
   });
 
   it("missing seal key or admin token is misconfigured without fetching", async () => {

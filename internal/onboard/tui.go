@@ -14,7 +14,9 @@ import (
 
 // IsTTY reports whether a terminal can prompt. The TUI runs only then;
 // pipes and CI take the plain path instead of hanging. It reads the same
-// source the prompts read, so whoever replaces Stdin controls both.
+// source the code paste reads, so whoever replaces Stdin controls both.
+// The huh forms read os.Stdin directly, so they are only reached when
+// this says yes.
 func IsTTY() bool {
 	f, ok := Stdin.(*os.File)
 	if !ok {

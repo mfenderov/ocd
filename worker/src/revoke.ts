@@ -82,6 +82,19 @@ async function parseRevokeEpoch(res: Response): Promise<number | null> {
   return Number.isInteger(epoch) && (epoch as number) >= 0 ? (epoch as number) : null;
 }
 
+// Cloudflare's own error statuses: the edge never reached the origin.
+// 530 carries "error 1016" (no DNS record) and "error 1033" (tunnel not
+// connected); 52x are the other origin failures. A 5xx outside this set
+// came from the box: the box answered and refused.
+const EDGE_ERROR_STATUSES = new Set([520, 521, 522, 523, 524, 525, 526, 527, 530]);
+
+// isEdgeError tells an unreachable box from a box that answered. The
+// status covers the tunnel errors; the body covers the edge's plain-text
+// "error code: NNN" pages, which arrive on statuses the box also uses.
+function isEdgeError(status: number, body: string): boolean {
+  return EDGE_ERROR_STATUSES.has(status) || /error code: \d+/.test(body);
+}
+
 export async function revokeOneBox(
   boxId: string,
   store: RevokeStore,
@@ -154,18 +167,22 @@ export async function revokeOneBox(
     raiseTombstone(store, boxId, Math.max(box.epoch, epoch - 1));
     return { id: boxId, status: "revoked", epoch };
   }
-  // A 5xx means the origin never ran: Cloudflare answers 530 when the
-  // tunnel is down and 502/503/504 when the origin is gone. The box is
-  // unreachable, not refusing — tombstone it like a timeout, or a box
-  // behind a dead tunnel stays revocable-but-alive forever.
+  // A 5xx means the revoke did not take effect, so the box must be
+  // blocked either way: its sessions may still be alive. What differs is
+  // who answered. The edge could not reach the origin (520-527, 530:
+  // "error 1016" no DNS, "error 1033" tunnel not connected) — the box is
+  // gone. Any other 5xx came from the box itself: it ran and failed the
+  // rotation, so it is still there and it still needs fixing.
   if (boxRes.status >= 500) {
     raiseTombstone(store, boxId, box.epoch);
+    const body = (await boxRes.text()).slice(0, 256);
+    const reason = isEdgeError(boxRes.status, body) ? "box_unreachable" : "box_revoke_failed";
     return {
       id: boxId,
       status: "tombstoned",
       epoch: box.epoch,
       box_status: boxRes.status,
-      detail: "box_unreachable",
+      detail: body ? `${reason}: ${body}` : reason,
     };
   }
   // Box refused (e.g. 400/401/409): rotation did not happen, so no

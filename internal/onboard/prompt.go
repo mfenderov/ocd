@@ -17,6 +17,13 @@ func TelegramCommand(boxID string) string {
 	return "/enrollcode " + boxID
 }
 
+// EnrollCommand is the paste-ready command that enrolls a box with the
+// code the bot issued: `ocd onboard <box> <code>`. The bot sends it and
+// the prompt accepts it pasted, so both sides share one shape.
+func EnrollCommand(boxID, code string) string {
+	return "ocd onboard " + boxID + " " + code
+}
+
 // ResolveEnroll resolves the two things a run needs: the name of this box
 // and the one-time enroll code. A name the caller already has is used as
 // is; otherwise it is asked — it is the only question onboarding asks. A
@@ -50,20 +57,34 @@ func ResolveEnroll(w io.Writer, givenBox, givenCode string) (boxID, code string,
 }
 
 // AskEnrollCode prints the Telegram command that issues the enroll code
-// for boxID and returns the code the user pastes back.
+// for boxID and returns the code the user pastes back. The paste may be
+// the bare code or the whole command the bot sends: the code is the
+// last field either way.
 func AskEnrollCode(w io.Writer, boxID string) (string, error) {
 	_, _ = fmt.Fprintf(w, "\nSend this to your Telegram bot:\n\n  %s\n\n", TelegramCommand(boxID))
-	_, _ = fmt.Fprintln(w, "Then paste the code it replies with:")
+	_, _ = fmt.Fprintln(w, "Then paste what it replies with (the code, or the whole line):")
 	reader := bufio.NewReader(Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil && strings.TrimSpace(line) == "" {
 		return "", fmt.Errorf("onboard: no code pasted")
 	}
-	code := strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "`\"'"))
+	code := pastedCode(line)
 	if code == "" {
 		return "", fmt.Errorf("onboard: no code pasted")
 	}
 	return code, nil
+}
+
+// pastedCode takes the code out of a pasted line: the bare code, or the
+// last field of the paste-ready command the bot sends. Quotes and
+// backticks around the code are decoration.
+func pastedCode(pasted string) string {
+	fields := strings.Fields(pasted)
+	if len(fields) == 0 {
+		return ""
+	}
+	last := fields[len(fields)-1]
+	return strings.Trim(strings.TrimSpace(last), "`\"'")
 }
 
 // AskBoxName asks for the name of this machine. It is the only question

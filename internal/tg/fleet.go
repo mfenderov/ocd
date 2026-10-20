@@ -103,7 +103,11 @@ func FleetRevokeText(ctx context.Context, box string, confirmed bool) (string, e
 	case "revoked":
 		return fmt.Sprintf("💀 <code>%s</code> revoked at epoch %d.", esc(box), res.Epoch), nil
 	case "tombstoned":
-		return fmt.Sprintf("⛔ <code>%s</code> offline — blocked at epoch %d until it returns.", esc(box), res.Epoch), nil
+		msg := fmt.Sprintf("⛔ <code>%s</code> blocked at epoch %d — no new links until it returns.", esc(box), res.Epoch)
+		if res.Detail != "" {
+			msg += "\n<i>" + esc(res.Detail) + "</i>"
+		}
+		return msg, nil
 	default:
 		return fmt.Sprintf("⚠️ revoke: %s", esc(res.Status)), nil
 	}
@@ -134,16 +138,20 @@ func FleetNukeText(ctx context.Context, confirmed bool) (string, error) {
 		case "tombstoned":
 			blocked++
 		}
-		_, _ = fmt.Fprintf(&sb, "• <code>%s</code>: %s\n", esc(r.ID), esc(r.Status))
+		line := fmt.Sprintf("• <code>%s</code>: %s", esc(r.ID), esc(r.Status))
+		if r.Detail != "" {
+			line += " — " + esc(r.Detail)
+		}
+		_, _ = fmt.Fprintln(&sb, line)
 	}
-	return fmt.Sprintf("💀 nuke: %d revoked, %d offline-blocked\n%s", revoked, blocked, sb.String()), nil
+	return fmt.Sprintf("💀 nuke: %d revoked, %d blocked\n%s", revoked, blocked, sb.String()), nil
 }
 
 // FleetEnrollCodeText issues a single-use enroll code for a new box.
 // The code is displayed in the owner-only chat (that display IS the
-// approval); the new box types it into `ocd onboard --enroll-code` and is
-// enrolled with no approve tap. Default hostname follows the oc-<box>
-// tunnel convention; pass an explicit one to override.
+// approval); the new box pastes the command this returns and is enrolled
+// with no approve tap. Default hostname follows the oc-<box> tunnel
+// convention; pass an explicit one to override.
 func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, error) {
 	if os.Getenv("OCD_FLEET_TOKEN") == "" {
 		return fleetOff, nil
@@ -176,8 +184,8 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 	if !trusted {
 		return fmt.Sprintf("⚠️ Could not issue a code for <code>%s</code>: this bot's fleet token lacks the <code>enroll</code> scope.\nRe-mint it with scopes link, revoke, audit, enroll.", esc(box)), nil
 	}
-	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n\n<code>ocd onboard %s %s</code>\n\nPaste it into a terminal on that machine — it enrolls itself.",
-		esc(box), esc(box), esc(code)), nil
+	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n\n<code>%s</code>\n\nPaste it into a terminal on that machine — it enrolls itself.",
+		esc(box), esc(onboard.EnrollCommand(box, code))), nil
 }
 
 // FleetAuditText renders recent fleet audit rows, optionally for one box.

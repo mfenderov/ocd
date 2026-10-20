@@ -18,7 +18,7 @@ func onboardCmd() *cobra.Command {
 	var workerURL, cfToken string
 	var skipTunnel, installService, force bool
 	cmd := &cobra.Command{
-		Use:   "onboard <name> [code]",
+		Use:   "onboard <box> [code]",
 		Short: "Enroll this box in the fleet",
 		// The box name and the enroll code are the only arguments: they
 		// are what the bot hands out, so they can be pasted as they are.
@@ -38,7 +38,7 @@ func onboardCmd() *cobra.Command {
 				opts.BoxID = args[0]
 			}
 			if len(args) > 1 {
-				opts.Code = args[1]
+				opts.EnrollCode = args[1]
 			}
 			return runOnboard(cmd.OutOrStdout(), opts)
 		},
@@ -67,7 +67,7 @@ func runOnboard(w interface {
 		// is already in the fleet, `ocd` is a status command.
 		onboard.RenderIdentity(w, id)
 		if !onboard.IsTTY() {
-			return fmt.Errorf("already onboarded as %q — re-onboard interactively, or pass --force", id.BoxID)
+			return fmt.Errorf("already onboarded as %q — re-onboard with `ocd onboard --force`", id.BoxID)
 		}
 		again, err := onboard.AskReonboard(id.BoxID)
 		if err != nil {
@@ -77,7 +77,7 @@ func runOnboard(w interface {
 			return nil
 		}
 	}
-	boxID, code, err := onboard.ResolveEnroll(w, opts.BoxID, opts.Code)
+	boxID, code, err := onboard.ResolveEnroll(w, opts.BoxID, opts.EnrollCode)
 	if err != nil {
 		return err
 	}

@@ -60,6 +60,32 @@ func TestOnboardWithoutANameSaysWhatIsMissing(t *testing.T) {
 	}
 }
 
+// The advice must name a command that accepts --force: the bare command
+// has no flags.
+func TestAlreadyOnboardedErrorNamesACommandWithForce(t *testing.T) {
+	noTerminal(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(home+"/.ocd", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(home+"/.ocd/env", []byte("OCD_BOX_ID=\"home\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root := cli.Root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"onboard"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("want an error: re-onboarding needs a terminal")
+	}
+	if !strings.Contains(err.Error(), "ocd onboard --force") {
+		t.Fatalf("want the error to name a command that accepts --force, got %v", err)
+	}
+}
+
 // A box that is already in the fleet is identified by name, and the URLs
 // it serves come from the env file, not from the box name.
 func TestBareOcdReportsTheIdentityOfAnOnboardedBox(t *testing.T) {
