@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.18.0 - 2026-10-20
+#### Features
+- onboarding takes the name and the code as arguments - (15547e5) - mfenderov
+#### Documentation
+- architecture map (components, flows, schema, secrets) - (1aa3fb9) - mfenderov
+
+- - -
+
 ## v0.17.4 - 2026-10-20
 #### Bug Fixes
 - env file paths must be absolute, and repair reads real hostnames - (1895c01) - mfenderov
