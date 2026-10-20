@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.18.1 - 2026-10-20
+#### Bug Fixes
+- (**worker**) a box behind a dead tunnel is unreachable, not refusing - (aabeb9b) - mfenderov
+
+- - -
+
 ## v0.18.0 - 2026-10-20
 #### Features
 - onboarding takes the name and the code as arguments - (15547e5) - mfenderov
