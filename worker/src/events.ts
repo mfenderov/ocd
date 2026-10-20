@@ -87,9 +87,10 @@ export interface EventStore extends LinkStore {
 }
 
 // The store the owed-edit sweep reads: the links whose message still
-// owes an edit.
+// owes an edit. The limit belongs in the query: the sweep asks for the
+// links it can edit now, not the whole owed set.
 export interface OwedEditStore extends LinkStore {
-  owedLinks(): LinkRow[];
+  owedLinks(limit: number): LinkRow[];
 }
 
 // What the ingest needs from the outside: the client that carries the
@@ -347,7 +348,7 @@ export async function sweepOwedEdits(
     // No Telegram client: the edits stay owed.
     return;
   }
-  for (const link of store.owedLinks().slice(0, MAX_OWED_EDITS)) {
+  for (const link of store.owedLinks(MAX_OWED_EDITS)) {
     await editLink(link, owedText(link), store, telegram);
   }
 }

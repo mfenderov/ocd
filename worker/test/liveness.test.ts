@@ -1,5 +1,6 @@
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { boxState } from "../src/botbuttons";
 import { BOX_API, BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
 import { sealAdminToken } from "../src/enroll";
 import { sweepLiveness, type LivenessStore } from "../src/liveness";
@@ -157,6 +158,78 @@ describe("the liveness sweep", () => {
     // A box that is talking is never probed.
     expect(probes).toEqual([]);
   });
+
+  // A box the owner revoked on purpose is retired, not offline: the
+  // board calls it tombstoned and the mint gate refuses it. Reporting
+  // it as offline would put two views of the same fleet against each
+  // other.
+  it("never reports a box the owner retired", async () => {
+    const store = new FakeStore();
+    store.boxes.push({ ...box("home", NOW - 200), tombstoned: true });
+    const telegram = new RecordingTelegram();
+    const probes: string[] = [];
+
+    await sweepLiveness(store, {
+      telegram,
+      ownerChatId: OWNER_CHAT,
+      probePresence: async (boxId) => {
+        probes.push(boxId);
+        return false;
+      },
+      nowSec: () => NOW,
+      offlineAfterSec: 90,
+    });
+
+    expect(probes).toEqual([]);
+    expect(telegram.messages).toEqual([]);
+    // No mark either: a later re-enrolment inherits no stale notice.
+    expect(store.isSuspectedOffline("home")).toBe(false);
+  });
+
+  // The board and the sweep must call the same box ok and offline at
+  // the same second.
+  it("agrees with the board at the threshold", async () => {
+    const store = new FakeStore();
+    store.boxes.push(box("home", NOW - 90));
+    const telegram = new RecordingTelegram();
+    const probes: string[] = [];
+
+    await sweepLiveness(store, {
+      telegram,
+      ownerChatId: OWNER_CHAT,
+      probePresence: async (boxId) => {
+        probes.push(boxId);
+        return false;
+      },
+      nowSec: () => NOW,
+      offlineAfterSec: 90,
+    });
+
+    expect(boxState(store.boxes[0], NOW)).toBe("ok");
+    expect(probes).toEqual([]);
+    expect(telegram.messages).toEqual([]);
+  });
+
+  // A misconfiguration is the brain's problem, not the box's: the box
+  // must not be called dead when the brain could not even ask.
+  it("does not call a box dead when the brain could not ask", async () => {
+    const store = new FakeStore();
+    store.boxes.push(box("home", NOW - 200));
+    const telegram = new RecordingTelegram();
+
+    await sweepLiveness(store, {
+      telegram,
+      ownerChatId: OWNER_CHAT,
+      probePresence: async () => {
+        throw new Error("the presence probe cannot run (misconfigured)");
+      },
+      nowSec: () => NOW,
+      offlineAfterSec: 90,
+    });
+
+    expect(telegram.messages).toEqual([]);
+    expect(store.isSuspectedOffline("home")).toBe(false);
+  });
 });
 
 // The box the alarm finds: it stopped heartbeating 200 seconds ago.
@@ -241,6 +314,110 @@ describe("the alarm", () => {
       // The edited link is marked: its message says it now.
       expect(instance.linkRow("tok-owed")?.edited).toBe(1);
     });
+  });
+
+  // The prune is the cheapest work and the one that must never be
+  // skipped, so it runs first: a link past the prune window is dropped
+  // before the sweep can edit it. (Its tap link is dead to the box by
+  // then too — the box prunes its own link tokens on the same
+  // schedule.)
+  it("prunes before it edits", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-prune-order"));
+    const telegram = new RecordingTelegram();
+
+    await stub.fetch(new Request("https://do/backends"));
+    await inState(stub, async (instance: FleetState) => {
+      instance.putLink(
+        link({ token: "tok-ancient", state: "used", used_at: NOW - 90000, created_at: NOW - 90000 }),
+      );
+      instance.alarmDeps = {
+        telegram,
+        ownerChatId: OWNER_CHAT,
+        probePresence: async () => false,
+        nowSec: () => NOW,
+      };
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    // The prune came first: the old link is gone and was never edited.
+    expect(telegram.edits).toEqual([]);
+    await inState(stub, async (instance: FleetState) => {
+      expect(instance.linkRow("tok-ancient")).toBeUndefined();
+    });
+  });
+
+  // The owed links are edited oldest first, and at most fifty of them
+  // per tick: the alarm must stay short, and a link whose edit fails
+  // for good must not hold the queue.
+  it("edits the oldest owed links first, and at most fifty of them", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-owed-order"));
+    const telegram = new RecordingTelegram();
+
+    await stub.fetch(new Request("https://do/backends"));
+    await inState(stub, async (instance: FleetState) => {
+      // Three named links, oldest first, then a bulk of newer ones.
+      instance.putLink(link({ token: "tok-old", message_id: 1, state: "used", used_at: NOW - 300, created_at: NOW - 300 }));
+      instance.putLink(link({ token: "tok-mid", message_id: 2, state: "used", used_at: NOW - 250, created_at: NOW - 250 }));
+      instance.putLink(link({ token: "tok-new", message_id: 3, state: "used", used_at: NOW - 200, created_at: NOW - 200 }));
+      for (let i = 0; i < 60; i++) {
+        instance.putLink(
+          link({ token: `tok-bulk-${i}`, message_id: 100 + i, state: "expired", created_at: NOW - 100 + i }),
+        );
+      }
+      instance.alarmDeps = {
+        telegram,
+        ownerChatId: OWNER_CHAT,
+        probePresence: async () => false,
+        nowSec: () => NOW,
+      };
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    // Fifty edits at most, and the oldest owed links first.
+    expect(telegram.edits).toHaveLength(50);
+    expect(telegram.edits[0].messageId).toBe(1);
+    expect(telegram.edits[1].messageId).toBe(2);
+    expect(telegram.edits[2].messageId).toBe(3);
+    await inState(stub, async (instance: FleetState) => {
+      // The oldest owed link was edited and marked.
+      expect(instance.linkRow("tok-old")?.edited).toBe(1);
+      // The link past the cap waits for the next tick.
+      expect(instance.linkRow("tok-bulk-47")?.edited).toBe(0);
+    });
+  });
+
+  // A brain that cannot talk to the owner says so: silence would hide
+  // a misconfigured brain.
+  it("says so when the brain cannot talk to the owner", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-quiet"));
+    const errors: string[] = [];
+
+    await stub.fetch(new Request("https://do/backends"));
+    await inState(stub, async (instance: FleetState) => {
+      instance.alarmDeps = {
+        // No Telegram client: the brain has nobody to tell.
+        probePresence: async () => false,
+        nowSec: () => NOW,
+      };
+      const globals = globalThis as unknown as Record<string, unknown>;
+      globals["__prevError"] = console.error;
+      console.error = (...args: unknown[]) => {
+        errors.push(String(args[0]));
+      };
+    });
+    try {
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+    } finally {
+      await inState(stub, async () => {
+        const globals = globalThis as unknown as Record<string, unknown>;
+        console.error = globals["__prevError"] as typeof console.error;
+        delete globals["__prevError"];
+      });
+    }
+
+    expect(errors.join("\n")).toContain("the liveness sweep stays quiet");
   });
 });
 

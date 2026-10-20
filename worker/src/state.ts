@@ -389,9 +389,20 @@ export class FleetState implements DurableObject {
   // The presence probe: did the box answer? The probe is the brain's own
   // request to the box, so a box whose heartbeat is broken still reads
   // as alive.
+  //
+  // A probe that cannot run is not a dead box. A misconfigured relay (no
+  // seal key, no admin token bound) or a box the brain does not know
+  // throws here, so the sweep leaves the box unjudged instead of
+  // reporting a box the brain never asked.
   private async probePresence(boxId: string): Promise<boolean> {
     const relay = await relayToBox(this, boxId, BOX_API.presence, { sealKey: this.sealKey });
-    return relay.answered;
+    if (relay.answered) {
+      return true;
+    }
+    if (relay.reason === "misconfigured" || relay.reason === "unknown_box") {
+      throw new Error(`the presence probe cannot run (${relay.reason})`);
+    }
+    return false;
   }
 
   // The relay's answer: the box's own body, or the reason the box was
@@ -813,11 +824,16 @@ export class FleetState implements DurableObject {
   }
 
   // The links whose message still owes an edit: the link is spent or
-  // dead and the edit did not land. The alarm drives them.
-  owedLinks(): LinkRow[] {
+  // dead and the edit did not land. The alarm drives them, oldest
+  // first: a link that has waited longest for its edit gets it first.
+  // The limit is in the query: the alarm must not load the whole owed
+  // set, and the links behind it must not wait behind a link whose edit
+  // fails for good.
+  owedLinks(limit: number): LinkRow[] {
     this.ensureSchema();
     const cursor = this.state.storage.sql.exec(
-      "SELECT token, box_id, chat_id, message_id, state, created_at, used_at, used_ip, used_ua, edited FROM links WHERE edited = 0 AND state IN ('used', 'expired')",
+      "SELECT token, box_id, chat_id, message_id, state, created_at, used_at, used_ip, used_ua, edited FROM links WHERE edited = 0 AND state IN ('used', 'expired') ORDER BY created_at, token LIMIT ?",
+      limit,
     );
     return cursor.toArray() as unknown as LinkRow[];
   }
@@ -847,19 +863,33 @@ export class FleetState implements DurableObject {
 
   // The alarm's work.
   private async runAlarmWork(deps: AlarmDeps): Promise<void> {
-    // The owed edits first: a link whose message still says "tap me" is
-    // the most visible thing the brain owes the owner.
-    await sweepOwedEdits(this, { telegram: deps.telegram });
-    if (deps.telegram && deps.ownerChatId !== undefined) {
-      await sweepLiveness(this.livenessStore(), {
-        telegram: deps.telegram,
-        ownerChatId: deps.ownerChatId,
-        probePresence: deps.probePresence,
-        nowSec: deps.nowSec,
-        offlineAfterSec: OFFLINE_AFTER_SEC,
-      });
-    }
+    // The prune first: it is the cheapest work and the one that must
+    // not be skipped. The tables grow without it, and a later step that
+    // throws must not keep them from shrinking.
     this.pruneOldRows(deps.nowSec(), PRUNE_AFTER_SEC);
+    // The owed edits: a link whose message still says "tap me" is the
+    // most visible thing the brain owes the owner.
+    await sweepOwedEdits(this, { telegram: deps.telegram });
+    await this.runLivenessSweep(deps);
+  }
+
+  // The liveness sweep: the brain probes the boxes that went quiet.
+  //
+  // A brain that cannot talk to the owner (no Telegram token, no owner
+  // chat) says so out loud and judges nothing: silence would hide a
+  // misconfigured brain.
+  private async runLivenessSweep(deps: AlarmDeps): Promise<void> {
+    if (!deps.telegram || deps.ownerChatId === undefined) {
+      console.error("alarm: no Telegram client or owner chat — the liveness sweep stays quiet");
+      return;
+    }
+    await sweepLiveness(this.livenessStore(), {
+      telegram: deps.telegram,
+      ownerChatId: deps.ownerChatId,
+      probePresence: deps.probePresence,
+      nowSec: deps.nowSec,
+      offlineAfterSec: OFFLINE_AFTER_SEC,
+    });
   }
 
   // The store the liveness sweep reads and writes.

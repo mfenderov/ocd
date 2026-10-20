@@ -3,7 +3,7 @@ import type { BoxPublic } from "./state";
 
 // The liveness sweep: the brain notices a box that stopped talking.
 //
-// Three rules hold:
+// Four rules hold:
 //
 //   1. The sweep never guesses. A box that heartbeated recently is
 //      silent, and a box that went quiet is probed directly before the
@@ -11,10 +11,13 @@ import type { BoxPublic } from "./state";
 //      the box, so a broken heartbeat does not make the owner think the
 //      machine is gone.
 //
-//   2. One notice per outage. The owner is told once that a box went
+//   2. A retired box is not offline. A box the owner revoked on purpose
+//      is tombstoned, and the sweep leaves it alone.
+//
+//   3. One notice per outage. The owner is told once that a box went
 //      dark, and never again while it stays dark.
 //
-//   3. One recovery per outage. When the box answers again — by
+//   4. One recovery per outage. When the box answers again — by
 //      heartbeat or by the probe — the owner is told once that it is
 //      back.
 //
@@ -47,22 +50,44 @@ export interface LivenessDeps {
   // The chat the notice goes to: the owner's, and only the owner's. The
   // brain talks to one chat, so the sweep names it here.
   ownerChatId: number;
-  probePresence: (boxId: string) => Promise<boolean>;   // true = the box answered
+  // The probe: did the box answer? true = the box answered, false = it
+  // did not. The probe throws when the brain could not ask the box at
+  // all (a misconfigured relay): the sweep then leaves the box unjudged
+  // instead of reporting a box it never asked.
+  probePresence: (boxId: string) => Promise<boolean>;
   nowSec: () => number;
   offlineAfterSec: number;
 }
+
+// What the probe says: the box answered, the box did not answer, or the
+// brain could not ask and must not judge the box.
+type ProbeVerdict = "answered" | "silent" | "unjudged";
 
 // The sweep: every box, one pass.
 export async function sweepLiveness(store: LivenessStore, deps: LivenessDeps): Promise<void> {
   const now = deps.nowSec();
   for (const box of store.listBoxes()) {
+    if (box.tombstoned) {
+      // A box the owner revoked on purpose is retired, not offline: the
+      // board calls it tombstoned, and the mint gate refuses it. It must
+      // not be probed and must not be reported — and it leaves no mark
+      // behind, so a later re-enrolment inherits no stale notice.
+      store.clearSuspectedOffline(box.id);
+      continue;
+    }
     if (now - box.last_seen <= deps.offlineAfterSec) {
       // The box is talking again: the owner was told it went dark, so
       // the owner is told it is back.
       await announceRecovery(store, deps, box.id);
       continue;
     }
-    if (await probe(deps, box.id)) {
+    const verdict = await probe(deps, box.id);
+    if (verdict === "unjudged") {
+      // The brain could not ask. That is the brain's problem, not the
+      // box's: the box stays unjudged.
+      continue;
+    }
+    if (verdict === "answered") {
       // The box answered the probe: it is alive, even though its
       // heartbeat stopped.
       await announceRecovery(store, deps, box.id);
@@ -72,15 +97,15 @@ export async function sweepLiveness(store: LivenessStore, deps: LivenessDeps): P
   }
 }
 
-// The probe: did the box answer? A probe that fails is a box that did
-// not answer — the relay catches its own failures, and a throw here
-// means the same thing.
-async function probe(deps: LivenessDeps, boxId: string): Promise<boolean> {
+// The probe: what the box says when the brain asks. A probe that throws
+// means the brain could not ask at all: that is a misconfiguration, and
+// a misconfiguration must never read as a dead box.
+async function probe(deps: LivenessDeps, boxId: string): Promise<ProbeVerdict> {
   try {
-    return await deps.probePresence(boxId);
+    return (await deps.probePresence(boxId)) ? "answered" : "silent";
   } catch (err) {
-    console.error(`liveness: the probe failed (${errorText(err)})`);
-    return false;
+    console.error(`liveness: the probe for "${boxId}" failed (${errorText(err)})`);
+    return "unjudged";
   }
 }
 

@@ -39,14 +39,14 @@ const LABEL_MAX = 32;
 
 // The state of one box: tombstoned wins over staleness, then a box
 // quieter than the offline threshold reads offline (the Go's
-// fleet.BoxState). The threshold itself lives in liveness.ts: the
-// board's label, the fleet's text and the brain's liveness sweep must
-// agree on a box's state.
+// fleet.BoxState — offline only *exceeds* the threshold). The threshold
+// itself lives in liveness.ts: the board's label, the fleet's text and
+// the brain's liveness sweep must agree on a box's state.
 export function boxState(box: BoxPublic, now: number): string {
   if (box.tombstoned) {
     return "tombstoned";
   }
-  if (now - box.last_seen < OFFLINE_AFTER_SEC) {
+  if (now - box.last_seen <= OFFLINE_AFTER_SEC) {
     return "ok";
   }
   return "offline";
