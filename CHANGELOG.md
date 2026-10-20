@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.18.2 - 2026-10-20
+#### Bug Fixes
+- a box that answers is not offline, and the bot's paste must be accepted - (2aceab7) - mfenderov
+
+- - -
+
 ## v0.18.1 - 2026-10-20
 #### Bug Fixes
 - (**worker**) a box behind a dead tunnel is unreachable, not refusing - (aabeb9b) - mfenderov
