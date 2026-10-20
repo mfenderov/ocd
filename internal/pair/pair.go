@@ -55,24 +55,22 @@ func who(r *http.Request) string {
 // box's audit log, and the tapper never sees it. A box with no brain
 // configured pushes nothing.
 func pushLinkUsed(st *store.Store, tok, device, ip, ua string) {
-	brainURL := os.Getenv("OCD_WORKER_URL")
-	boxID := os.Getenv("OCD_BOX_ID")
-	token := os.Getenv("OCD_HEARTBEAT_TOKEN")
-	if brainURL == "" || boxID == "" || token == "" {
+	cfg := boxagent.BrainConfigFromEnv()
+	if !cfg.Ready() {
 		return
 	}
 	go func() {
 		// The request context dies with the tap, so the push gets its own.
 		ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
 		defer cancel()
-		err := boxagent.PushEvents(ctx, &http.Client{}, brainURL, boxID, token, []boxagent.Event{{
+		err := boxagent.PushEvents(ctx, &http.Client{}, cfg.BrainURL, cfg.BoxID, cfg.Token, []boxagent.Event{{
 			Type:  "link-used",
 			Token: tok,
 			IP:    ip,
 			UA:    ua,
 		}})
 		if err != nil {
-			st.AuditUA("box:"+boxID, "push_failed", device, ip, err.Error(), ua)
+			st.AuditUA("box:"+cfg.BoxID, "push_failed", device, ip, err.Error(), ua)
 		}
 	}()
 }

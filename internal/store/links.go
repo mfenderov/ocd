@@ -68,6 +68,30 @@ func (s *Store) ConsumeLink(tok string) (string, bool) {
 	return device, true
 }
 
+// ExpiredLinkTokens returns the tokens that were never used and are past
+// their TTL: the brain has to learn that its links died. At most limit
+// tokens, oldest first. A token that was used is spent, not dead, so it
+// is never reported.
+func (s *Store) ExpiredLinkTokens(limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT token FROM link_tokens WHERE used_at IS NULL AND created_at<strftime('%s','now')-? ORDER BY created_at LIMIT ?`, int64(linkTTL.Seconds()), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tok string
+		if err := rows.Scan(&tok); err != nil {
+			return nil, err
+		}
+		out = append(out, tok)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Audit(actor, action, device, ip, result string) {
 	s.AuditUA(actor, action, device, ip, result, "")
 }

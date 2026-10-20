@@ -23,6 +23,16 @@ import (
 // heartbeatInterval paces box→Worker heartbeats (spec default).
 const defaultHeartbeatInterval = 30 * time.Second
 
+// linkSweepInterval paces the sweep that reports dead links to the brain.
+const linkSweepInterval = 30 * time.Second
+
+// linkSweepBatch is how many dead links one sweep reports.
+const linkSweepBatch = 50
+
+// linkSweepPushTimeout bounds one push of dead links to the brain. The
+// sweep must never hold the daemon hostage to a slow brain.
+const linkSweepPushTimeout = 3 * time.Second
+
 // heartbeatInterval resolves the box→Worker heartbeat pace.
 // OCD_HEARTBEAT_INTERVAL overrides the 30s spec default with a Go duration
 // string (e.g. "50ms"); it exists only so tests can tick fast, alongside
@@ -69,7 +79,62 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
 	mux.Handle("/_oc/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
 	mux.Handle("/_oc/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
+	mux.Handle("/_oc/status", boxadmin.RequireAdmin(st, token, boxadmin.StatusHandler(st, execService)))
 	_, _ = fmt.Fprintln(w, "admin on (/_oc/* behind Bearer auth)")
+}
+
+// startLinkSweep tells the brain which links died. Every interval it asks
+// the store for the tokens that were never used and are past their TTL,
+// and pushes one link-expired event per token. The brain owns the
+// messages, so the brain decides what to say about a dead link; the box
+// only reports that it died.
+//
+// The sweep runs in the background and never blocks the daemon. A box
+// with no brain configured sweeps nothing: the log line says so and no
+// goroutine starts.
+func startLinkSweep(ctx context.Context, w io.Writer, st *store.Store, interval time.Duration) {
+	cfg := boxagent.BrainConfigFromEnv()
+	if !cfg.Ready() {
+		_, _ = fmt.Fprintln(w, "link sweep off (no brain configured)")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "link sweep on (every "+interval.String()+")")
+	client := &http.Client{} // dedicated: PushEvents clones it, never shares or mutates
+	go func() {
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				sweepDeadLinks(ctx, w, st, cfg, client)
+			}
+		}
+	}()
+}
+
+// sweepDeadLinks pushes one link-expired event per link that was never
+// used and is past its TTL. The push is best effort: a brain outage is
+// logged, never fatal, and the next sweep reports the same tokens again.
+func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxagent.BrainConfig, client *http.Client) {
+	tokens, err := st.ExpiredLinkTokens(linkSweepBatch)
+	if err != nil {
+		_, _ = fmt.Fprintln(w, "link sweep failed:", err)
+		return
+	}
+	if len(tokens) == 0 {
+		return
+	}
+	events := make([]boxagent.Event, 0, len(tokens))
+	for _, tok := range tokens {
+		events = append(events, boxagent.Event{Type: "link-expired", Token: tok})
+	}
+	pushCtx, cancel := context.WithTimeout(ctx, linkSweepPushTimeout)
+	defer cancel()
+	if err := boxagent.PushEvents(pushCtx, client, cfg.BrainURL, cfg.BoxID, cfg.Token, events); err != nil {
+		_, _ = fmt.Fprintln(w, "link sweep push failed:", err)
+	}
 }
 
 // startHeartbeat POSTs one box heartbeat to the Worker every heartbeatInterval
@@ -164,6 +229,7 @@ func RunServe(w io.Writer) error {
 	})
 	mountAdmin(mux, w, st, execPair)
 	startHeartbeat(ctx, w, st)
+	startLinkSweep(ctx, w, st, linkSweepInterval)
 
 	if shouldManageTunnel() {
 		go runTunnel(ctx, w)
