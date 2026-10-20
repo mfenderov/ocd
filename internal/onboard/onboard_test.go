@@ -421,6 +421,23 @@ func TestResolveEnrollWithoutCodeNeedsATerminal(t *testing.T) {
 	}
 }
 
+// /dev/null is a character device but not a terminal: a form cannot
+// prompt there, so the plain path must be taken.
+func TestIsTTYIsFalseForDevNull(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("no %s on this platform: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	old := onboard.Stdin
+	onboard.Stdin = f
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	if onboard.IsTTY() {
+		t.Fatalf("%s is not a terminal", os.DevNull)
+	}
+}
+
 // Whatever the bot sends must be what the prompt accepts: the
 // paste-ready command carries the code as its last field.
 func TestAskEnrollCodeAcceptsThePasteReadyCommand(t *testing.T) {
