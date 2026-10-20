@@ -1,0 +1,361 @@
+import { env } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+import {
+  handleTelegramUpdate,
+  handleTelegramWebhook,
+  parseOwnerChatId,
+  resolveBrainConfig,
+  type BotCommand,
+  type BotStore,
+} from "../src/bot";
+import app, { type Env as EdgeEnv } from "../src/index";
+import type { TelegramClient } from "../src/telegram";
+import { inState } from "./helpers";
+
+// The router never talks to Telegram itself — the command layer owns the
+// replies. The client is here because the brain owns every message.
+const TELEGRAM: TelegramClient = {
+  sendMessage: async () => ({ message_id: 1 }),
+  editMessageText: async () => true,
+  answerCallbackQuery: async () => {},
+  setWebhook: async () => {},
+};
+
+// A store that remembers the updates it handled, like the DO's
+// seen_updates table: seenUpdate is true while the update is new.
+class MemoryStore implements BotStore {
+  readonly seen = new Set<number>();
+
+  seenUpdate(updateId: number): boolean {
+    return !this.seen.has(updateId);
+  }
+
+  markUpdateSeen(updateId: number): void {
+    this.seen.add(updateId);
+  }
+}
+
+function recordingDispatch(): { commands: BotCommand[]; dispatch: (cmd: BotCommand) => Promise<void> } {
+  const commands: BotCommand[] = [];
+  return {
+    commands,
+    dispatch: async (cmd) => {
+      commands.push(cmd);
+    },
+  };
+}
+
+describe("the gate", () => {
+  it("drops an update from a chat that is not the owner's", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 1, message: { text: "/fleet", chat: { id: 999, type: "private" } } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([]);
+  });
+
+  it("drops a group message even when the text is a command", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 2, message: { text: "/fleet", chat: { id: -1001234, type: "supergroup" } } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([]);
+  });
+
+  it("drops a tap that came from another chat", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      {
+        update_id: 3,
+        callback_query: { id: "cb-1", data: "link:mac", message: { chat: { id: 999 }, message_id: 12 } },
+      },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([]);
+  });
+
+  it("falls back to the message's chat when the tap carries none", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 4, message: { chat: { id: 7 } }, callback_query: { id: "cb-1", data: "link:mac" } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toHaveLength(1);
+  });
+
+  it("drops a tap that carries no chat at all", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 5, callback_query: { id: "cb-1", data: "link:mac" } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([]);
+  });
+});
+
+describe("the command", () => {
+  it("splits a typed command into its name and its arguments", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 10, message: { text: "/flink mac", chat: { id: 7, type: "private" } } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([{ name: "/flink", args: ["mac"], chatId: 7 }]);
+  });
+
+  it("ignores a message that is not a command", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      { update_id: 11, message: { text: "good morning", chat: { id: 7, type: "private" } } },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([]);
+  });
+
+  it("carries a tap's action, box, callback id and message id", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      {
+        update_id: 12,
+        callback_query: { id: "cb-1", data: "link:mac", message: { chat: { id: 7 }, message_id: 42 } },
+      },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([
+      { name: "link", args: ["mac"], chatId: 7, callbackId: "cb-1", messageId: 42 },
+    ]);
+  });
+});
+
+describe("the dedup", () => {
+  it("runs the command once when Telegram retries the same update", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const update = { update_id: 5, message: { text: "/flink mac", chat: { id: 7, type: "private" } } };
+
+    await handleTelegramUpdate(update, { telegram: TELEGRAM, store, ownerChatId: 7, dispatch });
+    await handleTelegramUpdate(update, { telegram: TELEGRAM, store, ownerChatId: 7, dispatch });
+
+    // A retried /link must not mint two links.
+    expect(commands).toHaveLength(1);
+  });
+
+  it("remembers the updates the brain handled", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tg-dedup"));
+    await inState(stub, async (instance) => {
+      // New until it is recorded; then the retry is recognised.
+      expect(instance.seenUpdate(42)).toBe(true);
+      instance.markUpdateSeen(42, 1700000000);
+      expect(instance.seenUpdate(42)).toBe(false);
+      // Another update is new again.
+      expect(instance.seenUpdate(43)).toBe(true);
+    });
+  });
+});
+
+describe("the webhook", () => {
+  const SECRET = "s3cret";
+
+  function webhookRequest(body: unknown, secret: string | null = SECRET): Request {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (secret !== null) {
+      headers.set("X-Telegram-Bot-Api-Secret-Token", secret);
+    }
+    return new Request("https://fleet.local/tg/webhook", {
+      method: "POST",
+      headers,
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  it("answers 401 when the secret header is missing or wrong", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const config = { secret: SECRET, ownerChatId: 7, telegram: TELEGRAM, dispatch };
+
+    const missing = await handleTelegramWebhook(webhookRequest({ update_id: 1 }, null), store, config);
+    expect(missing.status).toBe(401);
+
+    const wrong = await handleTelegramWebhook(webhookRequest({ update_id: 1 }, "nope"), store, config);
+    expect(wrong.status).toBe(401);
+
+    expect(commands).toEqual([]);
+  });
+
+  it("answers 400 when the body is not an update", async () => {
+    const store = new MemoryStore();
+    const config = { secret: SECRET, ownerChatId: 7, telegram: TELEGRAM, dispatch: async () => {} };
+
+    const notJson = await handleTelegramWebhook(webhookRequest("not json"), store, config);
+    expect(notJson.status).toBe(400);
+
+    const noUpdateId = await handleTelegramWebhook(webhookRequest({ message: "hi" }), store, config);
+    expect(noUpdateId.status).toBe(400);
+  });
+
+  it("runs the update and answers 200", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const config = { secret: SECRET, ownerChatId: 7, telegram: TELEGRAM, dispatch };
+
+    const res = await handleTelegramWebhook(
+      webhookRequest({ update_id: 20, message: { text: "/fleet", chat: { id: 7 } } }),
+      store,
+      config,
+    );
+
+    expect(res.status).toBe(200);
+    expect(commands).toEqual([{ name: "/fleet", args: [], chatId: 7 }]);
+  });
+
+  it("runs a retried update only once", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const config = { secret: SECRET, ownerChatId: 7, telegram: TELEGRAM, dispatch };
+    const body = { update_id: 21, message: { text: "/flink mac", chat: { id: 7 } } };
+
+    await handleTelegramWebhook(webhookRequest(body), store, config);
+    await handleTelegramWebhook(webhookRequest(body), store, config);
+
+    expect(commands).toHaveLength(1);
+  });
+});
+
+describe("the owner chat id", () => {
+  it("parses the env string into the number the gate compares", () => {
+    expect(parseOwnerChatId("7")).toBe(7);
+  });
+
+  it("refuses a value that is not a chat id", () => {
+    expect(parseOwnerChatId(undefined)).toBeUndefined();
+    expect(parseOwnerChatId("")).toBeUndefined();
+    expect(parseOwnerChatId("  ")).toBeUndefined();
+    expect(parseOwnerChatId("abc")).toBeUndefined();
+    expect(parseOwnerChatId("7.5")).toBeUndefined();
+    expect(parseOwnerChatId("0")).toBeUndefined();
+    // The Go bot parses its owner id with strconv.ParseInt: only digits.
+    expect(parseOwnerChatId("1e3")).toBeUndefined();
+    expect(parseOwnerChatId("0x10")).toBeUndefined();
+  });
+
+  it("refuses a group id: the brain must never answer in a group", () => {
+    expect(parseOwnerChatId("-1001234")).toBeUndefined();
+  });
+});
+
+describe("the brain config", () => {
+  it("resolves the token, the owner chat and the webhook secret", () => {
+    const config = resolveBrainConfig({
+      botToken: "TOKEN",
+      ownerChatId: "7",
+      webhookSecret: "s3cret",
+    });
+
+    expect(config?.ownerChatId).toBe(7);
+    expect(config?.secret).toBe("s3cret");
+    expect(config?.telegram).toBeDefined();
+  });
+
+  it("refuses a brain that is not configured", () => {
+    expect(resolveBrainConfig({ ownerChatId: "7", webhookSecret: "s3cret" })).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", webhookSecret: "s3cret" })).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "7" })).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "abc", webhookSecret: "s" })).toBeUndefined();
+  });
+});
+
+describe("the edge", () => {
+  interface ForwardedCall {
+    method: string;
+    path: string;
+    body: string;
+    secret: string | null;
+  }
+
+  // A fake DO namespace whose stub records what the edge forwarded.
+  function recordingEnv(calls: ForwardedCall[]): EdgeEnv {
+    return {
+      FLEET_STATE: {
+        idFromName: () => ({}),
+        get: () => ({
+          fetch: async (req: Request | string) => {
+            const inner = req as Request;
+            calls.push({
+              method: inner.method,
+              path: new URL(inner.url).pathname,
+              body: await inner.text(),
+              secret: inner.headers.get("x-telegram-bot-api-secret-token"),
+            });
+            return new Response("stub-ok");
+          },
+        }),
+      },
+    } as unknown as EdgeEnv;
+  }
+
+  it("forwards POST /tg/webhook to the DO's /tg path with the secret header", async () => {
+    const calls: ForwardedCall[] = [];
+    const body = JSON.stringify({ update_id: 1, message: { text: "/fleet", chat: { id: 7 } } });
+
+    const res = await app.fetch(
+      new Request("https://fleet.local/tg/webhook", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": "s3cret" },
+        body,
+      }),
+      recordingEnv(calls),
+    );
+
+    expect(await res.text()).toBe("stub-ok");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].path).toBe("/tg");
+    expect(calls[0].body).toBe(body);
+    expect(calls[0].secret).toBe("s3cret");
+  });
+});
+
+describe("the DO's door", () => {
+  it("fails loud when the brain is not configured", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tg-door"));
+    // The test env carries no Telegram settings, so the route must say
+    // so (500) instead of dropping every update silently. When the test
+    // env gains the TELEGRAM_* bindings this answer becomes a 401.
+    const res = await stub.fetch(
+      new Request("https://do/tg", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ update_id: 1 }),
+      }),
+    );
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "misconfigured" });
+  });
+});

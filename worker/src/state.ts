@@ -1,5 +1,6 @@
 import { handleAudit } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
+import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
@@ -88,6 +89,10 @@ CREATE TABLE IF NOT EXISTS denials(
   id TEXT PRIMARY KEY,
   denied_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS seen_updates(
+  update_id INTEGER PRIMARY KEY,
+  seen_at INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 const COLUMNS =
@@ -103,6 +108,9 @@ const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed,
 interface FleetEnv {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_OWNER_CHAT_ID?: string;
+  // The secret Telegram sends back in the secret-token header: the one
+  // credential the webhook carries.
+  TELEGRAM_WEBHOOK_SECRET?: string;
   ENROLL_CAPABILITY_SECRET?: string;
   ADMIN_SEAL_SECRET?: string;
   FLEET_BOOTSTRAP_SECRET?: string;
@@ -120,6 +128,7 @@ export class FleetState implements DurableObject {
   private state: DurableObjectState;
   private botToken?: string;
   private ownerChatId?: string;
+  private webhookSecret?: string;
   private capSecret?: string;
   private sealKey?: string;
   private bootstrapSecret?: string;
@@ -134,6 +143,7 @@ export class FleetState implements DurableObject {
     this.state = state;
     this.botToken = env?.TELEGRAM_BOT_TOKEN;
     this.ownerChatId = env?.TELEGRAM_OWNER_CHAT_ID;
+    this.webhookSecret = env?.TELEGRAM_WEBHOOK_SECRET;
     this.capSecret = env?.ENROLL_CAPABILITY_SECRET;
     this.sealKey = env?.ADMIN_SEAL_SECRET;
     this.bootstrapSecret = env?.FLEET_BOOTSTRAP_SECRET;
@@ -146,6 +156,13 @@ export class FleetState implements DurableObject {
 
   private notifier(): NotifyFn {
     return telegramNotifier(this.botToken, this.ownerChatId);
+  }
+
+  // The command layer answers here. It does not exist yet (Task 7), so
+  // the brain consumes the update — the dedup records it — and answers
+  // nothing.
+  private dispatchCommand(_cmd: BotCommand): Promise<void> {
+    return Promise.resolve();
   }
 
   private enrollConfig(): EnrollConfig {
@@ -343,6 +360,29 @@ export class FleetState implements DurableObject {
     return (cursor.toArray()[0] as unknown as { n: number }).n;
   }
 
+  // The dedup table: one row per update the brain handled. Telegram
+  // retries a webhook it thinks failed, so a repeated update_id must not
+  // run the command twice — a retried /link would mint two links.
+  // seenUpdate is true while the update is new and false once the row
+  // exists (the update was handled already).
+  seenUpdate(updateId: number): boolean {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT update_id FROM seen_updates WHERE update_id = ? LIMIT 1",
+      updateId,
+    );
+    return cursor.toArray().length === 0;
+  }
+
+  markUpdateSeen(updateId: number, at: number): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO seen_updates (update_id, seen_at) VALUES (?, ?)",
+      updateId,
+      at,
+    );
+  }
+
   deleteTombstone(boxId: string): void {
     this.ensureSchema();
     this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
@@ -364,6 +404,24 @@ export class FleetState implements DurableObject {
     }
     if (request.method === "GET" && url.pathname === "/audit") {
       return handleAudit(request, this, { sealKey: this.sealKey });
+    }
+    if (request.method === "POST" && url.pathname === "/tg") {
+      // The brain's front door: Telegram's webhook, forwarded by the
+      // edge. The settings come from the Worker env; a brain that is not
+      // configured fails loud (500) instead of dropping every update
+      // silently.
+      const brain = resolveBrainConfig({
+        botToken: this.botToken,
+        ownerChatId: this.ownerChatId,
+        webhookSecret: this.webhookSecret,
+      });
+      if (!brain) {
+        return Response.json({ error: "misconfigured" }, { status: 500 });
+      }
+      return handleTelegramWebhook(request, this, {
+        ...brain,
+        dispatch: (cmd) => this.dispatchCommand(cmd),
+      });
     }
     if (request.method === "POST" && url.pathname === "/heartbeat") {
       const notify = this.notifier();

@@ -92,6 +92,11 @@ export default {
     ) {
       return unauthorized();
     }
+    if (request.method === "POST" && url.pathname === "/tg/webhook") {
+      // Telegram's webhook: the brain's front door. The secret header
+      // rides along to the DO, which is the one that checks it.
+      return forwardToDo(request, env, "/tg");
+    }
     if (request.method === "GET" && url.pathname === "/api/backends") {
       return forwardToDo(request, env, "/backends");
     }
