@@ -1,6 +1,7 @@
-import { handleAudit } from "./audit";
+import { fetchAudits, handleAudit, type AuditRow as BoxAuditRow } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
+import { runCommand, type AuditRow } from "./botcommands";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
@@ -14,7 +15,14 @@ import {
 } from "./enroll";
 import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
-import { handleRevoke, handleRevokeAll } from "./revoke";
+import {
+  handleRevoke,
+  handleRevokeAll,
+  revokeAllBoxes,
+  revokeOneBox,
+  type RevokeResult,
+} from "./revoke";
+import type { TelegramClient } from "./telegram";
 import {
   handleDeleteToken,
   handleMintToken,
@@ -122,7 +130,13 @@ interface FleetEnv {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   ACCESS_ALLOWED_EMAIL?: string;
+  // The box the bot reaches when the owner says "/login" or "/status":
+  // a Worker setting, not a fact about the fleet.
+  PRIMARY_BOX?: string;
 }
+
+// The box the bot reaches by default. The design names "home".
+const DEFAULT_PRIMARY_BOX = "home";
 
 export class FleetState implements DurableObject {
   private state: DurableObjectState;
@@ -137,6 +151,7 @@ export class FleetState implements DurableObject {
   private teamDomain?: string;
   private accessAud?: string;
   private allowedEmail?: string;
+  private primaryBox: string;
   private mismatchPinged = new Map<string, number>();
 
   constructor(state: DurableObjectState, env?: FleetEnv) {
@@ -152,17 +167,99 @@ export class FleetState implements DurableObject {
     this.teamDomain = env?.ACCESS_TEAM_DOMAIN;
     this.accessAud = env?.ACCESS_AUD;
     this.allowedEmail = env?.ACCESS_ALLOWED_EMAIL;
+    this.primaryBox = env?.PRIMARY_BOX?.trim() || DEFAULT_PRIMARY_BOX;
   }
 
   private notifier(): NotifyFn {
     return telegramNotifier(this.botToken, this.ownerChatId);
   }
 
-  // The command layer answers here. It does not exist yet (Task 7), so
-  // the brain consumes the update — the dedup records it — and answers
-  // nothing.
-  private dispatchCommand(_cmd: BotCommand): Promise<void> {
-    return Promise.resolve();
+  // The brain's command seam: the Telegram router hands a command here
+  // and the command layer answers it. The dependencies are the DO's own
+  // relays — the command layer never touches the state itself, so it
+  // stays a pure function of what it is given.
+  //
+  // The client rides in as an argument: the brain owns every message, and
+  // the route that owns the token hands the client over.
+  async dispatchCommand(cmd: BotCommand, telegram: TelegramClient): Promise<void> {
+    await runCommand(cmd, {
+      telegram,
+      listBoxes: () => this.listBackends(),
+      mintLink: (boxId) => this.mintLink(boxId),
+      audit: (boxId, limit) => this.auditRows(boxId, limit),
+      revoke: (boxId) => this.revokeBox(boxId),
+      revokeAll: () => this.revokeEveryBox(),
+      issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
+      boxStatus: (boxId) => this.boxStatus(boxId),
+      primaryBox: this.primaryBox,
+    });
+  }
+
+  // The mint relay: the box mints its own tap code and answers with the
+  // URL. The brain never mints codes for a box — a code is bound to the
+  // box that presents it.
+  private async mintLink(boxId: string): Promise<string> {
+    const res = await handleMintLink(boxId, null, this, { sealKey: this.sealKey });
+    const body = await res.text();
+    if (res.status !== 200) {
+      throw new Error(`mint failed (${res.status}): ${body.slice(0, 200)}`);
+    }
+    const url = body.trim();
+    if (!url) {
+      throw new Error("mint answered with no url");
+    }
+    return url;
+  }
+
+  // The audit: the boxes' rows, merged. The brain's own history is Phase
+  // 2's work; until then the bot reads the boxes.
+  private async auditRows(boxId: string, limit: number): Promise<AuditRow[]> {
+    const rows = await fetchAudits(this, { boxId: boxId || undefined, n: limit }, {
+      sealKey: this.sealKey,
+    });
+    return rows.map(commandAuditRow);
+  }
+
+  private async revokeBox(boxId: string): Promise<RevokeResult> {
+    return revokeOneBox(boxId, this, { sealKey: this.sealKey });
+  }
+
+  private async revokeEveryBox(): Promise<RevokeResult[]> {
+    return revokeAllBoxes(this, { sealKey: this.sealKey });
+  }
+
+  // The enroll code: the brain is the owner, so it creates the trusted
+  // pending row itself — the code is the box's heartbeat secret, the same
+  // value the box presents when it claims. The pending row is trusted, so
+  // the box may claim it by typing the code: no approve tap, and the code
+  // message in the owner-only chat IS the approval.
+  private async issueEnrollCode(boxId: string): Promise<{ code: string; command: string }> {
+    const code = generateSecret();
+    const request = new Request("https://brain.local/enroll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: boxId,
+        hostname: `oc-tap-${boxId}.buyallmemes.com`,
+        enroll_token: code,
+        quiet: true,
+      }),
+    });
+    const res = await handleEnrollRequest(request, this, this.notifier(), undefined, {
+      ...this.enrollConfig(),
+      trusted: true,
+    });
+    const body = await res.text();
+    if (res.status !== 200) {
+      throw new Error(`enroll failed (${res.status}): ${body.slice(0, 200)}`);
+    }
+    return { code, command: `ocd onboard ${boxId} ${code}` };
+  }
+
+  // The box's OpenCode status. The relay is Task 10's work; until then the
+  // command layer's error boundary turns this into a readable answer.
+  private async boxStatus(_boxId: string): Promise<string> {
+    throw new Error("the box status relay is not available yet");
   }
 
   private enrollConfig(): EnrollConfig {
@@ -420,7 +517,7 @@ export class FleetState implements DurableObject {
       }
       return handleTelegramWebhook(request, this, {
         ...brain,
-        dispatch: (cmd) => this.dispatchCommand(cmd),
+        dispatch: (cmd) => this.dispatchCommand(cmd, brain.telegram),
       });
     }
     if (request.method === "POST" && url.pathname === "/heartbeat") {
@@ -498,4 +595,34 @@ export class FleetState implements DurableObject {
     }
     return new Response("Not Found", { status: 404 });
   }
+}
+
+// The box's audit rows as the command layer reads them: the layer wants
+// every field present, and a marker row (a box that could not be read)
+// carries no event fields.
+function commandAuditRow(row: BoxAuditRow): AuditRow {
+  return {
+    box: row.box,
+    at: row.at,
+    actor: "actor" in row ? row.actor : "",
+    action: "action" in row ? row.action : "",
+    device: "device" in row ? row.device : "",
+    ip: "ip" in row ? row.ip : "",
+    result: "result" in row ? row.result : "",
+    ua: "ua" in row ? row.ua : "",
+    tainted: row.tainted,
+    ...("error" in row ? { error: row.error } : {}),
+  };
+}
+
+// The enroll code: 32 random bytes, base64 (the Go bot's
+// onboard.GenerateSecret). The code is the box's heartbeat secret, so it
+// is never logged and never leaves the owner-only chat.
+function generateSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
