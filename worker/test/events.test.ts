@@ -119,6 +119,26 @@ describe("the event door", () => {
     });
     expect(telegram.edits).toEqual([]);
   });
+
+  it("answers 401 when the bearer is missing", async () => {
+    const telegram = new RecordingTelegram();
+
+    const status = await push("fleet-events-no-bearer", { id: "home", events: [] }, null, telegram);
+
+    expect(status).toBe(401);
+    expect(telegram.edits).toEqual([]);
+  });
+
+  // The bearer is checked before the body: a body the brain cannot read
+  // names no box, and a caller that names no box cannot be authenticated.
+  it("answers 401 for a malformed body with a bad bearer", async () => {
+    const telegram = new RecordingTelegram();
+
+    const status = await push("fleet-events-malformed-auth", "not json", "not-the-box-token", telegram);
+
+    expect(status).toBe(401);
+    expect(telegram.edits).toEqual([]);
+  });
 });
 
 describe("the edits", () => {
@@ -347,19 +367,37 @@ describe("the edge", () => {
 });
 
 describe("the DO's door", () => {
-  it("fails loud when the brain has no Telegram client", async () => {
+  // A brain without a Telegram token still takes the events: only the edit
+  // needs Telegram, and the edit stays owed until the alarm sweep drives
+  // it. A 500 here would make the boxes push into a dead door.
+  it("takes the events without a Telegram client", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-events-door"));
-    // The test env carries no Telegram settings, so the route must say so
-    // (500) instead of dropping the box's events silently.
+    await inState(stub, async (instance) => {
+      instance.putBox(BOX);
+      instance.putLink(link());
+    });
+
     const res = await stub.fetch(
       new Request("https://do/events", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${BOX_TOKEN}` },
-        body: JSON.stringify({ id: "home", events: [] }),
+        body: JSON.stringify({
+          id: "home",
+          events: [
+            { type: "link-used", token: "tok-1", ip: "1.2.3.4" },
+            { type: "audit", at: 1700000000, action: "tapped", ip: "1.2.3.4" },
+          ],
+        }),
       }),
     );
 
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "misconfigured" });
+    expect(res.status).toBe(200);
+    await readStore("fleet-events-door", (instance) => {
+      // The link's state advanced and the history kept the row.
+      const row = instance.linkRow("tok-1");
+      expect(row?.state).toBe("used");
+      expect(row?.edited).toBe(0);
+      expect(instance.auditLogRows("", 10)).toHaveLength(1);
+    });
   });
 });

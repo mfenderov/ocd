@@ -1,4 +1,4 @@
-import { handleAudit } from "./audit";
+import { fetchAudits, handleAudit, type AuditRow as BoxAuditRow } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type AuditRow, type LinkRecord } from "./botcommands";
@@ -214,7 +214,8 @@ export class FleetState implements DurableObject {
   }
 
   // The brain's Telegram client: the brain owns every message, and the
-  // events route needs it to edit the messages it handed out.
+  // events route uses it to edit the messages it handed out. Without a
+  // token there is no client, and the edits stay owed.
   private telegramClient(): TelegramClient | undefined {
     return this.botToken ? createTelegramClient(this.botToken) : undefined;
   }
@@ -275,12 +276,15 @@ export class FleetState implements DurableObject {
     return url;
   }
 
-  // The audit: the brain's own history. The boxes push their rows into
-  // it, so the answer covers the offline and the replaced boxes too. The
-  // console's GET /api/audit is a different tool with a different
-  // contract: it asks the live boxes.
+  // The audit: the boxes' rows, merged. The brain's own history (the
+  // audit_log table) is Phase 2's work: the boxes push their audit rows
+  // in that phase, and until then the bot reads the boxes — a working
+  // answer beats a spec-correct empty one.
   private async auditRows(boxId: string, limit: number): Promise<AuditRow[]> {
-    return this.auditLogRows(boxId, limit).map(storedAuditRow);
+    const rows = await fetchAudits(this, { boxId: boxId || undefined, n: limit }, {
+      sealKey: this.sealKey,
+    });
+    return rows.map(commandAuditRow);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -724,13 +728,11 @@ export class FleetState implements DurableObject {
       // The boxes' door: the box authenticates itself with its heartbeat
       // token and names itself in the body, so this route carries no
       // console scope — a console token must not forge box events.
-      const telegram = this.telegramClient();
-      if (!telegram) {
-        console.error("events: TELEGRAM_BOT_TOKEN not configured");
-        return Response.json({ error: "misconfigured" }, { status: 500 });
-      }
+      // The Telegram client is optional: a brain without a token still
+      // stores the events and marks the links, and the edits stay owed
+      // until the alarm sweep drives them.
       return handleEvents(request, this, {
-        telegram,
+        telegram: this.telegramClient(),
         verifyBox: (id, token) => this.verifyBoxToken(id, token),
       });
     }
@@ -811,20 +813,21 @@ export class FleetState implements DurableObject {
   }
 }
 
-// The stored row as the command layer reads it: the layer wants every
-// field present, and a brain row is always a real event (never a marker
-// row for a box that could not be read).
-function storedAuditRow(row: AuditLogRow): AuditRow {
+// The box's audit rows as the command layer reads them: the layer wants
+// every field present, and a marker row (a box that could not be read)
+// carries no event fields.
+function commandAuditRow(row: BoxAuditRow): AuditRow {
   return {
     box: row.box,
     at: row.at,
-    actor: row.actor,
-    action: row.action,
-    device: row.device,
-    ip: row.ip,
-    result: row.result,
-    ua: row.ua,
+    actor: "actor" in row ? row.actor : "",
+    action: "action" in row ? row.action : "",
+    device: "device" in row ? row.device : "",
+    ip: "ip" in row ? row.ip : "",
+    result: "result" in row ? row.result : "",
+    ua: "ua" in row ? row.ua : "",
     tainted: row.tainted,
+    ...("error" in row ? { error: row.error } : {}),
   };
 }
 

@@ -11,7 +11,8 @@ import { escapeHtml, type TelegramClient } from "./telegram";
 //
 //   1. The box proves who it is. The bearer is the box's heartbeat token
 //      and the body names the box, so the brain checks the token against
-//      that box. A console token cannot forge box events.
+//      that box — before it reads anything the box says. A console token
+//      cannot forge box events.
 //
 //   2. An event the brain cannot use is ignored, never fatal. A box that
 //      pushes an event for a token the brain never handed out (the box's
@@ -83,8 +84,12 @@ export interface EventStore {
 
 // What the ingest needs from the outside: the client that carries the
 // edits and the box's own check of its heartbeat token.
+//
+// The client is optional: a brain without a Telegram token still stores
+// the events and marks the links — only the edit needs Telegram — and
+// the edits stay owed until the alarm sweep drives them.
 export interface EventDeps {
-  telegram: TelegramClient;
+  telegram?: TelegramClient;
   verifyBox: (id: string, token: string) => Promise<boolean>;
 }
 
@@ -106,25 +111,33 @@ export async function handleEvents(
   store: EventStore,
   deps: EventDeps,
 ): Promise<Response> {
-  const envelope = readEnvelope(await readJson(request));
-  if (!envelope) {
-    return Response.json({ error: "bad_request" }, { status: 400 });
-  }
-  // The box proves who it is before anything is written.
+  // The bearer first: the box proves who it is before the brain reads
+  // anything it says. A caller with no bearer gets nothing else.
   const bearer = extractBearer(request);
-  if (!bearer || !(await deps.verifyBox(envelope.id, bearer))) {
+  if (!bearer) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  for (const raw of envelope.events.slice(0, MAX_EVENTS)) {
+  const body = await readJson(request);
+  const boxId = boxIdOf(body);
+  // A body that names no box cannot be authenticated: the brain does not
+  // know which box's token to check.
+  if (!boxId || !(await deps.verifyBox(boxId, bearer))) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  const events = eventsOf(body);
+  if (!events) {
+    return Response.json({ error: "bad_request" }, { status: 400 });
+  }
+  for (const raw of events.slice(0, MAX_EVENTS)) {
     const event = readEvent(raw);
     if (!event) {
       // An event the brain cannot use is ignored; the rest still applies.
       continue;
     }
-    await applyEvent(event, envelope.id, store, deps);
+    await applyEvent(event, boxId, store, deps);
   }
-  if (envelope.events.length > MAX_EVENTS) {
-    console.error(`events: the batch carried ${envelope.events.length} events; ${MAX_EVENTS} were applied`);
+  if (events.length > MAX_EVENTS) {
+    console.error(`events: the batch carried ${events.length} events; ${MAX_EVENTS} were applied`);
   }
   return Response.json({ ok: true });
 }
@@ -159,21 +172,22 @@ function readEvent(raw: unknown): BoxEvent | undefined {
   return event;
 }
 
-// The body the box pushes: the box it speaks for and its events.
-function readEnvelope(body: unknown): { id: string; events: unknown[] } | undefined {
+// The box the body speaks for: the brain checks the bearer against that
+// box's heartbeat token.
+function boxIdOf(body: unknown): string {
+  if (typeof body !== "object" || body === null) {
+    return "";
+  }
+  return text((body as Record<string, unknown>)["id"]).trim();
+}
+
+// The events the body carries.
+function eventsOf(body: unknown): unknown[] | undefined {
   if (typeof body !== "object" || body === null) {
     return undefined;
   }
-  const fields = body as Record<string, unknown>;
-  const id = text(fields["id"]).trim();
-  if (!id) {
-    return undefined;
-  }
-  const events = fields["events"];
-  if (!Array.isArray(events)) {
-    return undefined;
-  }
-  return { id, events };
+  const events = (body as Record<string, unknown>)["events"];
+  return Array.isArray(events) ? events : undefined;
 }
 
 // One event, applied: the link events change the link and edit the
@@ -283,9 +297,15 @@ async function editLink(
   store: EventStore,
   deps: EventDeps,
 ): Promise<void> {
+  const telegram = deps.telegram;
+  if (!telegram) {
+    // No Telegram client: the link stays owed, and the alarm sweep drives
+    // the edit when the brain has a token again.
+    return;
+  }
   let landed = false;
   try {
-    landed = await deps.telegram.editMessageText(link.chat_id, link.message_id, text);
+    landed = await telegram.editMessageText(link.chat_id, link.message_id, text);
   } catch (err) {
     console.error(`events: the edit failed (${errorText(err)})`);
     return;

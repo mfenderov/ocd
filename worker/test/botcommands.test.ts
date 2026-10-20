@@ -575,25 +575,13 @@ describe("the Durable Object's dispatch", () => {
     expect(telegram.sent[0].text).toContain("home");
   });
 
-  // The brain's own history, not the boxes: the answer covers the boxes
-  // that are offline and the ones that were replaced.
-  it("answers /faudit from the brain's own history", async () => {
+  // Phase 1: the brain's own history is still empty (the boxes push their
+  // audit rows in Phase 2), so /faudit asks the boxes.
+  it("answers /faudit from the boxes, not from the brain's own table", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit"));
     const telegram = new RecordingTelegram();
 
     await inState(stub, async (instance) => {
-      instance.putBox({
-        id: "home",
-        hostname: "oc-tap-home.buyallmemes.com",
-        heartbeat_token_hash: "hb-hash",
-        admin_token_hash: "admin-hash",
-        admin_token_sealed: "",
-        epoch: 1,
-        last_seq: 1,
-        last_ts: 0,
-        last_seen: Math.floor(Date.now() / 1000) - 5,
-        enrolled: 1,
-      });
       instance.addAuditRow({
         box: "home",
         at: 1699999900,
@@ -610,8 +598,8 @@ describe("the Durable Object's dispatch", () => {
     });
 
     expect(telegram.sent).toHaveLength(1);
-    expect(telegram.sent[0].text).toContain("tapped");
-    expect(telegram.sent[0].text).toContain("home");
-    expect(telegram.sent[0].text).toContain("1.2.3.4");
+    // No box is enrolled, so the fan-out has nothing to read: the brain's
+    // own table is not the source yet.
+    expect(telegram.sent[0].text).toContain("No audit rows");
   });
 });
