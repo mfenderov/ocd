@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.17.4 - 2026-10-20
+#### Bug Fixes
+- env file paths must be absolute, and repair reads real hostnames - (1895c01) - mfenderov
+
+- - -
+
 ## v0.17.3 - 2026-10-19
 #### Bug Fixes
 - (**worker**) clear all 12 dependabot advisories - (5624dfb) - mfenderov
