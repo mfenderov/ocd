@@ -296,6 +296,18 @@ describe("revoke single box (unit)", () => {
     expect(store.getTombstone("rev-err")).toBeUndefined();
   });
 
+  // A box behind a dead Cloudflare tunnel answers 530, not a refusal:
+  // the origin never ran. Treating it as a refusal leaves the box
+  // revocable-but-alive forever, so an unreachable box must tombstone.
+  it("a dead tunnel (5xx) is unreachable, not a refusal: tombstoned", async () => {
+    const store = new MemStore();
+    await seedBox(store, "rev-530", 3);
+    const fetcher = (async () => new Response("error code: 1016", { status: 530 })) as typeof fetch;
+    const result = await revokeOneBox("rev-530", store, { sealKey: SEAL_KEY, fetcher });
+    expect(result).toMatchObject({ id: "rev-530", status: "tombstoned", epoch: 3, box_status: 530 });
+    expect(store.getTombstone("rev-530")).toEqual({ box_id: "rev-530", epoch: 3 });
+  });
+
   it("missing seal key or admin token is misconfigured without fetching", async () => {
     const store = new MemStore();
     await seedBox(store, "rev-noseal", 1);

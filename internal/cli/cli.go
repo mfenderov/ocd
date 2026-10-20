@@ -53,7 +53,13 @@ func Root() *cobra.Command {
 		// Bare `ocd` is the whole product: it enrolls this machine, or
 		// reports the current one. Subcommands cover the rest.
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOnboard(cmd.OutOrStdout(), onboard.Options{})
+			err := runOnboard(cmd.OutOrStdout(), onboard.Options{})
+			if err != nil {
+				// A runtime failure is not a usage problem: the bare
+				// command has no usage worth dumping over its report.
+				cmd.SilenceUsage = true
+			}
+			return err
 		},
 	}
 

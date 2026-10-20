@@ -81,8 +81,6 @@ OCD_PAIR_URL="https://oc.buyallmemes.com"
 	root := cli.Root()
 	root.SetOut(&sb)
 	root.SetErr(io.Discard)
-	// The runtime error must not dump the usage into the identity.
-	root.SilenceUsage = true
 	root.SetArgs([]string{})
 	err := root.Execute()
 	if err == nil {
@@ -93,5 +91,10 @@ OCD_PAIR_URL="https://oc.buyallmemes.com"
 		if !strings.Contains(got, want) {
 			t.Fatalf("want the identity to mention %q, got %q", want, got)
 		}
+	}
+	// A runtime failure is not a usage problem: the bare command must not
+	// bury the identity under a wall of subcommands.
+	if strings.Contains(got, "Available Commands") {
+		t.Fatalf("a runtime failure must not dump the usage, got %q", got)
 	}
 }

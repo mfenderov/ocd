@@ -24,7 +24,7 @@ export interface RevokeResult {
   status: RevokeStatus;
   // New box epoch on revoked; last-known epoch on tombstoned.
   epoch?: number;
-  // Box HTTP status on box_error.
+  // Box HTTP status when the box answered with an error.
   box_status?: number;
   detail?: string;
 }
@@ -153,6 +153,20 @@ export async function revokeOneBox(
     // raiseTombstone keeps a pre-existing higher tombstone on top of that.
     raiseTombstone(store, boxId, Math.max(box.epoch, epoch - 1));
     return { id: boxId, status: "revoked", epoch };
+  }
+  // A 5xx means the origin never ran: Cloudflare answers 530 when the
+  // tunnel is down and 502/503/504 when the origin is gone. The box is
+  // unreachable, not refusing — tombstone it like a timeout, or a box
+  // behind a dead tunnel stays revocable-but-alive forever.
+  if (boxRes.status >= 500) {
+    raiseTombstone(store, boxId, box.epoch);
+    return {
+      id: boxId,
+      status: "tombstoned",
+      epoch: box.epoch,
+      box_status: boxRes.status,
+      detail: "box_unreachable",
+    };
   }
   // Box refused (e.g. 400/401/409): rotation did not happen, so no
   // tombstone — the per-box result carries the box status for diagnosis.
