@@ -333,24 +333,33 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 	}
 }
 
-func TestExistingBox(t *testing.T) {
+func TestExistingIdentity(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "env")
-	if _, ok := onboard.ExistingBox(p); ok {
+	if _, ok := onboard.ExistingIdentity(p); ok {
 		t.Fatal("missing file means fresh box")
 	}
 	if err := os.WriteFile(p, []byte("# nothing here\nOCD_WORKER_URL=x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := onboard.ExistingBox(p); ok {
+	if _, ok := onboard.ExistingIdentity(p); ok {
 		t.Fatal("env without box id means fresh box")
 	}
-	if err := os.WriteFile(p, []byte("OCD_BOX_ID=\"mac\"\n"), 0o600); err != nil {
+	env := "OCD_BOX_ID=\"mac\"\nOCD_PUBLIC_URL=\"https://oc-tap-mac.buyallmemes.com/pair\"\nOCD_PAIR_URL=\"https://oc-mac.buyallmemes.com\"\n"
+	if err := os.WriteFile(p, []byte(env), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, ok := onboard.ExistingBox(p)
-	if !ok || id != "mac" {
-		t.Fatalf("must detect onboarded box, got %q %v", id, ok)
+	id, ok := onboard.ExistingIdentity(p)
+	if !ok || id.BoxID != "mac" {
+		t.Fatalf("must detect onboarded box, got %q %v", id.BoxID, ok)
+	}
+	// The URLs come from the env file: a box may serve hosts that were
+	// set up before the naming convention existed.
+	if id.TapURL != "https://oc-tap-mac.buyallmemes.com/pair" {
+		t.Fatalf("tap url = %q", id.TapURL)
+	}
+	if id.UIURL != "https://oc-mac.buyallmemes.com" {
+		t.Fatalf("ui url = %q", id.UIURL)
 	}
 }
 
@@ -363,13 +372,72 @@ func TestTapHostAndUIHost(t *testing.T) {
 	}
 }
 
-func TestResolveEnrollCodeUsesPastedCode(t *testing.T) {
-	box, code, err := onboard.ResolveEnrollCode(context.Background(), io.Discard, "  abc123 ")
+// The name and the code are the only two things a run needs. Given both,
+// no question is asked.
+func TestResolveEnrollUsesGivenNameAndCode(t *testing.T) {
+	box, code, err := onboard.ResolveEnroll(io.Discard, "mac", "abc123")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if box != "" || code != "abc123" {
-		t.Fatalf("pasted code must be used verbatim, got %q %q", box, code)
+	if box != "mac" || code != "abc123" {
+		t.Fatalf("given name and code must be used, got %q %q", box, code)
+	}
+}
+
+func TestResolveEnrollRejectsInvalidGivenName(t *testing.T) {
+	if _, _, err := onboard.ResolveEnroll(io.Discard, "Mac!", "abc123"); err == nil {
+		t.Fatal("want an invalid box name refused")
+	}
+}
+
+// Without a name there is nobody to ask: say what is missing instead of
+// opening a form nobody can fill in.
+func TestResolveEnrollWithoutNameNeedsATerminal(t *testing.T) {
+	old := onboard.Stdin
+	onboard.Stdin = strings.NewReader("")
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	_, _, err := onboard.ResolveEnroll(io.Discard, "", "abc123")
+	if err == nil {
+		t.Fatal("want an error without a terminal")
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Fatalf("want the error to name the missing input, got %v", err)
+	}
+}
+
+// Same for the code: it comes from the bot, so it can only be pasted.
+func TestResolveEnrollWithoutCodeNeedsATerminal(t *testing.T) {
+	old := onboard.Stdin
+	onboard.Stdin = strings.NewReader("")
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	_, _, err := onboard.ResolveEnroll(io.Discard, "mac", "")
+	if err == nil {
+		t.Fatal("want an error without a terminal")
+	}
+	if !strings.Contains(err.Error(), "code") {
+		t.Fatalf("want the error to name the missing input, got %v", err)
+	}
+}
+
+// The pasted code is the one the bot issues; the command printed tells
+// the user which bot command to send.
+func TestAskEnrollCodePrintsCommandAndReadsThePaste(t *testing.T) {
+	old := onboard.Stdin
+	onboard.Stdin = strings.NewReader("code-abc\n")
+	t.Cleanup(func() { onboard.Stdin = old })
+
+	var sb strings.Builder
+	code, err := onboard.AskEnrollCode(&sb, "mac")
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if code != "code-abc" {
+		t.Fatalf("want the pasted code, got %q", code)
+	}
+	if !strings.Contains(sb.String(), "/enrollcode mac") {
+		t.Fatalf("want the telegram command, got %q", sb.String())
 	}
 }
 

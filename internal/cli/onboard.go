@@ -18,19 +18,29 @@ func onboardCmd() *cobra.Command {
 	var workerURL, cfToken string
 	var skipTunnel, installService, force bool
 	cmd := &cobra.Command{
-		Use:   "onboard",
+		Use:   "onboard <name> [code]",
 		Short: "Enroll this box in the fleet",
+		// The box name and the enroll code are the only arguments: they
+		// are what the bot hands out, so they can be pasted as they are.
+		Args: cobra.MaximumNArgs(2),
 		// Runtime failures (bad code, refused config) report the error
 		// without dumping the full usage text.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOnboard(cmd.OutOrStdout(), onboard.Options{
+			opts := onboard.Options{
 				WorkerURL:      workerURL,
 				CFToken:        cfToken,
 				SkipTunnel:     skipTunnel,
 				InstallService: installService,
 				Force:          force,
-			})
+			}
+			if len(args) > 0 {
+				opts.BoxID = args[0]
+			}
+			if len(args) > 1 {
+				opts.Code = args[1]
+			}
+			return runOnboard(cmd.OutOrStdout(), opts)
 		},
 	}
 	cmd.Flags().StringVar(&workerURL, "worker-url", "", "fleet Worker origin (default "+onboard.DefaultWorkerURL+")")
@@ -52,20 +62,22 @@ func runOnboard(w interface {
 	if err != nil {
 		return err
 	}
-	if existing, ok := onboard.ExistingBox(envPath); ok && !opts.Force {
+	if id, ok := onboard.ExistingIdentity(envPath); ok && !opts.Force {
+		// Report what this box is before asking anything: on a box that
+		// is already in the fleet, `ocd` is a status command.
+		onboard.RenderIdentity(w, id)
 		if !onboard.IsTTY() {
-			return fmt.Errorf("already onboarded as %q — re-onboard interactively, or pass --force", existing)
+			return fmt.Errorf("already onboarded as %q — re-onboard interactively, or pass --force", id.BoxID)
 		}
-		again, err := onboard.AskReonboard(existing)
+		again, err := onboard.AskReonboard(id.BoxID)
 		if err != nil {
 			return err
 		}
 		if !again {
-			_, _ = fmt.Fprintf(w, "keeping existing setup for %s\n", existing)
 			return nil
 		}
 	}
-	boxID, code, err := onboard.ResolveEnrollCode(ctx, w, "")
+	boxID, code, err := onboard.ResolveEnroll(w, opts.BoxID, opts.Code)
 	if err != nil {
 		return err
 	}

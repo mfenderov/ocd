@@ -2,7 +2,6 @@ package onboard
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -18,34 +17,53 @@ func TelegramCommand(boxID string) string {
 	return "/enrollcode " + boxID
 }
 
-// ResolveEnrollCode returns the one-time enroll code for this run. With a
-// code already pasted in, it uses that. Otherwise it asks for the box
-// name, prints the Telegram command to send, and waits for the code the
-// bot replies with. The box name is all the terminal needs to know: the
-// code carries the rest, and the Worker binds it to that name.
-func ResolveEnrollCode(ctx context.Context, w io.Writer, pasted string) (boxID string, code string, err error) {
-	if pasted = strings.TrimSpace(pasted); pasted != "" {
-		return "", pasted, nil
-	}
-	if !IsTTY() {
-		return "", "", fmt.Errorf("onboard: no code given — run `ocd` on a terminal")
-	}
-	boxID, err = AskBoxName()
-	if err != nil {
+// ResolveEnroll resolves the two things a run needs: the name of this box
+// and the one-time enroll code. A name the caller already has is used as
+// is; otherwise it is asked — it is the only question onboarding asks. A
+// code the caller already has is used as is; otherwise the user pastes
+// the one the bot issues.
+func ResolveEnroll(w io.Writer, givenBox, givenCode string) (boxID, code string, err error) {
+	boxID = strings.TrimSpace(givenBox)
+	if boxID == "" {
+		if !IsTTY() {
+			return "", "", fmt.Errorf("onboard: no box name — pass it as an argument: ocd onboard <name>")
+		}
+		boxID, err = AskBoxName()
+		if err != nil {
+			return "", "", err
+		}
+	} else if err := ValidateBoxID(boxID); err != nil {
 		return "", "", err
 	}
+
+	code = strings.TrimSpace(givenCode)
+	if code == "" {
+		if !IsTTY() {
+			return "", "", fmt.Errorf("onboard: no enroll code — paste it, or pass it: ocd onboard <name> <code>")
+		}
+		code, err = AskEnrollCode(w, boxID)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	return boxID, code, nil
+}
+
+// AskEnrollCode prints the Telegram command that issues the enroll code
+// for boxID and returns the code the user pastes back.
+func AskEnrollCode(w io.Writer, boxID string) (string, error) {
 	_, _ = fmt.Fprintf(w, "\nSend this to your Telegram bot:\n\n  %s\n\n", TelegramCommand(boxID))
 	_, _ = fmt.Fprintln(w, "Then paste the code it replies with:")
 	reader := bufio.NewReader(Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil && strings.TrimSpace(line) == "" {
-		return "", "", fmt.Errorf("onboard: no code pasted")
+		return "", fmt.Errorf("onboard: no code pasted")
 	}
-	code = strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "`\"'"))
+	code := strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "`\"'"))
 	if code == "" {
-		return "", "", fmt.Errorf("onboard: no code pasted")
+		return "", fmt.Errorf("onboard: no code pasted")
 	}
-	return boxID, code, nil
+	return code, nil
 }
 
 // AskBoxName asks for the name of this machine. It is the only question

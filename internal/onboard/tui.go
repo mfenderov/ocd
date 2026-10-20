@@ -12,10 +12,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// IsTTY reports whether stdin is a terminal. The TUI runs only then;
-// pipes and CI take the flags-driven plain path instead of hanging.
+// IsTTY reports whether a terminal can prompt. The TUI runs only then;
+// pipes and CI take the plain path instead of hanging. It reads the same
+// source the prompts read, so whoever replaces Stdin controls both.
 func IsTTY() bool {
-	fi, err := os.Stdin.Stat()
+	f, ok := Stdin.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
@@ -166,4 +171,20 @@ func RenderResult(w io.Writer, cfg Config, serviced bool) {
 		_, _ = fmt.Fprintln(w, "  cloudflared tunnel run <name>   # ingress -> :49400")
 	}
 	_, _ = fmt.Fprintln(w, "  ocd serve                       # heartbeat + admin + pair")
+}
+
+// RenderIdentity prints what this box is: its name and the URLs it
+// serves. It is what `ocd` reports on a box that is already in the fleet.
+func RenderIdentity(w io.Writer, id Identity) {
+	_, _ = fmt.Fprintln(w, titleStyle.Render(id.BoxID+" is in the fleet."))
+	if id.TapURL != "" {
+		_, _ = fmt.Fprintf(w, "  tap:   %s\n", id.TapURL)
+	}
+	if id.UIURL != "" {
+		_, _ = fmt.Fprintf(w, "  ui:    %s\n", id.UIURL)
+	}
+	if id.WorkerURL != "" {
+		_, _ = fmt.Fprintf(w, "  fleet: %s\n", id.WorkerURL)
+	}
+	_, _ = fmt.Fprintln(w, "  reach it from Telegram: /link")
 }

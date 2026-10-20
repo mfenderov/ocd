@@ -5,16 +5,21 @@ A second box, on macOS. One command does the work:
 ```sh
 brew install --cask mfenderov/tap/ocd    # ocd itself
 brew install cloudflare/cloudflare/cloudflared
-ocd                                     # ask for the name, then paste the code
 ```
 
-`ocd` asks one question (the box name, e.g. `mac`), prints the Telegram
-command to send, and finishes when you paste the code back. It creates the
-tunnel, routes DNS, writes `~/.ocd/env` (chmod 600), enrolls the box, and
-installs a launchd login service. If `cloudflared` was never authorized on
-this Mac, `ocd` opens the browser login for you.
+Then send `/enrollcode mac` to the Telegram bot. It replies with a code and
+the exact command to paste here:
 
-## What the flow looks like
+```sh
+ocd onboard mac <code>
+```
+
+That is the whole onboarding. `ocd` creates the tunnel, routes DNS, writes
+`~/.ocd/env` (chmod 600), enrolls the box, and installs a launchd login
+service. If `cloudflared` was never authorized on this Mac, `ocd` opens the
+browser login for you.
+
+Bare `ocd` does the same thing, asking for the name first:
 
 ```
 $ ocd

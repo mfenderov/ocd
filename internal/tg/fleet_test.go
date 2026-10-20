@@ -263,6 +263,31 @@ func TestFleetEnrollCode(t *testing.T) {
 	}
 }
 
+// The reply must be paste-ready: one line the user runs on the machine,
+// carrying the name and the code the bot just issued.
+func TestFleetEnrollCodeReplyIsPasteReady(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending","id":"mac","trusted":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OCD_WORKER_URL", srv.URL)
+	t.Setenv("OCD_FLEET_TOKEN", "test-token")
+
+	got, err := tg.FleetEnrollCodeText(context.Background(), "mac", "")
+	if err != nil {
+		t.Fatalf("enrollcode: %v", err)
+	}
+	code, _ := body["enroll_token"].(string)
+	want := "ocd onboard mac " + code
+	if !strings.Contains(got, want) {
+		t.Fatalf("reply must carry the paste-ready command %q, got:\n%s", want, got)
+	}
+}
+
 func TestFleetEnrollCodeUsage(t *testing.T) {
 	t.Setenv("OCD_FLEET_TOKEN", "test-token")
 	got, err := tg.FleetEnrollCodeText(context.Background(), "", "")

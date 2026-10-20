@@ -99,8 +99,8 @@ sequenceDiagram
   B->>W: POST /api/enroll  (Bearer: fleet token, scope "enroll")
   Note over W: pending row: trusted=1, code=hash(code)
   W-->>B: pending
-  B-->>Y: one-time code
-  Y->>N: ocd onboard → paste the code
+  B-->>Y: one-time code + paste-ready command
+  Y->>N: ocd onboard mac <code>
   N->>W: POST /api/enroll  (code in body)
   Note over W: claim trusted row → bind box
   W-->>N: enrolled

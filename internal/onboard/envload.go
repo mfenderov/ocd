@@ -65,15 +65,33 @@ func validEnvKey(key string) bool {
 	return len(key) > 0
 }
 
-// ExistingBox reports a previous onboarding: the box id stored in the env
-// file, if any. Missing file or no box id means a fresh box.
-func ExistingBox(envPath string) (string, bool) {
+// Identity is what a box is: its name and the URLs it serves. The URLs
+// come from the env file, not from the box name: a box may serve hosts
+// that were set up before the naming convention existed.
+type Identity struct {
+	BoxID     string
+	TapURL    string
+	UIURL     string
+	WorkerURL string
+}
+
+// ExistingIdentity reports the identity of an already-onboarded box. A
+// missing env file or no box id means a fresh box.
+func ExistingIdentity(envPath string) (Identity, bool) {
 	vals, err := LoadEnvFile(envPath)
 	if err != nil {
-		return "", false
+		return Identity{}, false
 	}
 	id := strings.TrimSpace(vals["OCD_BOX_ID"])
-	return id, id != ""
+	if id == "" {
+		return Identity{}, false
+	}
+	return Identity{
+		BoxID:     id,
+		TapURL:    strings.TrimSpace(vals["OCD_PUBLIC_URL"]),
+		UIURL:     strings.TrimSpace(vals["OCD_PAIR_URL"]),
+		WorkerURL: strings.TrimSpace(vals["OCD_WORKER_URL"]),
+	}, true
 }
 
 // ApplyEnvDefaults fills unset OCD_* vars from the default env file.

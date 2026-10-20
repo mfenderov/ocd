@@ -176,8 +176,8 @@ func FleetEnrollCodeText(ctx context.Context, box, hostname string) (string, err
 	if !trusted {
 		return fmt.Sprintf("⚠️ Could not issue a code for <code>%s</code>: this bot's fleet token lacks the <code>enroll</code> scope.\nRe-mint it with scopes link, revoke, audit, enroll.", esc(box)), nil
 	}
-	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n<code>%s</code>\nPaste it into <code>ocd</code> on that machine.",
-		esc(box), esc(code)), nil
+	return fmt.Sprintf("🔑 Enroll code for <code>%s</code> (15 min, single use):\n\n<code>ocd onboard %s %s</code>\n\nPaste it into a terminal on that machine — it enrolls itself.",
+		esc(box), esc(box), esc(code)), nil
 }
 
 // FleetAuditText renders recent fleet audit rows, optionally for one box.
