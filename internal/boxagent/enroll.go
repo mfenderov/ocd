@@ -37,7 +37,8 @@ type EnrollOptions struct {
 	// it the pending row needs the approve tap.
 	Bearer string
 	// TunnelID is the box's cloudflared tunnel id, empty when the box
-	// has no tunnel. The Worker keeps it so it can own the box's DNS.
+	// has no tunnel. The field is sent so the brain can own the box's
+	// DNS once it reads it.
 	TunnelID string
 }
 
