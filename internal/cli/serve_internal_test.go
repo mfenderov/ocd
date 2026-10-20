@@ -64,7 +64,7 @@ func TestMountAdminServesStatusBehindAuth(t *testing.T) {
 // The box owns the link TTL, so the box tells the brain which links died.
 // The brain decides what to say about them.
 func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
-	st, tok := deadLinkStore(t)
+	st, tok := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	var (
@@ -129,7 +129,7 @@ func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
 // A dead link is reported exactly once. The sweep keeps running, but the
 // token is gone after the first report, so the brain hears about it once.
 func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
-	st, tok := deadLinkStore(t)
+	st, tok := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	var (
@@ -188,7 +188,7 @@ func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
 // A dead link is reported once. Once the brain has it, the row goes, so
 // no sweep reports the same dead link again and again.
 func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
-	st, _ := deadLinkStore(t)
+	st, _ := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +210,7 @@ func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
 // A brain outage must not lose the report: the token stays, so the next
 // sweep tries again.
 func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
-	st, tok := deadLinkStore(t)
+	st, tok := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -229,16 +229,65 @@ func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
 	}
 }
 
+// The Go bot's own links are the Go bot's business. The sweep must not
+// report them and must not delete them: the Go bot's own sweeper still
+// has to edit that Telegram message to "expired".
+func TestSweepLeavesTheGoBotsLinksAlone(t *testing.T) {
+	st, tok := deadLinkStore(t, "telegram")
+	defer st.Close()
+	// The Go bot records the chat and message ids on its own links, so
+	// its sweeper finds them (internal/tg/tg.go).
+	if err := st.SetLinkMessage(tok, 123, 456); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mu    sync.Mutex
+		got   []boxagent.Event
+		count int
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		count += len(body.Events)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	sweepDeadLinks(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 0 {
+		t.Fatalf("want the Go bot's link never reported, got %d events: %v", count, got)
+	}
+	// The row must survive: the Go bot's sweeper finds it through
+	// PendingEdits and edits the Telegram message to "expired".
+	pending := st.PendingEdits()
+	if len(pending) != 1 || pending[0].Token != tok {
+		t.Fatalf("want the Go bot's link left for its own sweeper, got %v", pending)
+	}
+	if pending[0].Note != "expired" {
+		t.Fatalf("want the Go bot's expired-link edit to still be pending, got %q", pending[0].Note)
+	}
+}
+
 // deadLinkStore returns a store holding one link that was never tapped
-// and is past its TTL: a dead link.
-func deadLinkStore(t *testing.T) (*store.Store, string) {
+// and is past its TTL: a dead link. The via says who owns it: the brain
+// ("admin") or the Go bot ("telegram").
+func deadLinkStore(t *testing.T, via string) (*store.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := st.IssueLink("mac", "telegram")
+	tok, err := st.IssueLink("mac", via)
 	if err != nil {
 		t.Fatal(err)
 	}

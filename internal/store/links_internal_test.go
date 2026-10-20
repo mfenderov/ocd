@@ -14,15 +14,15 @@ func TestExpiredLinkTokens(t *testing.T) {
 	}
 	defer st.Close()
 
-	dead, err := st.IssueLink("mac", "telegram")
+	dead, err := st.IssueLink("admin", brainLinkVia)
 	if err != nil {
 		t.Fatal(err)
 	}
-	spent, err := st.IssueLink("mac", "telegram")
+	spent, err := st.IssueLink("admin", brainLinkVia)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := st.IssueLink("mac", "telegram")
+	fresh, err := st.IssueLink("admin", brainLinkVia)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +50,37 @@ func TestExpiredLinkTokens(t *testing.T) {
 	}
 }
 
+// The Go bot mints its own links and edits their Telegram messages
+// itself. Only the brain's own links are the brain's business.
+func TestExpiredLinkTokensOnlyTheBrains(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	brain, err := st.IssueLink("admin", brainLinkVia)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot, err := st.IssueLink("mac", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both are dead: never used, past the TTL.
+	for _, tok := range []string{brain, bot} {
+		_, _ = st.db.Exec(`UPDATE link_tokens SET created_at=strftime('%s','now')-? WHERE token=?`, int64(linkTTL.Seconds())+60, tok)
+	}
+
+	got, err := st.ExpiredLinkTokens(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != brain {
+		t.Fatalf("want only the brain's dead token %q, got %v", brain, got)
+	}
+}
+
 // The sweep reports the oldest dead links first and never more than the
 // limit it was given.
 func TestExpiredLinkTokensOldestFirstAndLimited(t *testing.T) {
@@ -61,7 +92,7 @@ func TestExpiredLinkTokensOldestFirstAndLimited(t *testing.T) {
 
 	tokens := make([]string, 3)
 	for i := range tokens {
-		tokens[i], err = st.IssueLink("mac", "telegram")
+		tokens[i], err = st.IssueLink("admin", brainLinkVia)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -93,11 +124,11 @@ func TestDeleteLinkTokensRemovesTheRows(t *testing.T) {
 	}
 	defer st.Close()
 
-	dead, err := st.IssueLink("mac", "telegram")
+	dead, err := st.IssueLink("admin", brainLinkVia)
 	if err != nil {
 		t.Fatal(err)
 	}
-	alive, err := st.IssueLink("mac", "telegram")
+	alive, err := st.IssueLink("admin", brainLinkVia)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +147,29 @@ func TestDeleteLinkTokensRemovesTheRows(t *testing.T) {
 	// run twice over the same dead link.
 	if err := st.DeleteLinkTokens([]string{"gone-already"}); err != nil {
 		t.Fatalf("want deleting an unknown token to be harmless, got %v", err)
+	}
+}
+
+// The Go bot's own links are the Go bot's business: deleting one would
+// take away the expired-link edit its own sweeper still has to make.
+func TestDeleteLinkTokensOnlyTheBrains(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	bot, err := st.IssueLink("mac", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteLinkTokens([]string{bot}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := countLinkTokens(t, st, bot); n != 1 {
+		t.Fatalf("want the Go bot's link left alone, got %d rows", n)
 	}
 }
 

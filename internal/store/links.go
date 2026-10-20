@@ -10,6 +10,11 @@ import (
 
 const linkTTL = 10 * time.Minute
 
+// brainLinkVia marks the links the brain minted through the box's admin
+// mint handler. The Go bot mints its own links (via "telegram") and edits
+// their Telegram messages itself, so the brain's sweep leaves those alone.
+const brainLinkVia = "admin"
+
 type AuditRow struct {
 	At     int64  `json:"at"`
 	Actor  string `json:"actor"`
@@ -68,13 +73,17 @@ func (s *Store) ConsumeLink(tok string) (string, bool) {
 	return device, true
 }
 
-// DeleteLinkTokens removes the given tokens from the store. The caller
-// uses it once the brain has been told a link died: a token past its TTL
-// can no longer be claimed, so nothing else needs the row, and keeping
-// it would make every sweep report the same dead link again.
+// DeleteLinkTokens removes the given brain links from the store. The
+// caller uses it once the brain has been told a link died: a token past
+// its TTL can no longer be claimed, so nothing else needs the row, and
+// keeping it would make every sweep report the same dead link again.
+//
+// Only the brain's own links are removed. A Go bot link passed in by
+// mistake is left alone: that link still has an expired-link edit to
+// make, and the brain would never make it.
 func (s *Store) DeleteLinkTokens(tokens []string) error {
 	for _, tok := range tokens {
-		if _, err := s.db.Exec(`DELETE FROM link_tokens WHERE token=?`, tok); err != nil {
+		if _, err := s.db.Exec(`DELETE FROM link_tokens WHERE token=? AND via=?`, tok, brainLinkVia); err != nil {
 			return err
 		}
 	}
@@ -85,11 +94,15 @@ func (s *Store) DeleteLinkTokens(tokens []string) error {
 // their TTL: the brain has to learn that its links died. At most limit
 // tokens, oldest first. A token that was used is spent, not dead, so it
 // is never reported.
+//
+// Only the brain's own links are reported. The Go bot's links are its
+// own business: its sweeper still has to edit their Telegram messages,
+// and the brain would ignore them anyway.
 func (s *Store) ExpiredLinkTokens(limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT token FROM link_tokens WHERE used_at IS NULL AND created_at<strftime('%s','now')-? ORDER BY created_at LIMIT ?`, int64(linkTTL.Seconds()), limit)
+	rows, err := s.db.Query(`SELECT token FROM link_tokens WHERE via=? AND used_at IS NULL AND created_at<strftime('%s','now')-? ORDER BY created_at LIMIT ?`, brainLinkVia, int64(linkTTL.Seconds()), limit)
 	if err != nil {
 		return nil, err
 	}
