@@ -38,13 +38,14 @@ func MintHandler(st *store.Store, exec func() (string, error), publicBase string
 		// after a failed mint, so our fresh token is claimable again.
 		for range 2 {
 			if st.ClaimIdem(key, tok) {
-				// Eager exec keeps mint rate-limit accounting in one
-				// place (mint.Mint); the tap-time flow mints the
-				// delivered session. The parsed link itself is not
-				// served: the console deals in one-tap proxy URLs only.
+				// Eager exec proves pairing works before the link is
+				// served: the tap-time flow mints the delivered
+				// session, and only that session counts against the
+				// rate cap. The parsed link itself is not served: the
+				// console deals in one-tap proxy URLs only.
 				ua := r.Header.Get("User-Agent")
 				ip := clientIP(r)
-				if _, err := mint.Mint(st, exec, "admin", "admin"); err != nil {
+				if _, err := mint.Preflight(st, exec, "admin"); err != nil {
 					st.ReleaseIdem(key, tok)
 					st.ConsumeLink(tok)
 					st.AuditUA("admin", "mint_failed", "admin", ip, err.Error(), ua)

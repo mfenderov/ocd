@@ -76,6 +76,24 @@ func TestTapMintsAndRedirectsOnce(t *testing.T) {
 	}
 }
 
+// The tap is the session: it is the one exec that counts against the
+// owner's budget.
+func TestTapCountsOneSession(t *testing.T) {
+	t.Setenv("OCD_PAIR_OPEN", "1")
+	noBrain(t)
+	st := openStore(t)
+	tok, _ := st.IssueLink("admin", "admin")
+	h := pair.Handler(st, func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil })
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/pair?t="+tok, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	if got := st.CountRecentMints("", time.Hour); got != 1 {
+		t.Fatalf("want 1 session counted, got %d", got)
+	}
+}
+
 func TestRawUAStored(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	noBrain(t)

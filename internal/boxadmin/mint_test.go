@@ -8,8 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
+	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/store"
 )
 
@@ -90,6 +92,49 @@ func TestClaimedKeyMintsFresh(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("want 2 exec, got %d", calls)
+	}
+}
+
+// The link the console serves is not a session yet: the session is the tap
+// that redeems it. Issuing a link must not spend the owner's budget.
+func TestMintHandlerDoesNotSpendASession(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
+	postMint(t, h, "key-1")
+	if got := st.CountRecentMints("", time.Hour); got != 0 {
+		t.Fatalf("issuing a link must not count a session, got %d", got)
+	}
+}
+
+// The budget is the delivered sessions. Once it is spent the box refuses
+// the link instead of handing out one that cannot be used.
+func TestMintHandlerRefusesWhenTheSessionBudgetIsSpent(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	// The tap-time mint is the session that counts.
+	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	for i := 0; i < 5; i++ {
+		if _, err := mint.Mint(st, exec, "admin", "web"); err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+	}
+	calls := 0
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, func() (string, error) {
+		calls++
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	}, "https://oc-tap.buyallmemes.com/pair"))
+	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	req.Header.Set("Idempotency-Key", "key-budget")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("want 429 once the budget is spent, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("a refused link must not run the exec, calls=%d", calls)
 	}
 }
 
