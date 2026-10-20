@@ -129,20 +129,24 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		// without this the browser gets 401 and no link ever works.
 		"OCD_PAIR_OPEN": "1",
 	}
+	// The tunnel id tells the brain which cloudflared tunnel this box
+	// uses, so the brain can own the box's DNS later. It stays empty
+	// when the box has no tunnel.
+	var tunnelID string
 	if cfg.Tunnel != nil {
 		// Onboard-provisioned tunnel => onboard-supervised tunnel:
 		// `ocd serve` manages cloudflared itself, no external service.
 		envVals["OCD_MANAGE_TUNNEL"] = "1"
-	}
-	if cfg.Tunnel != nil {
 		say("setting up tunnel " + cfg.Tunnel.Name)
-		if _, err := SetupTunnel(ctx, *cfg.Tunnel, say); err != nil {
+		id, err := SetupTunnel(ctx, *cfg.Tunnel, say)
+		if err != nil {
 			return err
 		}
+		tunnelID = id
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet})
+	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
 	if err != nil {
 		return err
 	}

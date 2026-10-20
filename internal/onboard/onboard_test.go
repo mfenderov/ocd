@@ -620,3 +620,37 @@ func TestLoadEnvFileExpandsHome(t *testing.T) {
 		t.Fatalf("OCD_OTHER = %q", vals["OCD_OTHER"])
 	}
 }
+
+// The enrolment tells the brain which tunnel this box uses, so the brain
+// can own the box's DNS later.
+func TestOnboardSendsTunnelID(t *testing.T) {
+	dir := t.TempDir()
+	const tunnelID = "99999999-0000-0000-0000-000000000000"
+	fakeCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "Created tunnel oc-mac with id " + tunnelID,
+		"tunnel route":  "Added CNAME",
+	}, nil)
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
+	}))
+	defer srv.Close()
+	plan := onboard.DefaultTunnelPlan("mac")
+	plan.CredDir = filepath.Join(dir, ".cloudflared")
+	plan.APIToken = "test-token" // no cloudflared login needed
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: onboard.TapHost("mac"),
+		Tunnel:  &plan,
+		EnvPath: filepath.Join(dir, "env"), DBPath: filepath.Join(dir, "ocd.db"),
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	if body["tunnel_id"] != tunnelID {
+		t.Fatalf("want tunnel_id %q, got %v", tunnelID, body["tunnel_id"])
+	}
+}

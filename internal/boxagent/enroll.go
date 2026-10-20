@@ -19,6 +19,9 @@ type enrollRequest struct {
 	Hostname    string `json:"hostname"`
 	EnrollToken string `json:"enroll_token"`
 	AdminToken  string `json:"admin_token,omitempty"`
+	// TunnelID is the box's cloudflared tunnel id, empty when the box
+	// has no tunnel.
+	TunnelID string `json:"tunnel_id,omitempty"`
 	// Quiet suppresses the Worker-side approve/deny ping. Used by the
 	// code flow: the token message is the only message the owner needs.
 	Quiet bool `json:"quiet,omitempty"`
@@ -33,6 +36,9 @@ type EnrollOptions struct {
 	// lets the box claim it by typing the code (no approve tap). Without
 	// it the pending row needs the approve tap.
 	Bearer string
+	// TunnelID is the box's cloudflared tunnel id, empty when the box
+	// has no tunnel. The Worker keeps it so it can own the box's DNS.
+	TunnelID string
 }
 
 type enrollResponse struct {
@@ -82,6 +88,7 @@ func EnrollBoxTrusted(ctx context.Context, client *http.Client, workerURL, id, h
 		Hostname:    hostname,
 		EnrollToken: enrollToken,
 		AdminToken:  adminToken,
+		TunnelID:    opts.TunnelID,
 		Quiet:       opts.Quiet,
 	})
 	if err != nil {

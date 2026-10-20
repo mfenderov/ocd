@@ -56,6 +56,46 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 	}
 }
 
+// The enrolment tells the brain which cloudflared tunnel the box uses,
+// so the brain can own the box's DNS later. A box without a tunnel must
+// leave the key out entirely, not send an empty id.
+func TestEnrollPostsTunnelID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		tunnelID string
+		want     string
+		present  bool
+	}{
+		{name: "with a tunnel", tunnelID: "tun-123", want: "tun-123", present: true},
+		{name: "without a tunnel", tunnelID: "", present: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(raw, &body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"enrolled","id":"box-9"}`))
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{TunnelID: tc.tunnelID})
+			if err != nil {
+				t.Fatalf("EnrollBox: %v", err)
+			}
+			got, ok := body["tunnel_id"]
+			if ok != tc.present {
+				t.Fatalf("tunnel_id present=%v, want %v (body %v)", ok, tc.present, body)
+			}
+			if tc.present && got != tc.want {
+				t.Fatalf("want tunnel_id %q, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestEnrollRefusesEmptyIdentity(t *testing.T) {
 	hit := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
