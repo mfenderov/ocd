@@ -68,6 +68,28 @@ describe("telegram client", () => {
     expect(body["text"]).toBe("✅ done");
   });
 
+  it("sendMessage rejects when the answer carries no message id", async () => {
+    const noResult = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true }), []));
+    await expect(noResult.sendMessage(7, "hi")).rejects.toThrow(/no message id/);
+
+    const wrongType = createTelegramClient(
+      "TOKEN",
+      stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: "42" } }), []),
+    );
+    await expect(wrongType.sendMessage(7, "hi")).rejects.toThrow(/no message id/);
+  });
+
+  it("editMessageText reports what telegram said: true when it edited, false when it did not", async () => {
+    const edited = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), []));
+    await expect(edited.editMessageText(7, 42, "done")).resolves.toBe(true);
+
+    const notEdited = createTelegramClient(
+      "TOKEN",
+      stubFetcher(200, JSON.stringify({ ok: true, result: false }), []),
+    );
+    await expect(notEdited.editMessageText(7, 42, "done")).resolves.toBe(false);
+  });
+
   it("answerCallbackQuery posts the callback id and the toast text", async () => {
     const calls: FetchCall[] = [];
     const client = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), calls));
@@ -129,6 +151,31 @@ describe("telegram client", () => {
     const client = createTelegramClient("TOKEN", down);
 
     await expect(client.sendMessage(7, "hi")).rejects.toThrow(/sendMessage/);
+  });
+
+  it("a network failure keeps the cause for debugging, but never the token", async () => {
+    const inner = new Error("connect ECONNREFUSED https://api.telegram.org/botSECRET-TOKEN/sendMessage");
+    const outer = new Error("fetch failed", { cause: inner });
+    const down = (async () => {
+      throw outer;
+    }) as typeof fetch;
+    const client = createTelegramClient("SECRET-TOKEN", down);
+
+    const err = await client.sendMessage(7, "hi").then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain("SECRET-TOKEN");
+    // The cause is still there — a transport failure is worth reading.
+    const cause = (err as Error).cause as Error;
+    expect(cause.message).toContain("fetch failed");
+    // The token is in the URL, and a transport error can quote the URL:
+    // neither the cause nor its own cause may carry it.
+    expect(cause.message).not.toContain("SECRET-TOKEN");
+    expect(String(cause.stack)).not.toContain("SECRET-TOKEN");
+    expect((cause.cause as Error).message).not.toContain("SECRET-TOKEN");
   });
 
   it("escapeHtml escapes the three characters html parse mode cares about", () => {

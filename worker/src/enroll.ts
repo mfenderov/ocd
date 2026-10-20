@@ -1,4 +1,5 @@
 import { hashToken, tokenMatches } from "./heartbeat";
+import { createTelegramClient, escapeHtml, TelegramError } from "./telegram";
 import type { BoxRow, DenialRow } from "./state";
 
 // Enrollment request body (box JSON contract, snake_case): a box that wants
@@ -279,10 +280,6 @@ export async function issueCapabilityLink(opts: {
   return link;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 export function enrollPingText(
   body: Pick<EnrollBody, "id" | "hostname">,
   links: { approve: string; deny: string },
@@ -309,37 +306,33 @@ export function rotationPingText(id: string, now: number): string {
   return `🔑 <b>Admin token rotated</b> · <code>${escapeHtml(id)}</code> · ${when}`;
 }
 
-// Direct Bot API call. Bot token + owner chat id come from Worker env only
-// (see telegramNotifier). Failures log the status code alone — never the URL
-// (it embeds the token), body, or chat id.
+// Owner ping, sent through the Telegram client — the one place that knows
+// the Bot API's shape. Bot token + owner chat id come from Worker env only
+// (see telegramNotifier). The contract is unchanged: the ping never throws,
+// a failure is reported as false, and the log carries the reason alone —
+// never the URL (it embeds the token), the body, or the chat id.
 export async function sendTelegramMessage(
   botToken: string,
   chatId: string,
   text: string,
   fetcher: typeof fetch = fetch,
 ): Promise<boolean> {
-  const init: RequestInit = {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-    }),
-  };
-  let res: Response;
+  // The env carries the chat id as a string, the client takes a number —
+  // the Go bot parses its owner id the same way.
+  const chat = Number(chatId);
+  if (!Number.isInteger(chat)) {
+    console.error("enroll: telegram send failed (bad chat id)");
+    return false;
+  }
+  const client = createTelegramClient(botToken, fetcher);
   try {
-    res = await fetcher(`https://api.telegram.org/bot${botToken}/sendMessage`, init);
-  } catch {
-    console.error("enroll: telegram send failed (network)");
+    await client.sendMessage(chat, text);
+    return true;
+  } catch (err) {
+    const reason = err instanceof TelegramError ? err.reason : "unknown error";
+    console.error(`enroll: telegram send failed (${reason})`);
     return false;
   }
-  if (!res.ok) {
-    console.error(`enroll: telegram send failed (status ${res.status})`);
-    return false;
-  }
-  return true;
 }
 
 export function telegramNotifier(

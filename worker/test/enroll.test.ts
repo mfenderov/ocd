@@ -354,20 +354,21 @@ describe("heartbeat token mismatch is rejected + alerted", () => {
   });
 });
 
-describe("telegram ping (Bot API, direct fetch)", () => {
+describe("telegram ping (Bot API, through the client)", () => {
   it("posts chat_id + text to sendMessage and reports ok", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetcher = (async (url: string, init?: RequestInit) => {
       calls.push({ url, init: init ?? {} });
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
     }) as typeof fetch;
-    const ok = await sendTelegramMessage("bot-secret-1", "chat-1", "hello", fetcher);
+    // The env carries the chat id as a string; the client sends a number.
+    const ok = await sendTelegramMessage("bot-secret-1", "42", "hello", fetcher);
     expect(ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.telegram.org/botbot-secret-1/sendMessage");
     expect(calls[0].init.method).toBe("POST");
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
-      chat_id: "chat-1",
+      chat_id: 42,
       text: "hello",
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
@@ -377,14 +378,26 @@ describe("telegram ping (Bot API, direct fetch)", () => {
   it("never throws and never logs secrets on transport or API failure", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const apiFail = (async () => new Response("nope", { status: 429 })) as typeof fetch;
-    await expect(sendTelegramMessage("bot-secret-9", "chat-9", "t", apiFail)).resolves.toBe(false);
+    await expect(sendTelegramMessage("bot-secret-9", "9", "t", apiFail)).resolves.toBe(false);
     const netFail = (async () => {
       throw new Error("down");
     }) as typeof fetch;
-    await expect(sendTelegramMessage("bot-secret-9", "chat-9", "t", netFail)).resolves.toBe(false);
+    await expect(sendTelegramMessage("bot-secret-9", "9", "t", netFail)).resolves.toBe(false);
     const logged = error.mock.calls.map((args) => args.map(String).join(" ")).join("\n");
     expect(logged).not.toContain("bot-secret-9");
     expect(logged).not.toContain("api.telegram.org");
+  });
+
+  it("a chat id that is not a number fails without asking telegram", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+    }) as typeof fetch;
+
+    await expect(sendTelegramMessage("bot-secret-1", "not-a-chat-id", "hello", fetcher)).resolves.toBe(false);
+    expect(calls).toHaveLength(0);
   });
 });
 
