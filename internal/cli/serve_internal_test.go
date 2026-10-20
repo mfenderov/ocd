@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -58,6 +59,40 @@ func TestMountAdminServesStatusBehindAuth(t *testing.T) {
 	}
 	if code, _, _ := get(""); code != http.StatusUnauthorized {
 		t.Fatalf("want 401 without the admin token, got %d", code)
+	}
+}
+
+// A hung opencode must not keep the box's goroutine forever: the status
+// relay answers within its own deadline and the exec dies with it.
+func TestMountAdminStatusDoesNotWaitForAHungOpencode(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// A fake opencode that never answers. `exec` replaces the shell with
+	// sleep, so killing the process kills the sleep too.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OCD_ADMIN_TOKEN", "admin-secret")
+	mux := http.NewServeMux()
+	mountAdmin(mux, io.Discard, st, func() (string, error) { return "", nil })
+
+	req := httptest.NewRequest("GET", "/_oc/status", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	mux.ServeHTTP(rec, req)
+
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("the status relay waited for the hung command: %s", elapsed)
+	}
+	if !strings.Contains(rec.Body.String(), "service=DOWN") {
+		t.Fatalf("want a DOWN line, got %q", rec.Body.String())
 	}
 }
 

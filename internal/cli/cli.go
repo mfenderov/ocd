@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -139,8 +140,8 @@ func Root() *cobra.Command {
 			out, err := exec.Command("opencode", "service", "status").Output()
 			_ = out
 			_ = err
-			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(st, func(name string, args ...string) (string, error) {
-				o, e := exec.Command(name, args...).Output()
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(cmd.Context(), st, func(ctx context.Context, name string, args ...string) (string, error) {
+				o, e := exec.CommandContext(ctx, name, args...).Output()
 				return string(o), e
 			}))
 			return nil

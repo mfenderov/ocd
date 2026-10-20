@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -11,6 +12,11 @@ import (
 
 // exec runs `opencode service ...`. Injected for tests.
 type execFunc func(name string, args ...string) (string, error)
+
+// ctxExec runs `opencode service ...` under the caller's deadline, so a
+// hung command ends with the deadline instead of pinning the caller's
+// goroutine forever. Injected for tests.
+type ctxExec func(ctx context.Context, name string, args ...string) (string, error)
 
 func newPassword() (string, error) {
 	var b [24]byte
@@ -44,13 +50,16 @@ func Revoke(st *store.Store, exec execFunc) error {
 	return nil
 }
 
-func Status(st *store.Store, exec execFunc) string {
-	addr, err := exec("opencode", "service", "status")
+// Status is the service status line. The exec runs under ctx: the caller
+// bounds it, so a hung opencode ends with the deadline instead of holding
+// the caller's goroutine forever.
+func Status(ctx context.Context, st *store.Store, exec ctxExec) string {
+	addr, err := exec(ctx, "opencode", "service", "status")
 	status := "service=" + firstLine(addr)
 	if err != nil {
 		status = "service=DOWN:" + err.Error()
 	}
-	remote, _ := exec("opencode", "service", "get", "remote")
+	remote, _ := exec(ctx, "opencode", "service", "get", "remote")
 	return fmt.Sprintf("%s remote=%s devices=%d mints24h=%d\n",
 		status, firstLine(remote), len(st.ListDevices()),
 		st.CountRecentMints("", 24*time.Hour))

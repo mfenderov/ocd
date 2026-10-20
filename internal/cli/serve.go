@@ -71,12 +71,16 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 	if publicBase == "" {
 		publicBase = "https://oc-tap.buyallmemes.com/pair"
 	}
-	execService := func(name string, args ...string) (string, error) {
-		out, err := exec.Command(name, args...).Output()
+	execService := func(ctx context.Context, name string, args ...string) (string, error) {
+		out, err := exec.CommandContext(ctx, name, args...).Output()
 		return string(out), err
 	}
 	mux.Handle("/_oc/mint", boxadmin.RequireAdmin(st, token, boxadmin.MintHandler(st, execPair, publicBase)))
-	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, execService)))
+	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, func(name string, args ...string) (string, error) {
+		// Revoke runs to the end: a half-revoked box is worse than a
+		// slow one, so it gets no deadline.
+		return execService(context.Background(), name, args...)
+	})))
 	mux.Handle("/_oc/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
 	mux.Handle("/_oc/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
 	mux.Handle("/_oc/status", boxadmin.RequireAdmin(st, token, boxadmin.StatusHandler(st, execService)))
