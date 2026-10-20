@@ -70,11 +70,14 @@ export function stateDot(state: string): string {
 // The label carries the box's state, so the owner sees at a glance which
 // machine is up; the payload asks for a link for that box, the way the
 // Go's "flink:" button did.
-export function fleetBoard(boxes: BoxPublic[]): InlineButton[][] {
+//
+// The clock comes from the caller: the board's label and the fleet's
+// text must read the same second, or they can call one box ok and the
+// other offline.
+export function fleetBoard(boxes: BoxPublic[], now: number): InlineButton[][] {
   if (boxes.length === 0) {
     return [];
   }
-  const now = nowSec();
   const row = boxes.map((box) => ({
     text: boxLabel(box, now),
     callback_data: callbackData("link", box.id),
@@ -86,8 +89,8 @@ export function fleetBoard(boxes: BoxPublic[]): InlineButton[][] {
 // sends one keyboard for /fleet and /link — "/link is the menu: which
 // machine do you want to work in?" (internal/tg/tg.go) — so the menu and
 // the board are the same buttons.
-export function linkMenu(boxes: BoxPublic[]): InlineButton[][] {
-  return fleetBoard(boxes);
+export function linkMenu(boxes: BoxPublic[], now: number): InlineButton[][] {
+  return fleetBoard(boxes, now);
 }
 
 // The Open button: the Go's openButton.
@@ -117,9 +120,4 @@ export function parseCallback(data: string): { action: string; boxId: string } |
 function boxLabel(box: BoxPublic, now: number): string {
   const label = `${stateDot(boxState(box, now))} ${box.id}`;
   return label.length > LABEL_MAX ? label.slice(0, LABEL_MAX) : label;
-}
-
-// The brain's clock: Unix seconds, like the DO's other timestamps.
-function nowSec(): number {
-  return Math.floor(Date.now() / 1000);
 }

@@ -21,6 +21,23 @@ const TELEGRAM: TelegramClient = {
   setWebhook: async () => {},
 };
 
+// The client that remembers the taps it answered: a tap that is not
+// answered leaves the owner's button spinning.
+function recordingTelegram(): { telegram: TelegramClient; answered: string[] } {
+  const answered: string[] = [];
+  return {
+    answered,
+    telegram: {
+      sendMessage: async () => ({ message_id: 1 }),
+      editMessageText: async () => true,
+      answerCallbackQuery: async (callbackId) => {
+        answered.push(callbackId);
+      },
+      setWebhook: async () => {},
+    },
+  };
+}
+
 // A store that remembers the updates it handled, like the DO's
 // seen_updates table: seenUpdate is true while the update is new.
 class MemoryStore implements BotStore {
@@ -150,6 +167,56 @@ describe("the command", () => {
     expect(commands).toEqual([
       { name: "link", args: ["mac"], chatId: 7, callbackId: "cb-1", messageId: 42 },
     ]);
+  });
+
+  // The payload has one reader (botbuttons.parseCallback): the action,
+  // and the box it names. The tail is the box, whole.
+  it("reads the whole tail of the payload as the box", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+
+    await handleTelegramUpdate(
+      {
+        update_id: 13,
+        callback_query: { id: "cb-1", data: "link:mac:extra", message: { chat: { id: 7 }, message_id: 42 } },
+      },
+      { telegram: TELEGRAM, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(commands).toEqual([
+      { name: "link", args: ["mac:extra"], chatId: 7, callbackId: "cb-1", messageId: 42 },
+    ]);
+  });
+
+  // A tap the brain cannot act on still gets an answer: Telegram spins
+  // the button until the answer comes, and a stale button from an older
+  // message would spin forever.
+  it("answers a tap that carries no data", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const { telegram, answered } = recordingTelegram();
+
+    await handleTelegramUpdate(
+      { update_id: 14, callback_query: { id: "cb-2", data: "", message: { chat: { id: 7 } } } },
+      { telegram, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(answered).toEqual(["cb-2"]);
+    expect(commands).toEqual([]);
+  });
+
+  it("answers a tap that names no action", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const { telegram, answered } = recordingTelegram();
+
+    await handleTelegramUpdate(
+      { update_id: 15, callback_query: { id: "cb-3", data: ":mac", message: { chat: { id: 7 } } } },
+      { telegram, store, ownerChatId: 7, dispatch },
+    );
+
+    expect(answered).toEqual(["cb-3"]);
+    expect(commands).toEqual([]);
   });
 });
 

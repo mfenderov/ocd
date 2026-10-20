@@ -237,6 +237,24 @@ describe("the keyboards", () => {
 
     expect(telegram.sent[0].markup).toBeUndefined();
   });
+
+  // The board's label and the fleet's text read one clock and one rule,
+  // so they can never call the same box ok and offline.
+  it("labels a box the way the text reads it", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 3600 })],
+    });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    const text = telegram.sent[0].text;
+    const labels = telegram.sent[0].markup?.inline_keyboard?.[0].map((button) => button.text) ?? [];
+    expect(text).toContain("ok");
+    expect(text).toContain("offline");
+    expect(labels[0]).toContain("🟢");
+    expect(labels[1]).toContain("🔴");
+  });
 });
 
 describe("/flink", () => {
@@ -431,7 +449,9 @@ describe("the taps", () => {
     await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-3" }, deps);
 
     expect(telegram.answered).toEqual(["cb-3"]);
-    expect(telegram.sent[0].text).toContain("Fleet failed");
+    // The Go's callback wording: the link failed, not the fleet.
+    expect(telegram.sent[0].text).toContain("Link failed");
+    expect(telegram.sent[0].text).not.toContain("Fleet failed");
   });
 
   it("answers a tap for an action it does not know", async () => {

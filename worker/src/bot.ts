@@ -1,3 +1,4 @@
+import { parseCallback } from "./botbuttons";
 import { hashToken, tokenMatches } from "./heartbeat";
 import { createTelegramClient, type TelegramClient } from "./telegram";
 
@@ -100,20 +101,22 @@ function chatOf(update: BotUpdate): number | undefined {
 // word plus its arguments; a tap carries "<action>:<boxId>" in the
 // callback data and reaches the command layer as the action with the box
 // as its argument.
+//
+// The payload has one reader: botbuttons.parseCallback. The action and
+// the box it names are decided there, not here, so a change to the
+// format cannot leave the brain speaking two formats.
 function commandOf(update: BotUpdate, chatId: number): BotCommand | undefined {
   const tap = update.callback_query;
   if (tap) {
     const data = tap.data;
-    if (typeof data !== "string" || data === "") {
+    if (typeof data !== "string") {
       return undefined;
     }
-    const [rawAction, ...rawBox] = data.split(":");
-    const action = rawAction.trim();
-    const box = rawBox.map((part) => part.trim()).filter((part) => part !== "");
-    if (!action) {
+    const parsed = parseCallback(data);
+    if (!parsed) {
       return undefined;
     }
-    const cmd: BotCommand = { name: action, args: box, chatId };
+    const cmd: BotCommand = { name: parsed.action, args: parsed.boxId ? [parsed.boxId] : [], chatId };
     if (tap.id) {
       cmd.callbackId = tap.id;
     }
@@ -151,9 +154,29 @@ export async function handleTelegramUpdate(update: BotUpdate, deps: BotDeps): Pr
   deps.store.markUpdateSeen(update.update_id, nowSec());
   const cmd = commandOf(update, chatId);
   if (!cmd) {
+    // A tap the brain cannot act on still gets an answer: Telegram spins
+    // the button until the answer comes, and a stale button from an
+    // older message would spin forever. A message that is not a command
+    // carries no callback, so nothing is sent for it.
+    await answerDroppedTap(update, deps);
     return;
   }
   await deps.dispatch(cmd);
+}
+
+// The answer for a tap the brain drops. A failure to answer is logged
+// and swallowed: the tap is already lost, and a throw here would make
+// Telegram retry an update that can never be acted on.
+async function answerDroppedTap(update: BotUpdate, deps: BotDeps): Promise<void> {
+  const callbackId = update.callback_query?.id;
+  if (!callbackId) {
+    return;
+  }
+  try {
+    await deps.telegram.answerCallbackQuery(callbackId);
+  } catch (err) {
+    console.error(`bot: the dropped tap was not answered (${String(err)})`);
+  }
 }
 
 // Telegram's webhook: the brain's one entry point. The secret header

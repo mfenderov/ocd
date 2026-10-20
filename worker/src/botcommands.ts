@@ -183,10 +183,13 @@ async function linkCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> 
   return boardReply(linkMenu, deps);
 }
 
-// The board's reply: the fleet's text and the keyboard under it.
-function boardReply(board: (boxes: BoxPublic[]) => InlineButton[][], deps: CommandDeps): Reply {
+// The board's reply: the fleet's text and the keyboard under it. One
+// clock for both, so the label and the text can never call the same box
+// ok and offline.
+function boardReply(board: (boxes: BoxPublic[], now: number) => InlineButton[][], deps: CommandDeps): Reply {
   const boxes = deps.listBoxes();
-  return { text: fleetText(boxes, nowSec()), keyboard: board(boxes) };
+  const now = nowSec();
+  return { text: fleetText(boxes, now), keyboard: board(boxes, now) };
 }
 
 // /flink <box>: a tap URL for one box. The URL is single-use; it travels
@@ -214,7 +217,14 @@ async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply
     // for the relay to time out.
     return { text: offlineText(known, now) };
   }
-  const url = await deps.mintLink(box);
+  let url: string;
+  try {
+    url = await deps.mintLink(box);
+  } catch (err) {
+    // The Go's callback answer when the mint fails: the link failed,
+    // not the fleet (internal/tg/buttons.go).
+    return { text: linkFailedText(err) };
+  }
   return { text: tapLinkText(box), keyboard: [[openButton(`🚀 Open ${box}`, url)]] };
 }
 
@@ -342,6 +352,12 @@ function fmtAgo(seconds: number): string {
 // The failure answer, the Go bot's sendFleetReply.
 function fleetFailedText(err: unknown): string {
   return `⚠️ <b>Fleet failed:</b> ${escapeHtml(errorText(err))}`;
+}
+
+// The failed link, the Go bot's callback answer: "⚠️ <b>Link failed:</b> …"
+// (internal/tg/buttons.go). The fleet is fine; the link is not.
+function linkFailedText(err: unknown): string {
+  return `⚠️ <b>Link failed:</b> ${escapeHtml(errorText(err))}`;
 }
 
 // The tap link, the Go bot's FleetLinkText.

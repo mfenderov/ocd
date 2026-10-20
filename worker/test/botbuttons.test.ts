@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { callbackData, fleetBoard, linkMenu, openButton, parseCallback } from "../src/botbuttons";
 import type { BoxPublic } from "../src/state";
 
+// The clock the board reads. A fixed second, so the labels are exact:
+// the board takes the clock from its caller, it does not read one of
+// its own.
+const NOW = 1_700_000_000;
+
 // A box, with the fields the board reads: its id and when it was last
 // seen. The rest is what the fleet always sends.
 function box(overrides: Partial<BoxPublic> & { id: string }): BoxPublic {
@@ -10,7 +15,7 @@ function box(overrides: Partial<BoxPublic> & { id: string }): BoxPublic {
     epoch: 1,
     last_seq: 1,
     last_ts: 0,
-    last_seen: Math.floor(Date.now() / 1000) - 10,
+    last_seen: NOW - 10,
     enrolled: 1,
     tombstoned: false,
     ...overrides,
@@ -22,12 +27,14 @@ describe("the fleet board", () => {
   // per box, labeled with the box's state, so the owner sees which
   // machine is up without asking.
   it("offers one button per box, labeled with its state", () => {
-    const now = Math.floor(Date.now() / 1000);
-    const rows = fleetBoard([
-      box({ id: "home", last_seen: now - 10 }),
-      box({ id: "mac", last_seen: now - 3600 }),
-      box({ id: "vm", last_seen: now - 10 }),
-    ]);
+    const rows = fleetBoard(
+      [
+        box({ id: "home" }),
+        box({ id: "mac", last_seen: NOW - 3600 }),
+        box({ id: "vm" }),
+      ],
+      NOW,
+    );
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveLength(3);
@@ -41,22 +48,33 @@ describe("the fleet board", () => {
   });
 
   it("marks a box whose revoke is pending", () => {
-    const rows = fleetBoard([box({ id: "mac", tombstoned: true })]);
+    const rows = fleetBoard([box({ id: "mac", tombstoned: true })], NOW);
 
     expect(rows[0][0].text).toContain("🟠");
     expect(rows[0][0].text).toContain("mac");
   });
 
+  // The board reads the clock its caller gives it, not the wall clock:
+  // the label and the fleet's text must never disagree.
+  it("reads the clock it is given", () => {
+    const boxes = [box({ id: "home" })];
+    // Seen ten seconds before the caller's clock, so it is ok — even
+    // though the wall clock says the box has been silent for years.
+    expect(fleetBoard(boxes, NOW)[0][0].text).toContain("🟢");
+    // The same box, read an hour later, is offline.
+    expect(fleetBoard(boxes, NOW + 3600)[0][0].text).toContain("🔴");
+  });
+
   // The button's payload names the box it acts on, so a tap knows which
   // machine it means.
   it("names the box the button acts on", () => {
-    const rows = fleetBoard([box({ id: "mac" })]);
+    const rows = fleetBoard([box({ id: "mac" })], NOW);
 
     expect(rows[0][0].callback_data).toBe("link:mac");
   });
 
   it("has no buttons when no box is enrolled", () => {
-    expect(fleetBoard([])).toEqual([]);
+    expect(fleetBoard([], NOW)).toEqual([]);
   });
 });
 
@@ -67,7 +85,7 @@ describe("the link menu", () => {
   it("offers the same boxes the board offers", () => {
     const boxes = [box({ id: "home" }), box({ id: "mac" })];
 
-    expect(linkMenu(boxes)).toEqual(fleetBoard(boxes));
+    expect(linkMenu(boxes, NOW)).toEqual(fleetBoard(boxes, NOW));
   });
 });
 
