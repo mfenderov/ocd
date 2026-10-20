@@ -71,15 +71,25 @@ export interface AuditRow {
   token: string;
 }
 
-// The store the ingest writes to: the Durable Object's own tables.
-export interface EventStore {
+// The link rows the message edits work on.
+export interface LinkStore {
   linkRow(token: string): LinkRow | undefined;
   putLink(row: LinkRow): void;
+}
+
+// The store the ingest writes to: the Durable Object's own tables.
+export interface EventStore extends LinkStore {
   // True when the link is in that state and the edit is still owed: the
   // first report, or a retry after a failed edit.
   markLinkUsed(token: string, ip: string, ua: string, at: number): boolean;
   markLinkExpired(token: string): boolean;
   addAuditRow(row: AuditRow): boolean;   // false when it is a duplicate
+}
+
+// The store the owed-edit sweep reads: the links whose message still
+// owes an edit.
+export interface OwedEditStore extends LinkStore {
+  owedLinks(): LinkRow[];
 }
 
 // What the ingest needs from the outside: the client that carries the
@@ -224,7 +234,7 @@ async function applyLinkUsed(
   if (!store.markLinkUsed(link.token, event.ip ?? "", event.ua ?? "", at)) {
     return;
   }
-  await editLink(link, usedText(at, event.ip ?? "", event.ua ?? ""), store, deps);
+  await editLink(link, usedText(at, event.ip ?? "", event.ua ?? ""), store, deps.telegram);
 }
 
 // The link died: the link is dead and its message says so.
@@ -241,7 +251,7 @@ async function applyLinkExpired(
   if (!store.markLinkExpired(link.token)) {
     return;
   }
-  await editLink(link, expiredText(), store, deps);
+  await editLink(link, expiredText(), store, deps.telegram);
 }
 
 // The audit row: it lands in the brain's history. A row the brain already
@@ -294,10 +304,9 @@ function knownLink(token: string | undefined, boxId: string, store: EventStore):
 async function editLink(
   link: LinkRow,
   text: string,
-  store: EventStore,
-  deps: EventDeps,
+  store: LinkStore,
+  telegram: TelegramClient | undefined,
 ): Promise<void> {
-  const telegram = deps.telegram;
   if (!telegram) {
     // No Telegram client: the link stays owed, and the alarm sweep drives
     // the edit when the brain has a token again.
@@ -317,6 +326,39 @@ async function editLink(
   if (current) {
     store.putLink({ ...current, edited: 1 });
   }
+}
+
+// The most links one sweep may edit. The alarm must stay short: the
+// links that do not fit wait for the next tick.
+const MAX_OWED_EDITS = 50;
+
+// The owed-edit pass: the links whose message edit did not land.
+//
+// The ingest marks a link edited only when the edit landed, so a
+// Telegram outage leaves the link owed. This pass is what drives it: the
+// alarm runs it every 30 seconds, so a live link in the owner's chat
+// cannot survive a Telegram outage.
+export async function sweepOwedEdits(
+  store: OwedEditStore,
+  deps: { telegram?: TelegramClient },
+): Promise<void> {
+  const telegram = deps.telegram;
+  if (!telegram) {
+    // No Telegram client: the edits stay owed.
+    return;
+  }
+  for (const link of store.owedLinks().slice(0, MAX_OWED_EDITS)) {
+    await editLink(link, owedText(link), store, telegram);
+  }
+}
+
+// The message the link's message must carry: what the ingest would have
+// written, read back from the link's own row.
+function owedText(link: LinkRow): string {
+  if (link.state === "used") {
+    return usedText(link.used_at, link.used_ip, link.used_ua);
+  }
+  return expiredText();
 }
 
 // The message of a spent link, ported from the Go sweeper

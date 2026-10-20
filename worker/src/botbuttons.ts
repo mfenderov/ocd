@@ -1,3 +1,4 @@
+import { OFFLINE_AFTER_SEC } from "./liveness";
 import type { BoxPublic } from "./state";
 
 // The brain's inline keyboards: the buttons the owner taps.
@@ -36,15 +37,11 @@ export type Action = "link" | "revoke" | "audit" | "board";
 // id shows two characters more here.
 const LABEL_MAX = 32;
 
-// How long a box may go without a heartbeat before it reads offline:
-// three missed beats at the 30 second fleet heartbeat. The rule lives
-// here because the board's label and the fleet's text must agree on a
-// box's state.
-const OFFLINE_AFTER_SEC = 90;
-
 // The state of one box: tombstoned wins over staleness, then a box
 // quieter than the offline threshold reads offline (the Go's
-// fleet.BoxState).
+// fleet.BoxState). The threshold itself lives in liveness.ts: the
+// board's label, the fleet's text and the brain's liveness sweep must
+// agree on a box's state.
 export function boxState(box: BoxPublic, now: number): string {
   if (box.tombstoned) {
     return "tombstoned";

@@ -137,6 +137,8 @@ describe("guarded-route exhaustiveness (anonymous must 401 everywhere)", () => {
     { method: "POST", path: "/api/revoke-all", body: {} },
     { method: "POST", path: "/api/backends/rt-exhaust/link" },
     { method: "POST", path: "/api/backends/rt-exhaust/revoke", body: { confirm: true } },
+    { method: "GET", path: "/api/backends/rt-exhaust/presence" },
+    { method: "GET", path: "/api/backends/rt-exhaust/status" },
   ];
 
   it("every listed route maps to an edge scope (mapper parity with the router)", () => {

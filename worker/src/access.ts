@@ -80,6 +80,24 @@ export function scopeForEdgeRoute(method: string, pathname: string): CliScope | 
   ) {
     return "link";
   }
+  // The per-box reads: the box's presence and its status. Both are
+  // reads, so both need the audit scope like the other read routes.
+  if (
+    method === "GET" &&
+    pathname.startsWith("/api/backends/") &&
+    pathname.endsWith("/presence") &&
+    pathname.length > "/api/backends//presence".length
+  ) {
+    return "audit";
+  }
+  if (
+    method === "GET" &&
+    pathname.startsWith("/api/backends/") &&
+    pathname.endsWith("/status") &&
+    pathname.length > "/api/backends//status".length
+  ) {
+    return "audit";
+  }
   return null;
 }
 
@@ -99,6 +117,13 @@ export function scopeForDoRoute(method: string, pathname: string): CliScope | nu
   }
   if (method === "POST" && pathname.startsWith("/link/")) {
     return "link";
+  }
+  // The per-box relays: the box's presence and its status.
+  if (method === "GET" && pathname.startsWith("/presence/")) {
+    return "audit";
+  }
+  if (method === "GET" && pathname.startsWith("/status/")) {
+    return "audit";
   }
   return null;
 }

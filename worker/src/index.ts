@@ -123,6 +123,26 @@ export default {
     ) {
       return handleLinkApi(request, env);
     }
+    // The per-box relays: the box's presence and its status. Both are
+    // reads and need the audit scope, like the other read routes.
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/api/backends/") &&
+      url.pathname.endsWith("/presence") &&
+      url.pathname.length > "/api/backends//presence".length
+    ) {
+      const id = url.pathname.slice("/api/backends/".length, -"/presence".length);
+      return forwardToDo(request, env, `/presence/${encodeURIComponent(id)}`);
+    }
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/api/backends/") &&
+      url.pathname.endsWith("/status") &&
+      url.pathname.length > "/api/backends//status".length
+    ) {
+      const id = url.pathname.slice("/api/backends/".length, -"/status".length);
+      return forwardToDo(request, env, `/status/${encodeURIComponent(id)}`);
+    }
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
       return forwardToDo(request, env, "/heartbeat");
     }
