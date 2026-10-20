@@ -480,3 +480,25 @@ func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
 		t.Fatalf("pair url = %q", vals["OCD_PAIR_URL"])
 	}
 }
+
+// systemd's EnvironmentFile= takes values literally, so "$HOME" in the
+// env file must be expanded by the reader — otherwise the daemon opens a
+// literal "$HOME" directory and heartbeats with a fresh seq.
+func TestLoadEnvFileExpandsHome(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "env")
+	if err := os.WriteFile(p, []byte("OCD_DB=\"$HOME/.ocd/ocd.db\"\nOCD_OTHER=\"${HOME}/x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	vals, err := onboard.LoadEnvFile(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if vals["OCD_DB"] != dir+"/.ocd/ocd.db" {
+		t.Fatalf("OCD_DB = %q", vals["OCD_DB"])
+	}
+	if vals["OCD_OTHER"] != dir+"/x" {
+		t.Fatalf("OCD_OTHER = %q", vals["OCD_OTHER"])
+	}
+}

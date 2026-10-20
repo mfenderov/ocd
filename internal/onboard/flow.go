@@ -84,11 +84,18 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 5 * time.Second
 	}
+	var err error
+	dbPath := cfg.DBPath
+	if dbPath == "" {
+		dbPath, err = DefaultDBPath()
+		if err != nil {
+			return err
+		}
+	}
 	say("minting box secrets")
 	// The code the bot issued IS the box's heartbeat secret: the Worker
 	// binds the box to the token presented at enrollment, so anything
 	// else here would 401 on every heartbeat.
-	var err error
 	heartbeatToken := strings.TrimSpace(cfg.EnrollCode)
 	if heartbeatToken == "" {
 		heartbeatToken, err = GenerateSecret()
@@ -101,7 +108,10 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		return err
 	}
 	envVals := map[string]string{
-		"OCD_BOX_ID":          cfg.BoxID,
+		"OCD_BOX_ID": cfg.BoxID,
+		// Absolute paths: this file is read by shells AND by systemd's
+		// EnvironmentFile=, which does not expand $HOME.
+		"OCD_DB":              dbPath,
 		"OCD_WORKER_URL":      cfg.WorkerURL,
 		"OCD_HEARTBEAT_TOKEN": heartbeatToken,
 		"OCD_ENROLL_TOKEN":    heartbeatToken,
@@ -141,13 +151,6 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
 	}
 	say("waiting for Telegram approval…")
-	dbPath := cfg.DBPath
-	if dbPath == "" {
-		dbPath, err = DefaultDBPath()
-		if err != nil {
-			return err
-		}
-	}
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("onboard: open store: %w", err)

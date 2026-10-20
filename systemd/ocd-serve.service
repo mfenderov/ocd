@@ -1,0 +1,15 @@
+[Unit]
+Description=ocd daemon (pair links, box API, fleet heartbeat)
+After=network-online.target ocd-tunnel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/home/mfenderov/.opencode/bin:/home/mfenderov/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/mfenderov/.ocd/env
+ExecStart=/home/mfenderov/.local/bin/ocd serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

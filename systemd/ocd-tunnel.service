@@ -1,0 +1,14 @@
+[Unit]
+Description=ocd tunnel (Cloudflare -> this box)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/home/mfenderov/.opencode/bin:/home/mfenderov/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/mfenderov/.local/bin/cloudflared tunnel --config /home/mfenderov/.cloudflared/config.yml run oc-wsl
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -11,6 +11,9 @@ import (
 
 func TestRepairEnvFixesDerivedValues(t *testing.T) {
 	dir := t.TempDir()
+	// Isolate from this machine's own tunnel config: the repair reads
+	// hostnames from it when it exists.
+	t.Setenv("HOME", dir)
 	envPath := filepath.Join(dir, "env")
 	// Stale wiring: tap url without /pair, pair url pointing at the tap host.
 	old := "OCD_BOX_ID=\"mac\"\n" +
@@ -24,8 +27,8 @@ func TestRepairEnvFixesDerivedValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repair: %v", err)
 	}
-	if len(changed) != 3 {
-		t.Fatalf("want 3 changed keys, got %v", changed)
+	if len(changed) != 4 {
+		t.Fatalf("want 4 changed keys, got %v", changed)
 	}
 	vals, err := onboard.LoadEnvFile(envPath)
 	if err != nil {
@@ -102,5 +105,60 @@ func TestRepairTunnelKeepsTunnelID(t *testing.T) {
 	}
 	if fixed {
 		t.Fatal("repair must be idempotent")
+	}
+}
+
+// The tunnel config is the source of truth for hostnames: the primary
+// box does not follow the naming convention, and repair must not
+// rewrite its hostnames.
+func TestRepairTunnelKeepsHostnamesAndFixesPorts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	// No opencode on PATH: the editor port falls back to the default.
+	t.Setenv("PATH", t.TempDir())
+	cfgPath := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	old := "tunnel: " + id + "\n" +
+		"credentials-file: " + dir + "/" + id + ".json\n" +
+		"ingress:\n" +
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:30000\n" +
+		"  - service: http_status:404\n"
+	if err := os.WriteFile(cfgPath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := onboard.RepairTunnel(cfgPath, "home")
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !fixed {
+		t.Fatal("config should be rewritten")
+	}
+	raw, _ := os.ReadFile(cfgPath)
+	got := string(raw)
+	for _, want := range []string{"oc-tap.buyallmemes.com", "oc.buyallmemes.com", "49400", ":49374"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("must keep %q, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "oc-tap-home") || strings.Contains(got, "oc-home") {
+		t.Fatalf("repair must not invent hostnames, got:\n%s", got)
+	}
+}
+
+func TestParseIngress(t *testing.T) {
+	raw := "ingress:\n" +
+		"  - hostname: a.example.com\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: b.example.com\n    service: http://127.0.0.1:31047\n" +
+		"  - service: http_status:404\n"
+	rules := onboard.ParseIngress(raw)
+	if len(rules) != 2 {
+		t.Fatalf("want 2 rules, got %+v", rules)
+	}
+	if rules[0].Hostname != "a.example.com" || rules[0].Port != 49400 {
+		t.Fatalf("rule 0 = %+v", rules[0])
+	}
+	if rules[1].Hostname != "b.example.com" || rules[1].Port != 31047 {
+		t.Fatalf("rule 1 = %+v", rules[1])
 	}
 }

@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+// homeDir returns the user's home directory, or "" when it cannot be read.
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
 // LoadEnvFile parses a KEY="value" env file (comments and blanks ignored).
 // Only OCD_* keys are returned; anything else is left for the shell.
 func LoadEnvFile(path string) (map[string]string, error) {
@@ -33,6 +42,11 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		if unq, err := strconv.Unquote(val); err == nil {
 			val = unq
 		}
+		// $HOME is expanded here because not every consumer of this file
+		// expands it: systemd's EnvironmentFile= takes values literally,
+		// which once pointed the daemon at a literal "$HOME" directory.
+		val = strings.ReplaceAll(val, "${HOME}", homeDir())
+		val = strings.ReplaceAll(val, "$HOME", homeDir())
 		out[key] = val
 	}
 	if err := sc.Err(); err != nil {
