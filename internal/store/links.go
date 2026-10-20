@@ -80,7 +80,13 @@ func truncateUA(ua string) string {
 }
 
 func (s *Store) AuditUA(actor, action, device, ip, result, ua string) int64 {
-	res, _ := s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
+	res, err := s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
+	if err != nil {
+		// A closed store must not take the caller down: a background writer
+		// can outlive the daemon's shutdown, and a panic in a goroutine
+		// kills the whole process.
+		return 0
+	}
 	go s.prune()
 	id, _ := res.LastInsertId()
 	return id

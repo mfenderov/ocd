@@ -36,6 +36,22 @@ func TestAuditRoundTrip(t *testing.T) {
 	}
 }
 
+// A background writer can outlive the store's shutdown. Auditing into a
+// closed store must not panic: a panic in a goroutine kills the whole
+// process, and the box has to survive its own shutdown.
+func TestAuditOnAClosedStoreDoesNotPanic(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if id := st.AuditUA("box:mac", "push_failed", "mac", "1.2.3.4", "boom", "curl/8"); id != 0 {
+		t.Fatalf("want no row id from a closed store, got %d", id)
+	}
+}
+
 func TestAuditRowMarshalSnakeCaseKeys(t *testing.T) {
 	row := store.AuditRow{At: 1, Actor: "a", Action: "b", Device: "c", IP: "d", Result: "e", UA: "f"}
 	raw, err := json.Marshal(row)
