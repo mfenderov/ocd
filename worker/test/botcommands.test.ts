@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { runCommand, type AuditRow, type CommandDeps } from "../src/botcommands";
+import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "../src/botcommands";
 import type { RevokeResult } from "../src/revoke";
 import type { BoxPublic } from "../src/state";
 import type { TelegramClient } from "../src/telegram";
@@ -69,6 +69,7 @@ interface Calls {
   revokeAll: number;
   issueEnrollCode: string[];
   boxStatus: string[];
+  recorded: LinkRecord[];
 }
 
 // What the fleet answers with. The harness always records the calls, so a
@@ -98,6 +99,7 @@ function harness(options: HarnessOptions = {}): {
     revokeAll: 0,
     issueEnrollCode: [],
     boxStatus: [],
+    recorded: [],
   };
   const deps: CommandDeps = {
     telegram,
@@ -133,6 +135,9 @@ function harness(options: HarnessOptions = {}): {
     boxStatus: async (boxId) => {
       calls.boxStatus.push(boxId);
       return "service=http://127.0.0.1:49374 remote=? devices=2 mints24h=5";
+    },
+    recordLink: (link) => {
+      calls.recorded.push(link);
     },
     primaryBox: options.primaryBox ?? "home",
   };
@@ -510,6 +515,40 @@ describe("the edges", () => {
   });
 });
 
+describe("the link registry", () => {
+  it("records the link a tap handed out, with the message it rides on", async () => {
+    const { deps, calls } = harness();
+
+    await runCommand({ name: "link", args: ["mac"], chatId: 7 }, deps);
+
+    expect(calls.recorded).toEqual([{ token: "tok-1", box: "mac", chatId: 7, messageId: 1 }]);
+  });
+
+  it("records the link /flink handed out", async () => {
+    const { deps, calls } = harness();
+
+    await runCommand({ name: "/flink", args: ["home"], chatId: 7 }, deps);
+
+    expect(calls.recorded).toEqual([{ token: "tok-1", box: "home", chatId: 7, messageId: 1 }]);
+  });
+
+  it("records the link /login handed out, for the primary box", async () => {
+    const { deps, calls } = harness({ primaryBox: "mac" });
+
+    await runCommand({ name: "/login", args: [], chatId: 7 }, deps);
+
+    expect(calls.recorded).toEqual([{ token: "tok-1", box: "mac", chatId: 7, messageId: 1 }]);
+  });
+
+  it("records nothing when the reply carries no link", async () => {
+    const { deps, calls } = harness();
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    expect(calls.recorded).toEqual([]);
+  });
+});
+
 describe("the Durable Object's dispatch", () => {
   it("answers /fleet from the DO's own state", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands"));
@@ -534,5 +573,45 @@ describe("the Durable Object's dispatch", () => {
 
     expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].text).toContain("home");
+  });
+
+  // The brain's own history, not the boxes: the answer covers the boxes
+  // that are offline and the ones that were replaced.
+  it("answers /faudit from the brain's own history", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      instance.putBox({
+        id: "home",
+        hostname: "oc-tap-home.buyallmemes.com",
+        heartbeat_token_hash: "hb-hash",
+        admin_token_hash: "admin-hash",
+        admin_token_sealed: "",
+        epoch: 1,
+        last_seq: 1,
+        last_ts: 0,
+        last_seen: Math.floor(Date.now() / 1000) - 5,
+        enrolled: 1,
+      });
+      instance.addAuditRow({
+        box: "home",
+        at: 1699999900,
+        actor: "web:1.2.3.4",
+        action: "tapped",
+        device: "",
+        ip: "1.2.3.4",
+        result: "ok",
+        ua: "",
+        token: "",
+      });
+
+      await instance.dispatchCommand({ name: "/faudit", args: [], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("tapped");
+    expect(telegram.sent[0].text).toContain("home");
+    expect(telegram.sent[0].text).toContain("1.2.3.4");
   });
 });

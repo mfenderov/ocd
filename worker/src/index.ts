@@ -126,6 +126,12 @@ export default {
     if (request.method === "POST" && url.pathname === "/api/heartbeat") {
       return forwardToDo(request, env, "/heartbeat");
     }
+    if (request.method === "POST" && url.pathname === "/api/events") {
+      // The boxes' door: the box authenticates itself with its heartbeat
+      // token and names itself in the body. The route is not in the scope
+      // map — a console token must not be able to forge box events.
+      return forwardToDo(request, env, "/events");
+    }
     if (request.method === "POST" && url.pathname === "/api/enroll") {
       return handleEnrollApi(request, env, "/enroll");
     }

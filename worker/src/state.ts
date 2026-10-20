@@ -1,7 +1,7 @@
-import { fetchAudits, handleAudit, type AuditRow as BoxAuditRow } from "./audit";
+import { handleAudit } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
-import { runCommand, type AuditRow } from "./botcommands";
+import { runCommand, type AuditRow, type LinkRecord } from "./botcommands";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
@@ -13,7 +13,8 @@ import {
   type NotifyFn,
   type PendingRow,
 } from "./enroll";
-import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch } from "./heartbeat";
+import { handleEvents, type AuditRow as EventAuditRow, type LinkRow } from "./events";
+import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, tokenMatches } from "./heartbeat";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import {
   handleRevoke,
@@ -22,7 +23,7 @@ import {
   revokeOneBox,
   type RevokeResult,
 } from "./revoke";
-import type { TelegramClient } from "./telegram";
+import { createTelegramClient, type TelegramClient } from "./telegram";
 import {
   handleDeleteToken,
   handleMintToken,
@@ -68,6 +69,12 @@ export interface DenialRow {
   denied_at: number;
 }
 
+// One row of the brain's own history: the row the box pushed plus the flag
+// that says the box was tainted when it pushed it.
+export interface AuditLogRow extends EventAuditRow {
+  tainted: boolean;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS boxes(
   id TEXT PRIMARY KEY,
@@ -101,6 +108,38 @@ CREATE TABLE IF NOT EXISTS seen_updates(
   update_id INTEGER PRIMARY KEY,
   seen_at INTEGER NOT NULL DEFAULT 0
 );
+-- Every tap link the brain handed out: the token, the box that minted it
+-- and the Telegram message that carries it, so the brain can edit that
+-- message when the link is spent or dies. The row carries no expiry: the
+-- box decides when a link dies and pushes "link-expired".
+CREATE TABLE IF NOT EXISTS links(
+  token TEXT PRIMARY KEY,
+  box_id TEXT NOT NULL,
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'issued',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  used_at INTEGER NOT NULL DEFAULT 0,
+  used_ip TEXT NOT NULL DEFAULT '',
+  used_ua TEXT NOT NULL DEFAULT '',
+  edited INTEGER NOT NULL DEFAULT 0
+);
+-- The fleet's history, ingested from the boxes.
+CREATE TABLE IF NOT EXISTS audit_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  box_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  device TEXT NOT NULL DEFAULT '',
+  ip TEXT NOT NULL DEFAULT '',
+  result TEXT NOT NULL DEFAULT '',
+  ua TEXT NOT NULL DEFAULT '',
+  tainted INTEGER NOT NULL DEFAULT 0,
+  token TEXT NOT NULL DEFAULT ''
+);
+-- The dedup key: a box that pushes the same row twice stores it once.
+CREATE UNIQUE INDEX IF NOT EXISTS audit_log_key ON audit_log(box_id, at, action, token);
 `;
 
 const COLUMNS =
@@ -174,6 +213,12 @@ export class FleetState implements DurableObject {
     return telegramNotifier(this.botToken, this.ownerChatId);
   }
 
+  // The brain's Telegram client: the brain owns every message, and the
+  // events route needs it to edit the messages it handed out.
+  private telegramClient(): TelegramClient | undefined {
+    return this.botToken ? createTelegramClient(this.botToken) : undefined;
+  }
+
   // The brain's command seam: the Telegram router hands a command here
   // and the command layer answers it. The dependencies are the DO's own
   // relays — the command layer never touches the state itself, so it
@@ -191,7 +236,26 @@ export class FleetState implements DurableObject {
       revokeAll: () => this.revokeEveryBox(),
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
       boxStatus: (boxId) => this.boxStatus(boxId),
+      recordLink: (link) => this.recordLink(link),
       primaryBox: this.primaryBox,
+    });
+  }
+
+  // The link registry: every link the brain hands out, with the message
+  // it rides on. The brain edits that message when the link is spent or
+  // dies, so the row has to remember where the message lives.
+  private recordLink(link: LinkRecord): void {
+    this.putLink({
+      token: link.token,
+      box_id: link.box,
+      chat_id: link.chatId,
+      message_id: link.messageId,
+      state: "issued",
+      created_at: nowSec(),
+      used_at: 0,
+      used_ip: "",
+      used_ua: "",
+      edited: 0,
     });
   }
 
@@ -211,13 +275,12 @@ export class FleetState implements DurableObject {
     return url;
   }
 
-  // The audit: the boxes' rows, merged. The brain's own history is Phase
-  // 2's work; until then the bot reads the boxes.
+  // The audit: the brain's own history. The boxes push their rows into
+  // it, so the answer covers the offline and the replaced boxes too. The
+  // console's GET /api/audit is a different tool with a different
+  // contract: it asks the live boxes.
   private async auditRows(boxId: string, limit: number): Promise<AuditRow[]> {
-    const rows = await fetchAudits(this, { boxId: boxId || undefined, n: limit }, {
-      sealKey: this.sealKey,
-    });
-    return rows.map(commandAuditRow);
+    return this.auditLogRows(boxId, limit).map(storedAuditRow);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -485,6 +548,143 @@ export class FleetState implements DurableObject {
     this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
   }
 
+  // The links the brain handed out. The brain edits the message that
+  // carries a link when the link is spent or dies, so the row remembers
+  // where that message lives.
+  linkRow(token: string): LinkRow | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT token, box_id, chat_id, message_id, state, created_at, used_at, used_ip, used_ua, edited FROM links WHERE token = ? LIMIT 1",
+      token,
+    );
+    return cursor.toArray()[0] as unknown as LinkRow | undefined;
+  }
+
+  putLink(row: LinkRow): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec(
+      "INSERT OR REPLACE INTO links (token, box_id, chat_id, message_id, state, created_at, used_at, used_ip, used_ua, edited) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      row.token,
+      row.box_id,
+      row.chat_id,
+      row.message_id,
+      row.state,
+      row.created_at,
+      row.used_at,
+      row.used_ip,
+      row.used_ua,
+      row.edited,
+    );
+  }
+
+  // The link is spent. True when the link is in that state and the edit
+  // is still owed: the first report, or a retry after a failed edit.
+  markLinkUsed(token: string, ip: string, ua: string, at: number): boolean {
+    const row = this.linkRow(token);
+    if (!row) {
+      return false;
+    }
+    if (row.state !== "used") {
+      this.putLink({ ...row, state: "used", used_at: at, used_ip: ip, used_ua: ua });
+      return true;
+    }
+    // Already spent: an edit is still owed only when the last one failed.
+    return row.edited === 0;
+  }
+
+  // The link died. A spent link is not dead: it stays "logged in". True
+  // when the link is in that state and the edit is still owed.
+  markLinkExpired(token: string): boolean {
+    const row = this.linkRow(token);
+    if (!row || row.state === "used") {
+      return false;
+    }
+    if (row.state !== "expired") {
+      this.putLink({ ...row, state: "expired" });
+      return true;
+    }
+    return row.edited === 0;
+  }
+
+  // One row of the fleet's history. The row is keyed on box + at + action
+  // + token, so a box that pushes the same row twice stores it once.
+  addAuditRow(row: EventAuditRow): boolean {
+    this.ensureSchema();
+    // The taint is the box's state when it pushed the row: a row that
+    // happened while the box's revoke was pending stays marked.
+    const box = this.getBox(row.box);
+    const tainted = box ? isTainted(box.epoch, this.getTombstone(row.box)) : false;
+    this.state.storage.sql.exec(
+      "INSERT OR IGNORE INTO audit_log (box_id, at, actor, action, device, ip, result, ua, tainted, token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      row.box,
+      row.at,
+      row.actor,
+      row.action,
+      row.device,
+      row.ip,
+      row.result,
+      row.ua,
+      tainted ? 1 : 0,
+      row.token,
+    );
+    // changes() counts the row the insert stored: 1 when it was stored,
+    // 0 when the key was already there and the insert was ignored.
+    const changed = this.state.storage.sql.exec("SELECT changes() AS n").toArray()[0] as
+      | { n: number }
+      | undefined;
+    return changed?.n === 1;
+  }
+
+  // The brain's own history: the rows the boxes pushed, newest first.
+  auditLogRows(boxId: string, limit: number): AuditLogRow[] {
+    this.ensureSchema();
+    const columns = "box_id, at, actor, action, device, ip, result, ua, tainted, token";
+    const cursor = boxId
+      ? this.state.storage.sql.exec(
+          `SELECT ${columns} FROM audit_log WHERE box_id = ? ORDER BY at DESC, id DESC LIMIT ?`,
+          boxId,
+          limit,
+        )
+      : this.state.storage.sql.exec(
+          `SELECT ${columns} FROM audit_log ORDER BY at DESC, id DESC LIMIT ?`,
+          limit,
+        );
+    const rows = cursor.toArray() as unknown as Array<{
+      box_id: string;
+      at: number;
+      actor: string;
+      action: string;
+      device: string;
+      ip: string;
+      result: string;
+      ua: string;
+      tainted: number;
+      token: string;
+    }>;
+    return rows.map((row) => ({
+      box: row.box_id,
+      at: row.at,
+      actor: row.actor,
+      action: row.action,
+      device: row.device,
+      ip: row.ip,
+      result: row.result,
+      ua: row.ua,
+      tainted: row.tainted === 1,
+      token: row.token,
+    }));
+  }
+
+  // The box's own check: the bearer is the box's heartbeat token, the
+  // same secret the heartbeat uses.
+  async verifyBoxToken(id: string, token: string): Promise<boolean> {
+    const box = this.getBox(id);
+    if (!box) {
+      return false;
+    }
+    return tokenMatches(token, box.heartbeat_token_hash);
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     // Task 2 guards: link needs link scope, revoke/revoke-all need revoke,
@@ -518,6 +718,20 @@ export class FleetState implements DurableObject {
       return handleTelegramWebhook(request, this, {
         ...brain,
         dispatch: (cmd) => this.dispatchCommand(cmd, brain.telegram),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/events") {
+      // The boxes' door: the box authenticates itself with its heartbeat
+      // token and names itself in the body, so this route carries no
+      // console scope — a console token must not forge box events.
+      const telegram = this.telegramClient();
+      if (!telegram) {
+        console.error("events: TELEGRAM_BOT_TOKEN not configured");
+        return Response.json({ error: "misconfigured" }, { status: 500 });
+      }
+      return handleEvents(request, this, {
+        telegram,
+        verifyBox: (id, token) => this.verifyBoxToken(id, token),
       });
     }
     if (request.method === "POST" && url.pathname === "/heartbeat") {
@@ -597,21 +811,20 @@ export class FleetState implements DurableObject {
   }
 }
 
-// The box's audit rows as the command layer reads them: the layer wants
-// every field present, and a marker row (a box that could not be read)
-// carries no event fields.
-function commandAuditRow(row: BoxAuditRow): AuditRow {
+// The stored row as the command layer reads it: the layer wants every
+// field present, and a brain row is always a real event (never a marker
+// row for a box that could not be read).
+function storedAuditRow(row: AuditLogRow): AuditRow {
   return {
     box: row.box,
     at: row.at,
-    actor: "actor" in row ? row.actor : "",
-    action: "action" in row ? row.action : "",
-    device: "device" in row ? row.device : "",
-    ip: "ip" in row ? row.ip : "",
-    result: "result" in row ? row.result : "",
-    ua: "ua" in row ? row.ua : "",
+    actor: row.actor,
+    action: row.action,
+    device: row.device,
+    ip: row.ip,
+    result: row.result,
+    ua: row.ua,
     tainted: row.tainted,
-    ...("error" in row ? { error: row.error } : {}),
   };
 }
 
@@ -625,4 +838,9 @@ function generateSecret(): string {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary);
+}
+
+// The brain's clock: Unix seconds, like the DO's other timestamps.
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000);
 }

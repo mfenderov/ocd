@@ -53,6 +53,16 @@ export interface AuditRow {
   error?: string;
 }
 
+// A link the brain handed out, with the message it rides on. The brain
+// owns every message, so it has to know where the link lives to edit
+// that message when the link is spent or dies.
+export interface LinkRecord {
+  token: string;
+  box: string;
+  chatId: number;
+  messageId: number;
+}
+
 // CommandDeps is everything the commands need: the Telegram client that
 // carries the answers, the fleet state to read and the relays to call.
 // The Durable Object supplies them; the layer never reaches for one.
@@ -65,6 +75,9 @@ export interface CommandDeps {
   revokeAll: () => Promise<RevokeResult[]>;
   issueEnrollCode: (boxId: string) => Promise<{ code: string; command: string }>;
   boxStatus: (boxId: string) => Promise<string>;
+  // The link registry: the brain records every link it hands out, with
+  // the message it rides on.
+  recordLink: (link: LinkRecord) => void;
   primaryBox: string;
 }
 
@@ -74,6 +87,9 @@ export interface CommandDeps {
 interface Reply {
   text: string;
   keyboard?: Keyboard;
+  // The minted link this reply carries, when it carries one: the brain
+  // has to find that message again to edit it when the link is spent.
+  link?: { url: string; box: string };
 }
 
 // A command handler answers with the message to send, or with nothing
@@ -135,12 +151,41 @@ export async function runCommand(cmd: BotCommand, deps: CommandDeps): Promise<vo
   if (reply === undefined) {
     return;
   }
+  let sent: { message_id: number };
   try {
-    await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
+    sent = await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
   } catch (err) {
     // Telegram is down. Nothing can be said about it, and the answer
     // must not escape: the webhook would be retried forever.
     console.error(`bot: the reply failed (${errorText(err)})`);
+    return;
+  }
+  if (!reply.link) {
+    return;
+  }
+  // The link registry: the brain has to know which message carries the
+  // link, so it can edit that message when the link is spent or dies.
+  const token = linkToken(reply.link.url);
+  if (!token) {
+    return;
+  }
+  try {
+    deps.recordLink({ token, box: reply.link.box, chatId: cmd.chatId, messageId: sent.message_id });
+  } catch (err) {
+    // The message is sent; only the registry is missing. The link lives
+    // on, so this must not take the answer down with it.
+    console.error(`bot: the link was not recorded (${errorText(err)})`);
+  }
+}
+
+// The token out of a minted tap URL: the box carries it as the "t" query
+// parameter (internal/boxadmin/mint.go). A URL the brain cannot read
+// carries no token, and such a link is never recorded.
+function linkToken(url: string): string {
+  try {
+    return new URL(url).searchParams.get("t")?.trim() ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -199,7 +244,8 @@ async function flinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> 
   if (!box) {
     return { text: "Usage: <code>/flink &lt;box&gt;</code>" };
   }
-  return { text: linkText(await deps.mintLink(box), box) };
+  const url = await deps.mintLink(box);
+  return { text: linkText(url, box), link: { url, box } };
 }
 
 // The tap on a box's button: the same mint, the Go bot's callback
@@ -225,12 +271,17 @@ async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply
     // not the fleet (internal/tg/buttons.go).
     return { text: linkFailedText(err) };
   }
-  return { text: tapLinkText(box), keyboard: [[openButton(`🚀 Open ${box}`, url)]] };
+  return {
+    text: tapLinkText(box),
+    keyboard: [[openButton(`🚀 Open ${box}`, url)]],
+    link: { url, box },
+  };
 }
 
 // /login: the primary box, one tap.
 async function loginCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
-  return { text: loginText(await deps.mintLink(deps.primaryBox)) };
+  const url = await deps.mintLink(deps.primaryBox);
+  return { text: loginText(url), link: { url, box: deps.primaryBox } };
 }
 
 // /faudit [box] [n]: the fleet's history, newest first.
