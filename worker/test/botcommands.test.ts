@@ -406,6 +406,35 @@ describe("/frevoke", () => {
     expect(calls.revoke).toEqual([]);
     expect(telegram.sent[0].text).toContain("/frevoke mac YES");
   });
+
+  // The blocked answer is its own sentence: the credentials rotate, so
+  // the box gets no new link until it comes back. The detail says why,
+  // when the revoke had one to give.
+  it("says the box is blocked, with the reason, when the revoke left it tombstoned", async () => {
+    const { deps, telegram } = harness({
+      revokeResult: { id: "mac", status: "tombstoned", epoch: 3, detail: "box_unreachable" },
+    });
+
+    await runCommand({ name: "/frevoke", args: ["mac", "YES"], chatId: 7 }, deps);
+
+    const text = telegram.sent[0].text;
+    expect(text).toContain("mac");
+    expect(text).toContain("blocked");
+    expect(text).toContain("epoch 3");
+    expect(text).toContain("box_unreachable");
+  });
+
+  it("says the box is blocked without a reason when the revoke had none", async () => {
+    const { deps, telegram } = harness({
+      revokeResult: { id: "mac", status: "tombstoned", epoch: 3 },
+    });
+
+    await runCommand({ name: "/frevoke", args: ["mac", "YES"], chatId: 7 }, deps);
+
+    const text = telegram.sent[0].text;
+    expect(text).toContain("blocked");
+    expect(text).toContain("epoch 3");
+  });
 });
 
 describe("/fnuke", () => {

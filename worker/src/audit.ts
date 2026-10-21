@@ -111,31 +111,39 @@ function toMerged(boxId: string, tainted: boolean, raw: unknown): MergedAuditRow
   };
 }
 
-async function fetchOneBox(
-  box: BoxRow,
-  n: number,
-  tainted: boolean,
-  deps: AuditDeps,
-): Promise<MergedAuditRow[]> {
-  if (!deps.sealKey) {
+// The admin token the audit relay carries.
+//
+// Decrypt only at call time, right before the relay — same rule as
+// mint/revoke. A brain that cannot read the token — no seal key, a blob
+// it cannot open, no token bound — cannot read the box at all: the box
+// becomes a misconfigured marker, never a silent gap.
+async function auditAdminToken(sealKey: string | undefined, box: BoxRow): Promise<string> {
+  if (!sealKey) {
     throw new BoxAuditError("misconfigured");
   }
-  // Decrypt only at call time, right before the relay — same rule as
-  // mint/revoke. Wrong key or tampered blob is a per-box marker, never a
-  // fallback; a box with no bound admin token cannot be read.
   let adminToken: string | null;
   try {
-    adminToken = await unsealAdminToken(deps.sealKey, box.admin_token_sealed);
+    adminToken = await unsealAdminToken(sealKey, box.admin_token_sealed);
   } catch {
     throw new BoxAuditError("misconfigured");
   }
   if (!adminToken) {
     throw new BoxAuditError("misconfigured");
   }
-  const signal = AbortSignal.timeout(deps.deadlineMs ?? AUDIT_DEADLINE_MS);
-  let boxRes: Response;
+  return adminToken;
+}
+
+// The box's audit page. A box that does not answer is a marker, not a
+// failed request: the deadline says whether the box was slow or gone.
+async function fetchBoxAudit(
+  box: BoxRow,
+  n: number,
+  adminToken: string,
+  signal: AbortSignal,
+  deps: AuditDeps,
+): Promise<Response> {
   try {
-    boxRes = await fetchBox(
+    return await fetchBox(
       pinnedRegistry([box]),
       box.id,
       `${BOX_API.audit}?n=${n}`,
@@ -145,18 +153,39 @@ async function fetchOneBox(
   } catch {
     throw new BoxAuditError(signal.aborted ? "box_timeout" : "box_unreachable");
   }
-  if (boxRes.status !== 200) {
-    throw new BoxAuditError("box_error", `status ${boxRes.status}`);
+}
+
+// The rows the box sent. A box that answers with an error, with
+// something that is not JSON, or with something that is not a list of
+// rows is a marker: the brain never guesses what the box said.
+async function boxAuditRows(res: Response): Promise<unknown[]> {
+  if (res.status !== 200) {
+    throw new BoxAuditError("box_error", `status ${res.status}`);
   }
   let raw: unknown;
   try {
-    raw = await boxRes.json();
+    raw = await res.json();
   } catch {
     throw new BoxAuditError("box_error", "box_bad_json");
   }
   if (!Array.isArray(raw)) {
     throw new BoxAuditError("box_error", "box_bad_json");
   }
+  return raw;
+}
+
+// One box's audit rows. Every failure the box can cause is a marker for
+// that box alone: the other boxes' rows still come back.
+async function fetchOneBox(
+  box: BoxRow,
+  n: number,
+  tainted: boolean,
+  deps: AuditDeps,
+): Promise<MergedAuditRow[]> {
+  const adminToken = await auditAdminToken(deps.sealKey, box);
+  const signal = AbortSignal.timeout(deps.deadlineMs ?? AUDIT_DEADLINE_MS);
+  const res = await fetchBoxAudit(box, n, adminToken, signal, deps);
+  const raw = await boxAuditRows(res);
   return raw.map((row) => toMerged(box.id, tainted, row));
 }
 

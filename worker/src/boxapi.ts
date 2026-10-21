@@ -116,16 +116,17 @@ async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<
   return adminToken;
 }
 
-// The status a failed relay answers with.
+// The status each failed relay reason answers with.
+const RELAY_FAILURE_STATUS = new Map<RelayFailure, number>([
+  ["unknown_box", 404],
+  ["misconfigured", 500],
+  ["box_timeout", 504],
+  ["box_unreachable", 502],
+]);
+
+// The status a failed relay answers with: the reason names the answer.
+// A reason the table does not know is a bad gateway — the brain cannot
+// say more about a relay it does not understand.
 export function relayFailureStatus(reason: RelayFailure): number {
-  if (reason === "unknown_box") {
-    return 404;
-  }
-  if (reason === "misconfigured") {
-    return 500;
-  }
-  if (reason === "box_timeout") {
-    return 504;
-  }
-  return 502;
+  return RELAY_FAILURE_STATUS.get(reason) ?? 502;
 }

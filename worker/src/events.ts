@@ -107,6 +107,13 @@ export interface EventDeps {
 // The events the brain knows. An event of another kind is ignored.
 const EVENT_TYPES = new Set(["link-used", "link-expired", "audit"]);
 
+// The text fields an event may carry. The brain reads the ones it knows
+// and drops the rest.
+const TEXT_FIELDS = ["token", "ip", "actor", "action", "device", "result"] as const;
+
+// The text fields of an event, as the brain keeps them.
+type BoxEventText = Pick<BoxEvent, "token" | "ip" | "actor" | "action" | "device" | "result">;
+
 // The user agent the brain keeps: the Go store truncates it at 300
 // characters (internal/store/links.go), so a box that pushes a huge one
 // cannot fill the brain's history.
@@ -155,32 +162,65 @@ export async function handleEvents(
 
 // One event, read defensively: a malformed event never breaks the batch.
 function readEvent(raw: unknown): BoxEvent | undefined {
-  if (typeof raw !== "object" || raw === null) {
+  const type = eventType(raw);
+  if (!type) {
     return undefined;
   }
   const fields = raw as Record<string, unknown>;
-  const type = fields["type"];
-  if (typeof type !== "string" || !EVENT_TYPES.has(type)) {
-    return undefined;
+  const event: BoxEvent = { type, ...readTextFields(fields) };
+  const ua = readUserAgent(fields);
+  if (ua !== undefined) {
+    event.ua = ua;
   }
-  const event: BoxEvent = { type };
-  // The text fields: the box sends what it has, the brain reads what it
-  // understands and drops the rest.
-  for (const name of ["token", "ip", "actor", "action", "device", "result"] as const) {
-    const value = text(fields[name]);
-    if (value) {
-      event[name] = value;
-    }
-  }
-  const ua = text(fields["ua"]);
-  if (ua) {
-    event.ua = ua.slice(0, UA_MAX);
-  }
-  const at = fields["at"];
-  if (typeof at === "number" && Number.isFinite(at)) {
+  const at = readEventTime(fields);
+  if (at !== undefined) {
     event.at = at;
   }
   return event;
+}
+
+// The kind of event the brain understands. An event of another kind — or
+// something that is not an event at all — is ignored.
+function eventType(raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const type = (raw as Record<string, unknown>)["type"];
+  if (typeof type !== "string" || !EVENT_TYPES.has(type)) {
+    return undefined;
+  }
+  return type;
+}
+
+// The event's text fields: the box sends what it has, the brain reads
+// what it understands and drops the rest.
+function readTextFields(fields: Record<string, unknown>): BoxEventText {
+  const read: BoxEventText = {};
+  for (const name of TEXT_FIELDS) {
+    const value = text(fields[name]);
+    if (value) {
+      read[name] = value;
+    }
+  }
+  return read;
+}
+
+// The user agent the brain keeps, cut to the size the history stores.
+function readUserAgent(fields: Record<string, unknown>): string | undefined {
+  const ua = text(fields["ua"]);
+  if (!ua) {
+    return undefined;
+  }
+  return ua.slice(0, UA_MAX);
+}
+
+// The time the event happened. An event without a usable time has none.
+function readEventTime(fields: Record<string, unknown>): number | undefined {
+  const at = fields["at"];
+  if (typeof at === "number" && Number.isFinite(at)) {
+    return at;
+  }
+  return undefined;
 }
 
 // The box the body speaks for: the brain checks the bearer against that
