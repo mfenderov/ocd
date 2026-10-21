@@ -25,7 +25,7 @@ func RequireAdmin(st *store.Store, token string, next http.Handler) http.Handler
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			ip := clientIP(r)
-			st.Audit("web:"+ip, "admin_denied", "", ip, "bad-bearer")
+			st.Audit(r.Context(), "web:"+ip, "admin_denied", "", ip, "bad-bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

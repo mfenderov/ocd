@@ -181,11 +181,12 @@ func renderEnvFile(lines []string) string {
 // WaitEnrolled heartbeats until the Worker replies enrolled:true (owner
 // approved in Telegram) or ctx expires. Network and 4xx failures are
 // retried: approval lands whenever the owner taps, not on our schedule.
-func WaitEnrolled(ctx context.Context, st *store.Store, client *http.Client, workerURL, boxID, token string, poll time.Duration) error {
+func WaitEnrolled(ctx context.Context, st *store.Store, client *http.Client,
+	workerURL, boxID, token string, poll time.Duration) error {
 	tick := time.NewTicker(poll)
 	defer tick.Stop()
 	for {
-		enrolled, err := boxagent.SendOnce(st, client, workerURL, boxID, token, "", boxadmin.Version)
+		enrolled, err := boxagent.SendOnce(ctx, st, client, workerURL, boxID, token, "", boxadmin.Version)
 		if err == nil && enrolled {
 			return nil
 		}

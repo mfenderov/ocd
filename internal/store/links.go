@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -31,13 +32,15 @@ type AuditRow struct {
 	UA     string `json:"ua"`
 }
 
-func (s *Store) migrateLinks() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS link_tokens(token TEXT PRIMARY KEY, device TEXT, via TEXT, created_at INTEGER, used_at INTEGER);
+func (s *Store) migrateLinks(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS link_tokens(token TEXT PRIMARY KEY, `+
+		`device TEXT, via TEXT, created_at INTEGER, used_at INTEGER);
 CREATE TABLE IF NOT EXISTS audit(at INTEGER, actor TEXT, action TEXT, device TEXT, ip TEXT, result TEXT);`)
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`ALTER TABLE audit ADD COLUMN ua TEXT DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE audit ADD COLUMN ua TEXT `+
+		`DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
 	return nil
@@ -51,24 +54,27 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func (s *Store) IssueLink(device, via string) (string, error) {
+func (s *Store) IssueLink(ctx context.Context, device, via string) (string, error) {
 	tok, err := newToken()
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.Exec(`INSERT INTO link_tokens(token, device, via, created_at, used_at) VALUES(?,?,?,strftime('%s','now'),NULL)`, tok, device, via)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO link_tokens(token, device, via, created_at, used_at) `+
+		`VALUES(?,?,?,strftime('%s','now'),NULL)`, tok, device, via)
 	return tok, err
 }
 
 // ConsumeLink atomically claims a token once. Reports device and true only
 // on the first tap inside the TTL window.
-func (s *Store) ConsumeLink(tok string) (string, bool) {
+func (s *Store) ConsumeLink(ctx context.Context, tok string) (string, bool) {
 	var device string
-	err := s.db.QueryRow(`SELECT device FROM link_tokens WHERE token=? AND used_at IS NULL AND created_at>=strftime('%s','now')-?`, tok, int64(linkTTL.Seconds())).Scan(&device)
+	err := s.db.QueryRowContext(ctx, `SELECT device FROM link_tokens WHERE token=? AND used_at IS NULL AND `+
+		`created_at>=strftime('%s','now')-?`, tok, int64(linkTTL.Seconds())).Scan(&device)
 	if err != nil {
 		return "", false
 	}
-	res, err := s.db.Exec(`UPDATE link_tokens SET used_at=strftime('%s','now') WHERE token=? AND used_at IS NULL`, tok)
+	res, err := s.db.ExecContext(ctx, `UPDATE link_tokens SET used_at=strftime('%s','now') WHERE token=? AND used_at IS `+
+		`NULL`, tok)
 	if err != nil {
 		return "", false
 	}
@@ -87,9 +93,9 @@ func (s *Store) ConsumeLink(tok string) (string, bool) {
 // Only the brain's own links are removed. A Go bot link passed in by
 // mistake is left alone: that link still has an expired-link edit to
 // make, and the brain would never make it.
-func (s *Store) DeleteLinkTokens(tokens []string) error {
+func (s *Store) DeleteLinkTokens(ctx context.Context, tokens []string) error {
 	for _, tok := range tokens {
-		if _, err := s.db.Exec(`DELETE FROM link_tokens WHERE token=? AND via=?`, tok, brainLinkVia); err != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM link_tokens WHERE token=? AND via=?`, tok, brainLinkVia); err != nil {
 			return err
 		}
 	}
@@ -104,11 +110,12 @@ func (s *Store) DeleteLinkTokens(tokens []string) error {
 // Only the brain's own links are reported. The Go bot's links are its
 // own business: its sweeper still has to edit their Telegram messages,
 // and the brain would ignore them anyway.
-func (s *Store) ExpiredLinkTokens(limit int) ([]string, error) {
+func (s *Store) ExpiredLinkTokens(ctx context.Context, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT token FROM link_tokens WHERE via=? AND used_at IS NULL AND created_at<strftime('%s','now')-? ORDER BY created_at LIMIT ?`, brainLinkVia, int64(linkTTL.Seconds()), limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT token FROM link_tokens WHERE via=? AND used_at IS NULL AND `+
+		`created_at<strftime('%s','now')-? ORDER BY created_at LIMIT ?`, brainLinkVia, int64(linkTTL.Seconds()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +131,8 @@ func (s *Store) ExpiredLinkTokens(limit int) ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) Audit(actor, action, device, ip, result string) {
-	s.AuditUA(actor, action, device, ip, result, "")
+func (s *Store) Audit(ctx context.Context, actor, action, device, ip, result string) {
+	s.AuditUA(ctx, actor, action, device, ip, result, "")
 }
 
 func truncateUA(ua string) string {
@@ -135,8 +142,9 @@ func truncateUA(ua string) string {
 	return ua
 }
 
-func (s *Store) AuditUA(actor, action, device, ip, result, ua string) int64 {
-	res, err := s.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
+func (s *Store) AuditUA(ctx context.Context, actor, action, device, ip, result, ua string) int64 {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO audit(at, actor, action, device, ip, result, ua) `+
+		`VALUES(strftime('%s','now'),?,?,?,?,?,?)`, actor, action, device, ip, result, truncateUA(ua))
 	if err != nil {
 		// A closed store must not take the caller down: a background writer
 		// can outlive the daemon's shutdown, and a panic in a goroutine
@@ -150,26 +158,31 @@ func (s *Store) AuditUA(actor, action, device, ip, result, ua string) int64 {
 	s.pruning.Add(1)
 	go func() {
 		defer s.pruning.Done()
-		s.prune()
+		// The prune outlives the request that wrote the row, so it does
+		// not take that request's cancellation with it.
+		s.prune(context.WithoutCancel(ctx))
 	}()
 	id, _ := res.LastInsertId()
 	return id
 }
 
-func (s *Store) SetResultExtra(id int64, extra string) {
+func (s *Store) SetResultExtra(ctx context.Context, id int64, extra string) {
 	if extra == "" {
 		return
 	}
-	_, _ = s.db.Exec(`UPDATE audit SET result=result||? WHERE rowid=?`, " · "+extra, id)
+	_, _ = s.db.ExecContext(ctx, `UPDATE audit SET result=result||? WHERE rowid=?`, " · "+extra, id)
 }
 
-func (s *Store) prune() {
-	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<strftime('%s','now')-?`, int64((90 * 24 * time.Hour).Seconds()))
-	_, _ = s.db.Exec(`DELETE FROM link_tokens WHERE created_at<strftime('%s','now')-?`, int64((24 * time.Hour).Seconds()))
+func (s *Store) prune(ctx context.Context) {
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM audit WHERE `+
+		`at<strftime('%s','now')-?`, int64((90 * 24 * time.Hour).Seconds()))
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM link_tokens WHERE `+
+		`created_at<strftime('%s','now')-?`, int64((24 * time.Hour).Seconds()))
 }
 
-func (s *Store) RecentAudit(n int) []AuditRow {
-	rows, err := s.db.Query(`SELECT at, actor, action, device, ip, result, ua FROM audit ORDER BY at DESC LIMIT ?`, n)
+func (s *Store) RecentAudit(ctx context.Context, n int) []AuditRow {
+	rows, err := s.db.QueryContext(ctx, `SELECT at, actor, action, device, ip, result, ua FROM audit ORDER BY at DESC `+
+		`LIMIT ?`, n)
 	if err != nil {
 		return nil
 	}
@@ -183,6 +196,9 @@ func (s *Store) RecentAudit(n int) []AuditRow {
 			out = append(out, r)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return out
 }
 
@@ -194,8 +210,9 @@ const auditBatch = 100
 // oldest first, at most auditBatch of them. The rowid is the sweep's
 // watermark: the rows the brain has not seen yet, so a restart does not
 // re-send the whole history.
-func (s *Store) RecentAuditSince(rowid int64) ([]AuditRow, error) {
-	rows, err := s.db.Query(`SELECT rowid, at, actor, action, device, ip, result, ua FROM audit WHERE rowid > ? ORDER BY rowid LIMIT ?`, rowid, auditBatch)
+func (s *Store) RecentAuditSince(ctx context.Context, rowid int64) ([]AuditRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT rowid, at, actor, action, device, ip, result, ua FROM audit WHERE rowid `+
+		`> ? ORDER BY rowid LIMIT ?`, rowid, auditBatch)
 	if err != nil {
 		return nil, err
 	}
@@ -219,9 +236,9 @@ func (s *Store) RecentAuditSince(rowid int64) ([]AuditRow, error) {
 // The read can fail, and a failure is not "nothing reported yet": the
 // caller must not read it as 0, or it re-offers rows the brain already
 // has and sends the watermark backwards.
-func (s *Store) AuditWatermark() (int64, error) {
+func (s *Store) AuditWatermark(ctx context.Context) (int64, error) {
 	var v int64
-	err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v)
+	err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
@@ -247,9 +264,9 @@ type AuditAnchor struct {
 // WatermarkAnchor returns the anchor stored next to the audit
 // watermark: the content of the row the watermark names. False when no
 // anchor is stored — a database written before the anchor existed.
-func (s *Store) WatermarkAnchor() (AuditAnchor, bool, error) {
+func (s *Store) WatermarkAnchor(ctx context.Context) (AuditAnchor, bool, error) {
 	var anchor AuditAnchor
-	err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark_at'`).Scan(&anchor.At)
+	err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE k='audit_watermark_at'`).Scan(&anchor.At)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuditAnchor{}, false, nil
 	}
@@ -259,7 +276,8 @@ func (s *Store) WatermarkAnchor() (AuditAnchor, bool, error) {
 	// The action is text in an integer column: SQLite keeps it as text
 	// unless it reads as a number, and a number comes back as its
 	// digits — the same string either way.
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark_action'`).Scan(&anchor.Action); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE `+
+		`k='audit_watermark_action'`).Scan(&anchor.Action); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AuditAnchor{}, false, nil
 		}
@@ -274,8 +292,8 @@ func (s *Store) WatermarkAnchor() (AuditAnchor, bool, error) {
 //
 // It is unexported on purpose: the store's callers ask the question
 // through AuditWatermarkStale, which is the answer they want.
-func (s *Store) auditRowMatches(rowid int64, anchor AuditAnchor) (bool, error) {
-	at, action, found, err := s.auditRowContent(rowid)
+func (s *Store) auditRowMatches(ctx context.Context, rowid int64, anchor AuditAnchor) (bool, error) {
+	at, action, found, err := s.auditRowContent(ctx, rowid)
 	if err != nil || !found {
 		return false, err
 	}
@@ -284,10 +302,10 @@ func (s *Store) auditRowMatches(rowid int64, anchor AuditAnchor) (bool, error) {
 
 // auditRowContent returns the content of the audit row with that
 // rowid — its (at, action) — and whether the row is there at all.
-func (s *Store) auditRowContent(rowid int64) (int64, string, bool, error) {
+func (s *Store) auditRowContent(ctx context.Context, rowid int64) (int64, string, bool, error) {
 	var at int64
 	var action string
-	err := s.db.QueryRow(`SELECT at, action FROM audit WHERE rowid=?`, rowid).Scan(&at, &action)
+	err := s.db.QueryRowContext(ctx, `SELECT at, action FROM audit WHERE rowid=?`, rowid).Scan(&at, &action)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil
 	}
@@ -306,9 +324,9 @@ func (s *Store) auditRowContent(rowid int64) (int64, string, bool, error) {
 // rows were pruned, or the trail was reset and its rowids started over.
 // A database with an anchor does not come here: the anchor names the
 // row itself, which is the stronger question.
-func (s *Store) LastAuditRowID() (int64, error) {
+func (s *Store) LastAuditRowID(ctx context.Context) (int64, error) {
 	var v int64
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM audit`).Scan(&v); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(rowid),0) FROM audit`).Scan(&v); err != nil {
 		return 0, err
 	}
 	return v, nil
@@ -337,30 +355,30 @@ func (s *Store) LastAuditRowID() (int64, error) {
 // old database is no worse off than it was: it keeps the old check
 // until its next successful push writes the anchor, and from then on
 // the anchor decides.
-func (s *Store) AuditWatermarkStale() (bool, error) {
-	rowid, err := s.AuditWatermark()
+func (s *Store) AuditWatermarkStale(ctx context.Context) (bool, error) {
+	rowid, err := s.AuditWatermark(ctx)
 	if err != nil {
 		return false, err
 	}
 	if rowid == 0 {
-		// Nothing was reported yet: the push starts at the beginning of
-		// the trail, whatever it holds.
+		// Nothing was reported yet: the push starts at the beginning of the
+		// trail, whatever it holds.
 		return false, nil
 	}
-	anchor, ok, err := s.WatermarkAnchor()
+	anchor, ok, err := s.WatermarkAnchor(ctx)
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		// No anchor: the database predates it. The numeric check is the
 		// only thing there is.
-		last, err := s.LastAuditRowID()
+		last, err := s.LastAuditRowID(ctx)
 		if err != nil {
 			return false, err
 		}
 		return rowid > last, nil
 	}
-	same, err := s.auditRowMatches(rowid, anchor)
+	same, err := s.auditRowMatches(ctx, rowid, anchor)
 	if err != nil {
 		return false, err
 	}
@@ -381,8 +399,8 @@ func (s *Store) AuditWatermarkStale() (bool, error) {
 // The sweep writes it only after a successful push: a failed push leaves
 // the watermark where it was, so the next sweep offers the same rows
 // again and no row is lost.
-func (s *Store) SetAuditWatermark(rowid int64) error {
-	current, err := s.AuditWatermark()
+func (s *Store) SetAuditWatermark(ctx context.Context, rowid int64) error {
+	current, err := s.AuditWatermark(ctx)
 	if err != nil {
 		return err
 	}
@@ -394,15 +412,17 @@ func (s *Store) SetAuditWatermark(rowid int64) error {
 	// The anchor: the row's own content, read here, where the row is. A
 	// row that is not there leaves the anchor empty, and a missing row
 	// is stale too.
-	at, action, found, err := s.auditRowContent(rowid)
+	at, action, found, err := s.auditRowContent(ctx, rowid)
 	if err != nil {
 		return err
 	}
 	if !found {
 		at, action = 0, ""
 	}
-	_, err = s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',?),('audit_watermark_at',?),('audit_watermark_action',?)
-		ON CONFLICT(k) DO UPDATE SET v=CASE WHEN k='audit_watermark' THEN MAX(v,excluded.v) ELSE excluded.v END`, rowid, at, action)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO meta(k,v) VALUES('audit_watermark',?),`+
+		`('audit_watermark_at',?),('audit_watermark_action',?) `+
+		`ON CONFLICT(k) DO UPDATE SET v=CASE WHEN k='audit_watermark' `+
+		`THEN MAX(v,excluded.v) ELSE excluded.v END`, rowid, at, action)
 	return err
 }
 
@@ -412,12 +432,13 @@ func (s *Store) SetAuditWatermark(rowid int64) error {
 // not the row the brain has, and the push would be silent for good. The
 // trail's rows are offered again and the brain's dedup collapses the
 // ones it already has.
-func (s *Store) RepairAuditWatermark() error {
-	if _, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',0) ON CONFLICT(k) DO UPDATE SET v=0`); err != nil {
+func (s *Store) RepairAuditWatermark(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO meta(k,v) VALUES('audit_watermark',0) ON CONFLICT(k) DO UPDATE SET `+
+		`v=0`); err != nil {
 		return err
 	}
 	// The anchor named a row the watermark no longer names: it goes with
 	// it. A watermark with no anchor falls back to the numeric check.
-	_, err := s.db.Exec(`DELETE FROM meta WHERE k IN ('audit_watermark_at','audit_watermark_action')`)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM meta WHERE k IN ('audit_watermark_at','audit_watermark_action')`)
 	return err
 }

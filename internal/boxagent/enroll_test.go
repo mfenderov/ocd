@@ -36,7 +36,8 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
+	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9",
+		"box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
 	if err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
@@ -49,7 +50,11 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 	if auth != "" {
 		t.Fatalf("enroll carries the token in the body, want no Authorization header, got %q", auth)
 	}
-	for k, want := range map[string]string{"id": "box-9", "hostname": "box-9.example.com", "enroll_token": "enroll-secret", "admin_token": "admin-secret"} {
+	want := map[string]string{
+		"id": "box-9", "hostname": "box-9.example.com",
+		"enroll_token": "enroll-secret", "admin_token": "admin-secret",
+	}
+	for k, want := range want {
 		if body[k] != want {
 			t.Fatalf("want body[%s]=%q, got %v", k, want, body[k])
 		}
@@ -63,13 +68,15 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 func TestEnrollCarriesTheDNSOutcome(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"enrolled","id":"box-9","trusted":true,"dns":"failed: the brain has no DNS credential"}`))
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"box-9","trusted":true,"dns":"failed: the brain has no DNS ` +
+			`credential"}`))
 	}))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
+	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9",
+		"box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
 	if err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
@@ -106,7 +113,9 @@ func TestEnrollPostsTunnelID(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{TunnelID: tc.tunnelID})
+			_, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9",
+				"box-9.example.com", "enroll-secret", "admin-secret",
+				boxagent.EnrollOptions{TunnelID: tc.tunnelID})
 			if err != nil {
 				t.Fatalf("EnrollBox: %v", err)
 			}
@@ -129,7 +138,8 @@ func TestEnrollRefusesEmptyIdentity(t *testing.T) {
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err == nil {
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL,
+		"", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err == nil {
 		t.Fatal("want error for empty box id")
 	}
 	if hit {
@@ -149,7 +159,8 @@ func TestEnrollToleratesHeartbeatSuffixedOrigin(t *testing.T) {
 	defer cancel()
 	// Home's OCD_WORKER_URL ends in /api/heartbeat; enroll must still land
 	// on /api/enroll (bot /enrollcode 404 regression, 2026-10-19).
-	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL+"/api/heartbeat", "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err != nil {
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL+"/api/heartbeat",
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
 	if gotPath != "/api/enroll" {

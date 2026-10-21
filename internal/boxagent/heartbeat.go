@@ -34,23 +34,27 @@ type heartbeatResponse struct {
 // Worker with Authorization: Bearer <token>. enrollToken is included until
 // the Worker replies {"enrolled": true}; the caller drops it afterwards and
 // retries failed sends on its ticker. Any non-200 is an error, no local retry.
-func SendOnce(st *store.Store, client *http.Client, workerURL, boxID, token, enrollToken, version string) (bool, error) {
+//
+// The caller's context bounds the send, so a heartbeat never outlives the
+// daemon that owns it.
+func SendOnce(ctx context.Context, st *store.Store, client *http.Client,
+	workerURL, boxID, token, enrollToken, version string) (bool, error) {
 	if boxID == "" {
 		return false, errors.New("boxagent: OCD_BOX_ID is empty; refusing to heartbeat without an id")
 	}
-	payload, err := heartbeatBody(st, boxID, enrollToken, version)
+	payload, err := heartbeatBody(ctx, st, boxID, enrollToken, version)
 	if err != nil {
 		return false, err
 	}
-	return postHeartbeat(withTimeout(client), workerURL, token, payload)
+	return postHeartbeat(ctx, withTimeout(client), workerURL, token, payload)
 }
 
-func heartbeatBody(st *store.Store, boxID, enrollToken, version string) ([]byte, error) {
+func heartbeatBody(ctx context.Context, st *store.Store, boxID, enrollToken, version string) ([]byte, error) {
 	payload, err := json.Marshal(heartbeatRequest{
 		ID:          boxID,
-		Seq:         st.NextHeartbeatSeq(),
+		Seq:         st.NextHeartbeatSeq(ctx),
 		BoxNow:      time.Now().Unix(),
-		Epoch:       st.PasswordEpoch(),
+		Epoch:       st.PasswordEpoch(ctx),
 		Version:     version,
 		EnrollToken: enrollToken,
 	})
@@ -82,8 +86,8 @@ func heartbeatURL(base string) string {
 	return trimmed + "/api/heartbeat"
 }
 
-func postHeartbeat(client *http.Client, workerURL, token string, payload []byte) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), heartbeatTimeout)
+func postHeartbeat(ctx context.Context, client *http.Client, workerURL, token string, payload []byte) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, heartbeatTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, heartbeatURL(workerURL), bytes.NewReader(payload))
 	if err != nil {

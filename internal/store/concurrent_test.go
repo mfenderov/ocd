@@ -11,32 +11,32 @@ import (
 // SQLITE_BUSY costs a row.
 func TestTwoStoresCanWriteAtTheSameTime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ocd.db")
-	first, err := Open(path)
+	first, err := Open(t.Context(), path)
 	if err != nil {
 		t.Fatalf("open the first store: %v", err)
 	}
 	defer first.Close()
-	second, err := Open(path)
+	second, err := Open(t.Context(), path)
 	if err != nil {
 		t.Fatalf("open the second store: %v", err)
 	}
 	defer second.Close()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			first.Audit("a", "tapped", "device", "127.0.0.1", "ok")
+			first.Audit(t.Context(), "a", "tapped", "device", "127.0.0.1", "ok")
 		}()
 		go func() {
 			defer wg.Done()
-			second.Audit("b", "tapped", "device", "127.0.0.2", "ok")
+			second.Audit(t.Context(), "b", "tapped", "device", "127.0.0.2", "ok")
 		}()
 	}
 	wg.Wait()
 
-	rows := first.RecentAudit(100)
+	rows := first.RecentAudit(t.Context(), 100)
 	if len(rows) != 40 {
 		t.Fatalf("want every row to have landed, got %d of 40", len(rows))
 	}

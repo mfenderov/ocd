@@ -32,6 +32,7 @@ func fakeBinaryOnPath(t *testing.T, name, body string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" + body
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func fakeBinaryOnPath(t *testing.T, name, body string) {
 }
 
 // writeEnvFile writes the env file of a box, with the given content.
-func writeEnvFile(t *testing.T, home, content string) string {
+func writeEnvFile(t *testing.T, home, content string) {
 	t.Helper()
 	path := filepath.Join(home, ".ocd", "env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -48,7 +49,6 @@ func writeEnvFile(t *testing.T, home, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
 // The box must be enrolled: the worker binds it, and the env file holds

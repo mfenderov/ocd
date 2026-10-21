@@ -1,6 +1,7 @@
 package boxadmin_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,7 @@ import (
 
 func postMint(t *testing.T, h http.Handler, key string) string {
 	t.Helper()
-	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	req.Header.Set("Idempotency-Key", key)
 	rec := httptest.NewRecorder()
@@ -30,10 +31,13 @@ func postMint(t *testing.T, h http.Handler, key string) string {
 }
 
 func TestSameIdempotencyKeyMintsOnce(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	calls := 0
-	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	exec := func(context.Context) (string, error) {
+		calls++
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
 	first := postMint(t, h, "key-1")
 	second := postMint(t, h, "key-1")
@@ -46,11 +50,11 @@ func TestSameIdempotencyKeyMintsOnce(t *testing.T) {
 }
 
 func TestMissingIdempotencyKeyGets400(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	exec := func(context.Context) (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
-	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -60,10 +64,13 @@ func TestMissingIdempotencyKeyGets400(t *testing.T) {
 }
 
 func TestNewIdempotencyKeyMintsFresh(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	calls := 0
-	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	exec := func(context.Context) (string, error) {
+		calls++
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
 	first := postMint(t, h, "key-1")
 	second := postMint(t, h, "key-2")
@@ -76,14 +83,17 @@ func TestNewIdempotencyKeyMintsFresh(t *testing.T) {
 }
 
 func TestClaimedKeyMintsFresh(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	calls := 0
-	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	exec := func(context.Context) (string, error) {
+		calls++
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
 	first := postMint(t, h, "key-1")
 	tok := strings.TrimPrefix(first, "https://oc-tap.buyallmemes.com/pair?t=")
-	if _, ok := st.ConsumeLink(tok); !ok {
+	if _, ok := st.ConsumeLink(t.Context(), tok); !ok {
 		t.Fatalf("setup: first token must be consumable")
 	}
 	second := postMint(t, h, "key-1")
@@ -98,12 +108,12 @@ func TestClaimedKeyMintsFresh(t *testing.T) {
 // The link the console serves is not a session yet: the session is the tap
 // that redeems it. Issuing a link must not spend the owner's budget.
 func TestMintHandlerDoesNotSpendASession(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	exec := func(context.Context) (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, exec, "https://oc-tap.buyallmemes.com/pair"))
 	postMint(t, h, "key-1")
-	if got := st.CountRecentMints("", time.Hour); got != 0 {
+	if got := st.CountRecentMints(t.Context(), "", time.Hour); got != 0 {
 		t.Fatalf("issuing a link must not count a session, got %d", got)
 	}
 }
@@ -111,21 +121,21 @@ func TestMintHandlerDoesNotSpendASession(t *testing.T) {
 // The budget is the delivered sessions. Once it is spent the box refuses
 // the link instead of handing out one that cannot be used.
 func TestMintHandlerRefusesWhenTheSessionBudgetIsSpent(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	// The tap-time mint is the session that counts.
-	exec := func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
-	for i := 0; i < 5; i++ {
-		if _, err := mint.Mint(st, exec, "admin", "web"); err != nil {
+	exec := func(context.Context) (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil }
+	for i := range 5 {
+		if _, err := mint.Mint(t.Context(), st, exec, "admin", "web"); err != nil {
 			t.Fatalf("mint %d: %v", i, err)
 		}
 	}
 	calls := 0
-	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, func() (string, error) {
+	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.MintHandler(st, func(context.Context) (string, error) {
 		calls++
 		return "https://oc.buyallmemes.com/auth/connect/abc", nil
 	}, "https://oc-tap.buyallmemes.com/pair"))
-	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	req.Header.Set("Idempotency-Key", "key-budget")
 	rec := httptest.NewRecorder()
@@ -139,11 +149,14 @@ func TestMintHandlerRefusesWhenTheSessionBudgetIsSpent(t *testing.T) {
 }
 
 func TestConcurrentSameKeyMintsOnce(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	var calls atomic.Int64
-	exec := func() (string, error) {
+	exec := func(ctx context.Context) (string, error) {
 		calls.Add(1)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return "https://oc.buyallmemes.com/auth/connect/abc", nil
 	}
 	const n = 8

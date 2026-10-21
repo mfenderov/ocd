@@ -94,7 +94,7 @@ func TestRenderIdentityShowsWhatTheBoxIs(t *testing.T) {
 func TestSetupTunnelUsesTheCloudflaredHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	fakeCloudflared(t, map[string]string{
+	recordingCloudflared(t, map[string]string{
 		"tunnel list":   `[]`,
 		"tunnel create": "Created tunnel oc-mac with id aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		"tunnel route":  `Added CNAME oc-tap-mac.buyallmemes.com to oc-mac`,
@@ -126,6 +126,7 @@ func fakeCloudflaredLogin(t *testing.T, body string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" + body
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, "cloudflared"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

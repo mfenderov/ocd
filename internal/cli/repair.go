@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"runtime"
@@ -33,7 +34,7 @@ func repairCmd() *cobra.Command {
 			printRepairResult(out, res)
 			_, _ = fmt.Fprintln(out, onboard.EnvSummary(boxID))
 			if runtime.GOOS == "darwin" && restart {
-				if err := restartLoginService(out, &res); err != nil {
+				if err := restartLoginService(cmd.Context(), out, &res); err != nil {
 					return err
 				}
 			}
@@ -80,8 +81,8 @@ func printRepairResult(out io.Writer, res onboard.RepairResult) {
 
 // restartLoginService reloads the login service so the repair takes
 // effect.
-func restartLoginService(out io.Writer, res *onboard.RepairResult) error {
-	path, err := onboard.InstallLoginService()
+func restartLoginService(ctx context.Context, out io.Writer, res *onboard.RepairResult) error {
+	path, err := onboard.InstallLoginService(ctx)
 	if err != nil {
 		return err
 	}

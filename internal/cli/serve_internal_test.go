@@ -24,7 +24,7 @@ import (
 // The brain asks the box which links died. The box answers with the
 // service status, behind the same Bearer auth as the other admin routes.
 func TestMountAdminServesStatusBehindAuth(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,11 +35,11 @@ func TestMountAdminServesStatusBehindAuth(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("OCD_ADMIN_TOKEN", "admin-secret")
 	mux := http.NewServeMux()
-	mountAdmin(mux, io.Discard, st, func() (string, error) { return "", nil })
+	mountAdmin(mux, io.Discard, st, func(context.Context) (string, error) { return "", nil })
 
 	get := func(auth string) (int, string, string) {
 		t.Helper()
-		req := httptest.NewRequest("GET", "/_oc/status", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil)
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
@@ -66,7 +66,7 @@ func TestMountAdminServesStatusBehindAuth(t *testing.T) {
 // A hung opencode must not keep the box's goroutine forever: the status
 // relay answers within its own deadline and the exec dies with it.
 func TestMountAdminStatusDoesNotWaitForAHungOpencode(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,15 +75,16 @@ func TestMountAdminStatusDoesNotWaitForAHungOpencode(t *testing.T) {
 	// A fake opencode that never answers. `exec` replaces the shell with
 	// sleep, so killing the process kills the sleep too.
 	dir := t.TempDir()
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("OCD_ADMIN_TOKEN", "admin-secret")
 	mux := http.NewServeMux()
-	mountAdmin(mux, io.Discard, st, func() (string, error) { return "", nil })
+	mountAdmin(mux, io.Discard, st, func(context.Context) (string, error) { return "", nil })
 
-	req := httptest.NewRequest("GET", "/_oc/status", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil)
 	req.Header.Set("Authorization", "Bearer admin-secret")
 	rec := httptest.NewRecorder()
 	start := time.Now()
@@ -236,7 +237,7 @@ func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
 
 	sweepDeadLinks(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
 
-	got, err := st.ExpiredLinkTokens(10)
+	got, err := st.ExpiredLinkTokens(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +259,7 @@ func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
 
 	sweepDeadLinks(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
 
-	got, err := st.ExpiredLinkTokens(10)
+	got, err := st.ExpiredLinkTokens(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,78 +307,123 @@ func TestSweepLeavesLinksTheBrainDoesNotOwnAlone(t *testing.T) {
 	}
 }
 
-// The box's audit rows are the fleet's history: the sweep pushes them to
-// the brain. The watermark says how far the box got, so the rows are
-// offered once and a restart does not re-send the whole history.
-func TestSweepPushesAuditRows(t *testing.T) {
-	st, _ := auditTrail(t)
+// brainRecorder is what the brain received: the events and the number of
+// pushes.
+type brainRecorder struct {
+	mu     sync.Mutex
+	events []boxagent.Event
+	calls  int
+}
 
-	var (
-		mu    sync.Mutex
-		got   []boxagent.Event
-		calls int
-	)
-	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// add records one push.
+func (b *brainRecorder) add(events []boxagent.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, events...)
+	b.calls++
+}
+
+// snapshot is the events and the push count so far.
+func (b *brainRecorder) snapshot() ([]boxagent.Event, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.events, b.calls
+}
+
+// fakeBrain starts a stand-in for the brain Worker: it records the events
+// it receives and answers 200.
+func fakeBrain(t *testing.T) (*httptest.Server, *brainRecorder) {
+	t.Helper()
+	rec := &brainRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Events []boxagent.Event `json:"events"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		mu.Lock()
-		got = append(got, body.Events...)
-		calls++
-		mu.Unlock()
+		rec.add(body.Events)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer brain.Close()
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
 
-	t.Setenv("OCD_WORKER_URL", brain.URL)
-	t.Setenv("OCD_BOX_ID", "mac")
-	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	stopped := startSweep(ctx, io.Discard, st, 10*time.Millisecond)
-	defer func() { cancel(); <-stopped }()
-
-	// Wait for the first push, then let several more sweeps run: the
-	// fast ticker guarantees they do.
+// waitForPushes waits until the brain has received a push.
+func waitForPushes(t *testing.T, rec *brainRecorder, what string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		mu.Lock()
-		n := calls
-		mu.Unlock()
-		if n > 0 {
-			break
+		if _, calls := rec.snapshot(); calls > 0 {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the brain never heard about the audit rows")
+			t.Fatalf("the brain never heard about the %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(300 * time.Millisecond)
+}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("want one push of the audit rows, got %d", calls)
+// emptyTrail empties the audit trail of the store at dbPath.
+func emptyTrail(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("want the two audit rows, got %d: %+v", len(got), got)
+	defer db.Close()
+	if _, err := db.ExecContext(t.Context(), `DELETE FROM audit`); err != nil {
+		t.Fatal(err)
 	}
-	if got[0].Type != "audit" || got[1].Type != "audit" {
-		t.Fatalf("want two audit events, got %q and %q", got[0].Type, got[1].Type)
+}
+
+// insertAuditRow writes one tapped audit row into the trail at dbPath,
+// with the given age in seconds.
+func insertAuditRow(t *testing.T, dbPath string, age int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got[0].Action != "tapped" || got[0].Actor != "web:1.2.3.4" || got[0].IP != "1.2.3.4" ||
-		got[0].Device != "mac" || got[0].Result != "ok" || got[0].UA != "curl/8" {
-		t.Fatalf("want the tapped row intact, got %+v", got[0])
+	defer db.Close()
+	if _, err := db.ExecContext(t.Context(),
+		`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now')-?, `+
+			`'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`,
+		age); err != nil {
+		t.Fatal(err)
 	}
-	if got[1].Action != "tap_denied" || got[1].Result != "used-or-expired" {
-		t.Fatalf("want the denied row intact, got %+v", got[1])
+}
+
+// reopenStore opens the store at dbPath again.
+func reopenStore(t *testing.T, dbPath string) *store.Store {
+	t.Helper()
+	st, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The rows carry their own times, not the time of the push: the
-	// brain keys its history on them, and two rows of one second and one
-	// action collapse into one row there.
-	rows, err := st.RecentAuditSince(0)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// assertTappedRow checks the row of a tap.
+func assertTappedRow(t *testing.T, row boxagent.Event) {
+	t.Helper()
+	if row.Action != "tapped" || row.Actor != "web:1.2.3.4" || row.IP != "1.2.3.4" ||
+		row.Device != "mac" || row.Result != "ok" || row.UA != "curl/8" {
+		t.Fatalf("want the tapped row intact, got %+v", row)
+	}
+}
+
+// assertDeniedRow checks the row of a refused tap.
+func assertDeniedRow(t *testing.T, row boxagent.Event) {
+	t.Helper()
+	if row.Action != "tap_denied" || row.Result != "used-or-expired" {
+		t.Fatalf("want the denied row intact, got %+v", row)
+	}
+}
+
+// assertRowTimes checks that the pushed rows carry their own times.
+func assertRowTimes(t *testing.T, got []boxagent.Event, st *store.Store) {
+	t.Helper()
+	rows, err := st.RecentAuditSince(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,56 +437,65 @@ func TestSweepPushesAuditRows(t *testing.T) {
 	}
 }
 
+// The box's audit rows are the fleet's history: the sweep pushes them to
+// the brain. The watermark says how far the box got, so the rows are
+// offered once and a restart does not re-send the whole history.
+func TestSweepPushesAuditRows(t *testing.T) {
+	st, _ := auditTrail(t)
+	brain, rec := fakeBrain(t)
+
+	t.Setenv("OCD_WORKER_URL", brain.URL)
+	t.Setenv("OCD_BOX_ID", "mac")
+	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	defer func() { cancel(); <-stopped }()
+
+	// Wait for the first push, then let several more sweeps run: the
+	// fast ticker guarantees they do.
+	waitForPushes(t, rec, "audit rows")
+	time.Sleep(300 * time.Millisecond)
+
+	got, calls := rec.snapshot()
+	if calls != 1 {
+		t.Fatalf("want one push of the audit rows, got %d", calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want the two audit rows, got %d: %+v", len(got), got)
+	}
+	if got[0].Type != "audit" || got[1].Type != "audit" {
+		t.Fatalf("want two audit events, got %q and %q", got[0].Type, got[1].Type)
+	}
+	assertTappedRow(t, got[0])
+	assertDeniedRow(t, got[1])
+	// The rows carry their own times, not the time of the push: the
+	// brain keys its history on them, and two rows of one second and one
+	// action collapse into one row there.
+	assertRowTimes(t, got, st)
+}
+
 // The trail was reset: its rowids started over and the stored watermark
 // points past every row that follows. The push must not go silent: the
 // sweep repairs the watermark and offers the trail again.
 func TestSweepPushesAfterTheAuditTrailWasReset(t *testing.T) {
 	st, dbPath := auditTrail(t)
 	// The box reported up to a rowid far ahead of the trail.
-	if err := st.SetAuditWatermark(5000); err != nil {
+	if err := st.SetAuditWatermark(t.Context(), 5000); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
 
 	// The trail is reset: the rows are gone and the rowids start over.
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DELETE FROM audit`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(?,'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`, time.Now().Unix()-3600); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
+	emptyTrail(t, dbPath)
+	insertAuditRow(t, dbPath, 3600)
+	st = reopenStore(t, dbPath)
 
-	st, err = store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	var (
-		mu  sync.Mutex
-		got []boxagent.Event
-	)
-	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Events []boxagent.Event `json:"events"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		mu.Lock()
-		got = append(got, body.Events...)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer brain.Close()
-
+	brain, rec := fakeBrain(t)
 	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
 
-	mu.Lock()
-	defer mu.Unlock()
+	got, _ := rec.snapshot()
 	if len(got) != 1 {
 		t.Fatalf("want the reset trail's row pushed, got %d events", len(got))
 	}
@@ -448,7 +503,7 @@ func TestSweepPushesAfterTheAuditTrailWasReset(t *testing.T) {
 		t.Fatalf("want the audit row, got %+v", got[0])
 	}
 	// The watermark is repaired onto the trail's new numbering.
-	watermark, err := st.AuditWatermark()
+	watermark, err := st.AuditWatermark(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,55 +519,22 @@ func TestSweepPushesAfterTheAuditTrailWasReset(t *testing.T) {
 func TestSweepPushesAfterTheTrailWasResetAndRefilled(t *testing.T) {
 	st, dbPath := auditTrail(t)
 	// The box reported up to the trail's last row.
-	if err := st.SetAuditWatermark(2); err != nil {
+	if err := st.SetAuditWatermark(t.Context(), 2); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
 
 	// The trail is emptied and refilled: the rowids start over, and the
 	// new rows are new events with new times.
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DELETE FROM audit`); err != nil {
-		t.Fatal(err)
-	}
-	// The new rows are new events: they carry their own times, and those
-	// times are not the ones the brain saw.
-	for _, at := range []string{`strftime('%s','now')`, `strftime('%s','now')-1`} {
-		if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(` + at + `,'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db.Close()
+	emptyTrail(t, dbPath)
+	insertAuditRow(t, dbPath, 0)
+	insertAuditRow(t, dbPath, 1)
+	st = reopenStore(t, dbPath)
 
-	st, err = store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	var (
-		mu  sync.Mutex
-		got []boxagent.Event
-	)
-	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Events []boxagent.Event `json:"events"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		mu.Lock()
-		got = append(got, body.Events...)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer brain.Close()
-
+	brain, rec := fakeBrain(t)
 	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
 
-	mu.Lock()
-	defer mu.Unlock()
+	got, _ := rec.snapshot()
 	// Both refilled rows must be pushed: the old watermark points at a row
 	// that is not the row the brain has.
 	if len(got) != 2 {
@@ -536,7 +558,7 @@ func TestSweepPushesAfterTheTrailWasResetAndRefilled(t *testing.T) {
 func TestSweepPushesAfterTheWatermarksRowWasReplaced(t *testing.T) {
 	st, dbPath := auditTrail(t)
 	// The box reported up to the trail's last row.
-	if err := st.SetAuditWatermark(2); err != nil {
+	if err := st.SetAuditWatermark(t.Context(), 2); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
@@ -547,18 +569,20 @@ func TestSweepPushesAfterTheWatermarksRowWasReplaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DELETE FROM audit`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `DELETE FROM audit`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO audit(at, actor, action, device, ip, result, ua) `+
+		`VALUES(strftime('%s','now'),'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),'web:1.2.3.4','tap_denied','','1.2.3.4','used-or-expired','')`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO audit(at, actor, action, device, ip, result, ua) `+
+		`VALUES(strftime('%s','now'),'web:1.2.3.4','tap_denied','','1.2.3.4','used-or-expired','')`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	st, err = store.Open(dbPath)
+	st, err = store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +642,7 @@ func TestSweepKeepsTheWatermarkAfterThePrune(t *testing.T) {
 	sweepAuditRows(context.Background(), &log, st, brainConfig(brain.URL), &http.Client{})
 
 	// The prune took the old row; the live row is still there.
-	watermark, err := st.AuditWatermark()
+	watermark, err := st.AuditWatermark(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,12 +657,12 @@ func TestSweepKeepsTheWatermarkAfterThePrune(t *testing.T) {
 // A brain outage must not lose the audit rows: the watermark stays where
 // it was, so the next sweep offers the same rows again.
 func TestSweepKeepsAuditRowsAfterAFailedPush(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.AuditUA(t.Context(), "web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -647,14 +671,14 @@ func TestSweepKeepsAuditRowsAfterAFailedPush(t *testing.T) {
 
 	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
 
-	watermark, err := st.AuditWatermark()
+	watermark, err := st.AuditWatermark(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if watermark != 0 {
 		t.Fatalf("want no watermark after a failed push, got %d", watermark)
 	}
-	rows, err := st.RecentAuditSince(0)
+	rows, err := st.RecentAuditSince(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,22 +697,22 @@ func TestSweepKeepsAuditRowsAfterAFailedPush(t *testing.T) {
 func auditTrail(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
-	st, err := store.Open(dbPath)
+	st, err := store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
-	st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	st.AuditUA(t.Context(), "web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.AuditUA(t.Context(), "web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
 	st.Close()
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE audit SET at=at-3600`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `UPDATE audit SET at=at-3600`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
-	st, err = store.Open(dbPath)
+	st, err = store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,35 +726,35 @@ func auditTrail(t *testing.T) (*store.Store, string) {
 func prunedTrail(t *testing.T) (*store.Store, int64) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "prune.db")
-	st, err := store.Open(dbPath)
+	st, err := store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The old row: written 100 days ago, so the prune takes it.
-	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.AuditUA(t.Context(), "web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
 	st.Close()
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE audit SET at=at-100*86400`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `UPDATE audit SET at=at-100*86400`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
-	st, err = store.Open(dbPath)
+	st, err = store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The live row: the write triggers the prune, which takes the old
 	// one.
-	live := st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
-	if err := st.SetAuditWatermark(live); err != nil {
+	live := st.AuditUA(t.Context(), "web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	if err := st.SetAuditWatermark(t.Context(), live); err != nil {
 		t.Fatal(err)
 	}
 	// Wait for the prune to take the old row.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		rows, err := st.RecentAuditSince(0)
+		rows, err := st.RecentAuditSince(t.Context(), 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -752,11 +776,11 @@ func prunedTrail(t *testing.T) (*store.Store, int64) {
 func deadLinkStore(t *testing.T, via string) (*store.Store, string, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
-	st, err := store.Open(dbPath)
+	st, err := store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := st.IssueLink("mac", via)
+	tok, err := st.IssueLink(t.Context(), "mac", via)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,12 +792,13 @@ func deadLinkStore(t *testing.T, via string) (*store.Store, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE link_tokens SET created_at=strftime('%s','now')-3600 WHERE token=?`, tok); err != nil {
+	if _, err := db.ExecContext(t.Context(), `UPDATE link_tokens SET created_at=strftime('%s','now')-3600 WHERE `+
+		`token=?`, tok); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
-	st, err = store.Open(dbPath)
+	st, err = store.Open(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +816,7 @@ func linkTokenRows(t *testing.T, dbPath, tok string) int {
 	}
 	defer db.Close()
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM link_tokens WHERE token=?`, tok).Scan(&n); err != nil {
+	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM link_tokens WHERE token=?`, tok).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n

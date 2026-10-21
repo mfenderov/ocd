@@ -115,6 +115,9 @@ func RepairTunnel(cfgPath, boxID string) (bool, error) {
 	if string(raw) == want {
 		return false, nil
 	}
+	// The path is this box's own cloudflared config under its home
+	// directory: no request field reaches it.
+	//nolint:gosec // the path is this box's own config, built from the home directory.
 	if err := os.WriteFile(cfgPath, []byte(want), 0o600); err != nil {
 		return false, fmt.Errorf("onboard: write tunnel config: %w", err)
 	}

@@ -15,10 +15,10 @@ func TestLookupCity(t *testing.T) {
 	}))
 	defer srv.Close()
 	geo.Endpoint = srv.URL + "/json/"
-	if got := geo.Lookup("9.9.9.9"); got != "Berlin, DE" {
+	if got := geo.Lookup(t.Context(), "9.9.9.9"); got != "Berlin, DE" {
 		t.Fatalf("want Berlin, DE got %q", got)
 	}
-	if got := geo.Lookup("9.9.9.9"); got != "Berlin, DE" {
+	if got := geo.Lookup(t.Context(), "9.9.9.9"); got != "Berlin, DE" {
 		t.Fatalf("cached want Berlin, DE got %q", got)
 	}
 	if n := geo.Requests(); n != 1 {
@@ -27,10 +27,10 @@ func TestLookupCity(t *testing.T) {
 }
 
 func TestLookupSkipsLocal(t *testing.T) {
-	if got := geo.Lookup("127.0.0.1"); got != "" {
+	if got := geo.Lookup(t.Context(), "127.0.0.1"); got != "" {
 		t.Fatalf("want empty for loopback, got %q", got)
 	}
-	if got := geo.Lookup("not-an-ip"); got != "" {
+	if got := geo.Lookup(t.Context(), "not-an-ip"); got != "" {
 		t.Fatalf("want empty for junk, got %q", got)
 	}
 }

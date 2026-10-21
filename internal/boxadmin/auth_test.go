@@ -16,33 +16,33 @@ func okHandler() http.Handler {
 }
 
 func TestBadBearerGets401AndAuditRow(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	h := boxadmin.RequireAdmin(st, "s3cr3t", okHandler())
-	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_oc/mint", nil)
 	req.Header.Set("Authorization", "Bearer wrong")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rec.Code)
 	}
-	rows := st.RecentAudit(3)
+	rows := st.RecentAudit(t.Context(), 3)
 	if len(rows) != 1 || rows[0].Action != "admin_denied" {
 		t.Fatalf("want 1 admin_denied row, got %+v", rows)
 	}
 }
 
 func TestMissingBearerGets401(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	h := boxadmin.RequireAdmin(st, "s3cr3t", okHandler())
-	req := httptest.NewRequest("POST", "/_oc/mint", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_oc/mint", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rec.Code)
 	}
-	rows := st.RecentAudit(3)
+	rows := st.RecentAudit(t.Context(), 3)
 	if len(rows) != 1 || rows[0].Action != "admin_denied" {
 		t.Fatalf("want 1 admin_denied row, got %+v", rows)
 	}

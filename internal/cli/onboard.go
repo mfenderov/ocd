@@ -41,11 +41,12 @@ func onboardCmd() *cobra.Command {
 			if len(args) > 1 {
 				opts.EnrollCode = args[1]
 			}
-			return runOnboard(cmd.OutOrStdout(), opts)
+			return runOnboard(cmd.Context(), cmd.OutOrStdout(), opts)
 		},
 	}
 	cmd.Flags().StringVar(&workerURL, "worker-url", "", "fleet Worker origin (default "+onboard.DefaultWorkerURL+")")
-	cmd.Flags().StringVar(&cfToken, "cf-token", "", "Cloudflare API token for tunnel+DNS (default: existing cloudflared login)")
+	cmd.Flags().StringVar(&cfToken, "cf-token", "",
+		"Cloudflare API token for tunnel+DNS (default: existing cloudflared login)")
 	cmd.Flags().BoolVar(&skipTunnel, "skip-tunnel", false, "skip tunnel and DNS provisioning")
 	cmd.Flags().BoolVar(&installService, "install-service", false, "install macOS login service")
 	cmd.Flags().BoolVar(&force, "force", false, "re-onboard even if this machine already has an identity")
@@ -54,8 +55,7 @@ func onboardCmd() *cobra.Command {
 
 // runOnboard is the whole enrollment: one question, one Telegram round
 // trip, then everything else automatic.
-func runOnboard(w io.Writer, opts onboard.Options) error {
-	ctx := context.Background()
+func runOnboard(ctx context.Context, w io.Writer, opts onboard.Options) error {
 	envPath, err := onboard.DefaultEnvPath()
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func runOnboard(w io.Writer, opts onboard.Options) error {
 	if err != nil {
 		return err
 	}
-	return reportOnboard(w, cfg, res, opts)
+	return reportOnboard(ctx, w, cfg, res, opts)
 }
 
 // confirmReonboard asks a box that is already in the fleet whether it
@@ -103,7 +103,8 @@ func confirmReonboard(w io.Writer, envPath string, opts onboard.Options) (bool, 
 }
 
 // onboardConfig is the configuration the enrollment runs with.
-func onboardConfig(ctx context.Context, w io.Writer, opts onboard.Options, envPath, boxID, code string) (onboard.Config, error) {
+func onboardConfig(ctx context.Context, w io.Writer, opts onboard.Options,
+	envPath, boxID, code string) (onboard.Config, error) {
 	host := onboard.TapHost(boxID)
 	uiHost := onboard.UIHost(boxID)
 	uiPort, note := onboard.OpenCodePortOrDefault(ctx)
@@ -133,7 +134,8 @@ func onboardConfig(ctx context.Context, w io.Writer, opts onboard.Options, envPa
 
 // tunnelPlan is the tunnel the box will serve, and the login it needs
 // before that tunnel can be created.
-func tunnelPlan(ctx context.Context, w io.Writer, opts onboard.Options, boxID, host, uiHost string, uiPort int) (*onboard.TunnelPlan, error) {
+func tunnelPlan(ctx context.Context, w io.Writer, opts onboard.Options,
+	boxID, host, uiHost string, uiPort int) (*onboard.TunnelPlan, error) {
 	if opts.SkipTunnel {
 		return nil, nil
 	}
@@ -145,14 +147,24 @@ func tunnelPlan(ctx context.Context, w io.Writer, opts onboard.Options, boxID, h
 		Port:     onboard.DaemonPort,
 		UIPort:   uiPort,
 	}
-	credDir, err := onboard.DefaultCredDir()
-	if err != nil {
+	credDir, ok := cloudflaredCredDir()
+	if !ok {
 		return tunnel, nil
 	}
 	if err := onboard.EnsureCloudflaredLogin(ctx, credDir, opts.CFToken, onboard.IsTTY(), w); err != nil {
 		return nil, err
 	}
 	return tunnel, nil
+}
+
+// cloudflaredCredDir is the cloudflared credentials directory, and
+// whether it could be read: without it there is no login to ensure.
+func cloudflaredCredDir() (string, bool) {
+	credDir, err := onboard.DefaultCredDir()
+	if err != nil {
+		return "", false
+	}
+	return credDir, true
 }
 
 // runEnrollment runs the enrollment: the spinner on a terminal, plain
@@ -166,11 +178,12 @@ func runEnrollment(ctx context.Context, w io.Writer, cfg onboard.Config) (onboar
 
 // reportOnboard prints what the onboarding did, and what did not
 // happen.
-func reportOnboard(w io.Writer, cfg onboard.Config, res onboard.Result, opts onboard.Options) error {
+func reportOnboard(ctx context.Context, w io.Writer, cfg onboard.Config,
+	res onboard.Result, opts onboard.Options) error {
 	serviced := false
 	if opts.InstallService || onboard.IsTTY() {
 		var err error
-		serviced, err = installService(w)
+		serviced, err = installService(ctx, w)
 		if err != nil {
 			return err
 		}
@@ -187,17 +200,17 @@ func reportOnboard(w io.Writer, cfg onboard.Config, res onboard.Result, opts onb
 
 // installService installs the macOS login service. Other platforms print
 // manual guidance instead.
-func installService(w io.Writer) (bool, error) {
+func installService(ctx context.Context, w io.Writer) (bool, error) {
 	if runtime.GOOS != "darwin" {
 		_, _ = fmt.Fprintln(w, "service: automatic install supports macOS only — run ocd serve via your supervisor")
 		return false, nil
 	}
-	return installLoginService(w)
+	return installLoginService(ctx, w)
 }
 
 // installLoginService installs the login service and says where it went.
-func installLoginService(w io.Writer) (bool, error) {
-	path, err := onboard.InstallLoginService()
+func installLoginService(ctx context.Context, w io.Writer) (bool, error) {
+	path, err := onboard.InstallLoginService(ctx)
 	if err != nil {
 		return false, err
 	}

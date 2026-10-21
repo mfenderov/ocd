@@ -26,16 +26,8 @@ var Version = "dev"
 // request reaches a shell: n is parsed as an integer only.
 func AuditHandler(st *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := 50
-		if raw := r.URL.Query().Get("n"); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-				n = v
-			}
-		}
-		if n > 200 {
-			n = 200
-		}
-		rows := st.RecentAudit(n)
+		n := auditRows(r)
+		rows := st.RecentAudit(r.Context(), n)
 		if rows == nil {
 			rows = []store.AuditRow{}
 		}
@@ -44,16 +36,30 @@ func AuditHandler(st *store.Store) http.Handler {
 	})
 }
 
+// auditRows is how many audit rows the request asks for: 50 by default,
+// 200 at most. Nothing from the request reaches a shell: n is parsed as
+// an integer only.
+func auditRows(r *http.Request) int {
+	n := 50
+	if raw := r.URL.Query().Get("n"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			n = v
+		}
+	}
+	return min(n, 200)
+}
+
 // PresenceHandler reports box identity and liveness as JSON
 // {"id","epoch","version","taps_24h"}. The box id comes from OCD_BOX_ID
 // at request time so a cloned env is never baked in at construction.
 func PresenceHandler(st *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		resp := map[string]any{
 			"id":       os.Getenv("OCD_BOX_ID"),
-			"epoch":    st.PasswordEpoch(),
+			"epoch":    st.PasswordEpoch(ctx),
 			"version":  Version,
-			"taps_24h": st.CountRecentMints("", 24*time.Hour),
+			"taps_24h": st.CountRecentMints(ctx, "", 24*time.Hour),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)

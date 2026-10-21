@@ -117,14 +117,14 @@ func RenderIngress(tunnelID, credFile string, rules []ingressRule) string {
 // keeps its own, so a repair never reverts the box to the host it used
 // to serve. A box that never followed the convention falls back to the
 // first rule of each kind.
-func TapHostFromConfig(cfgPath string, boxID string) (tapHost, uiHost string, err error) {
+func TapHostFromConfig(cfgPath string, boxID string) (string, string, error) {
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return "", "", fmt.Errorf("onboard: read tunnel config: %w", err)
 	}
 	daemon, editor := splitByDaemonPort(ParseIngress(string(raw)))
-	tapHost = hostForBox(daemon, hostLabel(TapHost(boxID)))
-	uiHost = hostForBox(editor, hostLabel(UIHost(boxID)))
+	tapHost := hostForBox(daemon, hostLabel(TapHost(boxID)))
+	uiHost := hostForBox(editor, hostLabel(UIHost(boxID)))
 	if tapHost == "" {
 		return "", "", fmt.Errorf("onboard: tunnel config has no rule for the daemon port %d", DaemonPort)
 	}
@@ -133,7 +133,8 @@ func TapHostFromConfig(cfgPath string, boxID string) (tapHost, uiHost string, er
 
 // splitByDaemonPort splits the rules into the ones serving the daemon
 // port and the ones serving the editor.
-func splitByDaemonPort(rules []ingressRule) (daemon, editor []ingressRule) {
+func splitByDaemonPort(rules []ingressRule) ([]ingressRule, []ingressRule) {
+	var daemon, editor []ingressRule
 	for _, r := range rules {
 		if r.Port == DaemonPort {
 			daemon = append(daemon, r)

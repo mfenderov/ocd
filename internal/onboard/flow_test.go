@@ -85,15 +85,18 @@ func onboardServer(t *testing.T) string {
 	return srv.URL
 }
 
+// ownTunnelID is the tunnel id the box's own config names.
+const ownTunnelID = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+
 // plantOwnTunnelConfig writes the tunnel config a box that already
 // serves a tunnel has: it names the tunnel the box serves.
-func plantOwnTunnelConfig(t *testing.T, credDir, tunnelID string) {
+func plantOwnTunnelConfig(t *testing.T, credDir string) {
 	t.Helper()
 	if err := os.MkdirAll(credDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := "tunnel: " + tunnelID + "\n" +
-		"credentials-file: " + filepath.Join(credDir, tunnelID+".json") + "\n" +
+	body := "tunnel: " + ownTunnelID + "\n" +
+		"credentials-file: " + filepath.Join(credDir, ownTunnelID+".json") + "\n" +
 		"ingress:\n" +
 		"  - hostname: oc-tap-home.buyallmemes.com\n    service: http://127.0.0.1:49400\n" +
 		"  - service: http_status:404\n"
@@ -122,11 +125,10 @@ func homeOnboard(t *testing.T, dir, credDir string) onboard.Config {
 // connector must load the new ingress rules and the daemon the new env
 // file. The tunnel is named by its id, the name is a label.
 func TestOnboardingBringsTheBoxBackUp(t *testing.T) {
-	const tunnelID = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, ".cloudflared")
-	plantOwnTunnelConfig(t, credDir, tunnelID)
-	fakeCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
+	plantOwnTunnelConfig(t, credDir)
+	recordingCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
 	calls := fakeRestartBox(t)
 
 	cfg := homeOnboard(t, dir, credDir)
@@ -137,7 +139,7 @@ func TestOnboardingBringsTheBoxBackUp(t *testing.T) {
 		t.Fatalf("the box must be brought back up once, got %d", len(*calls))
 	}
 	got := (*calls)[0]
-	if got.tunnelID != tunnelID {
+	if got.tunnelID != ownTunnelID {
 		t.Fatalf("the tunnel must be named by its id, got %q", got.tunnelID)
 	}
 	if got.daemonRunsTunnel {
@@ -151,8 +153,8 @@ func TestOnboardingBringsTheBoxBackUp(t *testing.T) {
 func TestOnboardingThatReusedTheTunnelLeavesTheConnectorAlone(t *testing.T) {
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, ".cloudflared")
-	plantOwnTunnelConfig(t, credDir, "7ed965a2-9828-46f6-851e-24cf1b9fedf6")
-	fakeCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
+	plantOwnTunnelConfig(t, credDir)
+	recordingCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
 	fakeRestartBox(t)
 
 	cfg := homeOnboard(t, dir, credDir)
@@ -173,8 +175,8 @@ func TestOnboardingThatReusedTheTunnelLeavesTheConnectorAlone(t *testing.T) {
 func TestOnboardingKeepsTheManageTunnelKeyTheBoxAlreadyHad(t *testing.T) {
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, ".cloudflared")
-	plantOwnTunnelConfig(t, credDir, "7ed965a2-9828-46f6-851e-24cf1b9fedf6")
-	fakeCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
+	plantOwnTunnelConfig(t, credDir)
+	recordingCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
 	fakeRestartBox(t)
 
 	cfg := homeOnboard(t, dir, credDir)
@@ -198,7 +200,7 @@ func TestOnboardingKeepsTheManageTunnelKeyTheBoxAlreadyHad(t *testing.T) {
 func TestOnboardingThatCreatedTheTunnelMakesTheDaemonRunIt(t *testing.T) {
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, ".cloudflared")
-	fakeCloudflared(t, map[string]string{
+	recordingCloudflared(t, map[string]string{
 		"tunnel list":   `[]`,
 		"tunnel create": "Created tunnel oc-home with id 11111111-2222-3333-4444-555555555555",
 		"tunnel route":  "Added CNAME",
@@ -226,8 +228,8 @@ func TestOnboardingThatCreatedTheTunnelMakesTheDaemonRunIt(t *testing.T) {
 func TestOnboardingReportsARestartThatCouldNotHappen(t *testing.T) {
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, ".cloudflared")
-	plantOwnTunnelConfig(t, credDir, "7ed965a2-9828-46f6-851e-24cf1b9fedf6")
-	fakeCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
+	plantOwnTunnelConfig(t, credDir)
+	recordingCloudflared(t, map[string]string{"tunnel route": "Added CNAME"}, nil)
 	old := onboard.RestartBox
 	onboard.RestartBox = func(context.Context, string, bool) onboard.RestartResult {
 		return onboard.RestartResult{Notices: []string{"the daemon was not restarted: no service runs it"}}

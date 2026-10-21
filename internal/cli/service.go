@@ -32,7 +32,7 @@ func serviceInstallCmd() *cobra.Command {
 			if err := ensureTunnelManaged(); err != nil {
 				return err
 			}
-			_, err := installLoginService(cmd.OutOrStdout())
+			_, err := installLoginService(cmd.Context(), cmd.OutOrStdout())
 			return err
 		},
 	}
@@ -44,7 +44,7 @@ func serviceUninstallCmd() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Stop and remove the login service",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := onboard.UnloadLoginService(); err != nil {
+			if err := onboard.UnloadLoginService(cmd.Context()); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "service removed")
@@ -59,7 +59,7 @@ func serviceStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show the login service state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			state, err := onboard.ServiceStatus()
+			state, err := onboard.ServiceStatus(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -103,12 +103,21 @@ func writeManageTunnel() error {
 	if err != nil {
 		return err
 	}
-	vals, err := onboard.LoadEnvFile(envPath)
-	if err != nil {
+	vals, ok := envValues(envPath)
+	if !ok {
 		return nil
 	}
 	if vals["OCD_MANAGE_TUNNEL"] == "1" {
 		return nil
 	}
 	return onboard.WriteEnvFile(envPath, map[string]string{"OCD_MANAGE_TUNNEL": "1"})
+}
+
+// envValues reads the env file, and reports whether it could be read.
+func envValues(envPath string) (map[string]string, bool) {
+	vals, err := onboard.LoadEnvFile(envPath)
+	if err != nil {
+		return nil, false
+	}
+	return vals, true
 }

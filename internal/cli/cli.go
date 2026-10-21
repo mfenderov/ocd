@@ -16,7 +16,7 @@ import (
 	"github.com/mfenderov/ocd/internal/store"
 )
 
-func openStore() (*store.Store, error) {
+func openStore(ctx context.Context) (*store.Store, error) {
 	// One rule for the database path: the onboarding has it, and it
 	// fails loudly when the home directory cannot be read — a relative
 	// path here once pointed the daemon at an empty database.
@@ -25,12 +25,14 @@ func openStore() (*store.Store, error) {
 		return nil, err
 	}
 	_ = os.MkdirAll(filepath.Dir(p), 0o700)
-	return store.Open(p)
+	return store.Open(ctx, p)
 }
 
 // realExec runs the real `opencode pair` to mint a link.
-func realExec() (string, error) {
-	out, err := exec.Command("opencode", "pair", "--url", pairURL()).Output()
+func realExec(ctx context.Context) (string, error) {
+	// opencode is our own binary, and the url is the configured origin.
+	//nolint:gosec // the argv is opencode's own, with the configured pair origin.
+	out, err := exec.CommandContext(ctx, "opencode", "pair", "--url", pairURL()).Output()
 	if err != nil {
 		return "", err
 	}
@@ -58,7 +60,7 @@ func Root() *cobra.Command {
 		// Bare `ocd` is the whole product: it enrolls this machine, or
 		// reports the current one. Subcommands cover the rest.
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := runOnboard(cmd.OutOrStdout(), onboard.Options{})
+			err := runOnboard(cmd.Context(), cmd.OutOrStdout(), onboard.Options{})
 			if err != nil {
 				// A runtime failure is not a usage problem: the bare
 				// command has no usage worth dumping over its report.
@@ -87,7 +89,7 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Run the box daemon (/pair, box API, heartbeat, sweeps)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunServe(cmd.OutOrStdout())
+			return RunServe(cmd.Context(), cmd.OutOrStdout())
 		},
 	}
 }
@@ -99,7 +101,7 @@ func mintCmd() *cobra.Command {
 		Use:   "mint",
 		Short: "Mint a pair link",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			link, err := mintLink(device)
+			link, err := mintLink(cmd.Context(), device)
 			if err != nil {
 				return err
 			}
@@ -113,13 +115,13 @@ func mintCmd() *cobra.Command {
 }
 
 // mintLink mints a pair link for the named device.
-func mintLink(device string) (string, error) {
-	st, err := openStore()
+func mintLink(ctx context.Context, device string) (string, error) {
+	st, err := openStore(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer st.Close()
-	return mint.Mint(st, realExec, device, "cli")
+	return mint.Mint(ctx, st, realExec, device, "cli")
 }
 
 // devicesCmd manages the devices the daemon serves.
@@ -138,13 +140,13 @@ func devicesListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List devices",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, err := openStore()
+			st, err := openStore(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			for _, name := range st.ListDevices() {
-				d, _ := st.GetDevice(name)
+			for _, name := range st.ListDevices(cmd.Context()) {
+				d, _ := st.GetDevice(cmd.Context(), name)
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\texpires=%d\n", d.Name, d.Platform, d.ExpiresAt)
 			}
 			return nil
@@ -159,12 +161,12 @@ func devicesAddCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		Short: "Add a device",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, err := openStore()
+			st, err := openStore(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			return st.AddDevice(args[0], args[1])
+			return st.AddDevice(cmd.Context(), args[0], args[1])
 		},
 	}
 }
@@ -176,18 +178,22 @@ func statusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show daemon status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, err := openStore()
+			st, err := openStore(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(cmd.Context(), st, func(ctx context.Context, name string, args ...string) (string, error) {
-				o, e := exec.CommandContext(ctx, name, args...).Output()
-				return string(o), e
-			}))
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(cmd.Context(), st, opencodeExec))
 			return nil
 		},
 	}
+}
+
+// opencodeExec runs an `opencode service ...` command. The argv comes
+// from the fixed status sequence, never from a request.
+func opencodeExec(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	return string(out), err
 }
 
 // revokeCmd rotates the password and kills every session.
@@ -197,7 +203,7 @@ func revokeCmd() *cobra.Command {
 		Use:   "revoke",
 		Short: "Rotate password, kill all sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return revokeSessions(revokeYes)
+			return revokeSessions(cmd.Context(), revokeYes)
 		},
 	}
 	cmd.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
@@ -206,22 +212,19 @@ func revokeCmd() *cobra.Command {
 
 // revokeSessions rotates the server password and kills every session.
 // The operator has to confirm: it logs them out everywhere.
-func revokeSessions(confirmed bool) error {
+func revokeSessions(ctx context.Context, confirmed bool) error {
 	if !confirmed {
 		return fmt.Errorf("confirm with --yes (logs you out everywhere)")
 	}
-	return revokeAll()
+	return revokeAll(ctx)
 }
 
 // revokeAll rotates the server password and expires every device.
-func revokeAll() error {
-	st, err := openStore()
+func revokeAll(ctx context.Context) error {
+	st, err := openStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	return admin.Revoke(st, func(name string, args ...string) (string, error) {
-		o, e := exec.Command(name, args...).Output()
-		return string(o), e
-	})
+	return admin.Revoke(ctx, st, opencodeExec)
 }

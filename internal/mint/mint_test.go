@@ -1,6 +1,7 @@
 package mint_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -10,17 +11,17 @@ import (
 )
 
 func TestMintRateCap(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	st.AddDevice("mac", "darwin")
+	st.AddDevice(t.Context(), "mac", "darwin")
 	calls := 0
-	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
-	for i := 0; i < 5; i++ {
-		if _, err := mint.Mint(st, exec, "mac", "tui"); err != nil {
+	exec := func(context.Context) (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
+	for i := range 5 {
+		if _, err := mint.Mint(t.Context(), st, exec, "mac", "tui"); err != nil {
 			t.Fatalf("mint %d: %v", i, err)
 		}
 	}
-	if _, err := mint.Mint(st, exec, "mac", "tui"); !errors.Is(err, mint.ErrRateLimited) {
+	if _, err := mint.Mint(t.Context(), st, exec, "mac", "tui"); !errors.Is(err, mint.ErrRateLimited) {
 		t.Fatalf("want ErrRateLimited, got %v calls=%d", err, calls)
 	}
 	if calls != 5 {
@@ -31,16 +32,16 @@ func TestMintRateCap(t *testing.T) {
 // A pre-flight proves pairing works; it is not a session. The session is
 // the tap, so a pre-flight must not spend a session slot.
 func TestPreflightDoesNotSpendASession(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	calls := 0
-	exec := func() (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
-	for i := 0; i < 6; i++ {
-		if _, err := mint.Preflight(st, exec, "admin"); err != nil {
+	exec := func(context.Context) (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
+	for i := range 6 {
+		if _, err := mint.Preflight(t.Context(), st, exec, "admin"); err != nil {
 			t.Fatalf("preflight %d: %v", i, err)
 		}
 	}
-	if got := st.CountRecentMints("", time.Hour); got != 0 {
+	if got := st.CountRecentMints(t.Context(), "", time.Hour); got != 0 {
 		t.Fatalf("a pre-flight is not a session: want 0 counted, got %d", got)
 	}
 	if calls != 6 {
@@ -51,17 +52,17 @@ func TestPreflightDoesNotSpendASession(t *testing.T) {
 // The pre-flight checks the budget of the sessions already delivered: a
 // spent budget refuses the link, and the exec never runs.
 func TestPreflightRefusesWhenTheSessionBudgetIsSpent(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	exec := func() (string, error) { return "https://oc.buyallmemes.com/pair/abc", nil }
-	for i := 0; i < 5; i++ {
-		if _, err := mint.Mint(st, exec, "admin", "web"); err != nil {
+	exec := func(context.Context) (string, error) { return "https://oc.buyallmemes.com/pair/abc", nil }
+	for i := range 5 {
+		if _, err := mint.Mint(t.Context(), st, exec, "admin", "web"); err != nil {
 			t.Fatalf("mint %d: %v", i, err)
 		}
 	}
 	calls := 0
-	pre := func() (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
-	if _, err := mint.Preflight(st, pre, "admin"); !errors.Is(err, mint.ErrRateLimited) {
+	pre := func(context.Context) (string, error) { calls++; return "https://oc.buyallmemes.com/pair/abc", nil }
+	if _, err := mint.Preflight(t.Context(), st, pre, "admin"); !errors.Is(err, mint.ErrRateLimited) {
 		t.Fatalf("want ErrRateLimited, got %v", err)
 	}
 	if calls != 0 {
@@ -71,22 +72,23 @@ func TestPreflightRefusesWhenTheSessionBudgetIsSpent(t *testing.T) {
 
 // A pre-flight and the tap that follows it are one session, not two.
 func TestPreflightAndTapAreOneSession(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	exec := func() (string, error) { return "https://oc.buyallmemes.com/pair/abc", nil }
-	if _, err := mint.Preflight(st, exec, "admin"); err != nil {
+	exec := func(context.Context) (string, error) { return "https://oc.buyallmemes.com/pair/abc", nil }
+	if _, err := mint.Preflight(t.Context(), st, exec, "admin"); err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
-	if _, err := mint.Mint(st, exec, "admin", "web"); err != nil {
+	if _, err := mint.Mint(t.Context(), st, exec, "admin", "web"); err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	if got := st.CountRecentMints("", time.Hour); got != 1 {
+	if got := st.CountRecentMints(t.Context(), "", time.Hour); got != 1 {
 		t.Fatalf("want 1 session counted, got %d", got)
 	}
 }
 
 func TestParseLinkStripsQR(t *testing.T) {
-	raw := "\n  Open a link to connect. Links work once and expire in 5 minutes.\n\n  https://oc.buyallmemes.com/auth/connect/4k5uObGFoxt0380Xydaq9Q\n\n  ███████\n  ██ QR JUNK ██\n"
+	raw := "\n  Open a link to connect. Links work once and expire in 5 minutes.\n\n" +
+		"  https://oc.buyallmemes.com/auth/connect/4k5uObGFoxt0380Xydaq9Q\n\n  ███████\n  ██ QR JUNK ██\n"
 	got := mint.ParseLink(raw)
 	want := "https://oc.buyallmemes.com/auth/connect/4k5uObGFoxt0380Xydaq9Q"
 	if got != want {

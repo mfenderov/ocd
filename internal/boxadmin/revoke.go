@@ -1,6 +1,7 @@
 package boxadmin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -13,7 +14,7 @@ import (
 // {"confirm": true} (400 otherwise) so the destructive call is never
 // accidental. The exec argv is fixed inside admin.Revoke; nothing from the
 // request reaches the command line.
-func RevokeHandler(st *store.Store, exec func(name string, args ...string) (string, error)) http.Handler {
+func RevokeHandler(st *store.Store, exec admin.Exec) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Confirm bool `json:"confirm"`
@@ -22,11 +23,14 @@ func RevokeHandler(st *store.Store, exec func(name string, args ...string) (stri
 			http.Error(w, "confirm required", http.StatusBadRequest)
 			return
 		}
-		if err := admin.Revoke(st, exec); err != nil {
+		// Revoke runs to the end: a half-revoked box is worse than a
+		// slow one, so the request's own cancellation does not reach it.
+		ctx := context.WithoutCancel(r.Context())
+		if err := admin.Revoke(ctx, st, exec); err != nil {
 			http.Error(w, "revoke failed", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]int{"epoch": st.BumpEpoch()})
+		_ = json.NewEncoder(w).Encode(map[string]int{"epoch": st.BumpEpoch(ctx)})
 	})
 }

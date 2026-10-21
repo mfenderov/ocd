@@ -1,6 +1,7 @@
 package pair_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,12 +16,12 @@ import (
 
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	st.AddDevice("mac", "darwin")
+	st.AddDevice(t.Context(), "mac", "darwin")
 	return st
 }
 
@@ -37,9 +38,9 @@ func TestNoJWTGives401AndNoMint(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "")
 	noBrain(t)
 	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
-	h := pair.Handler(st, func() (string, error) { return "LINK", nil })
-	req := httptest.NewRequest("GET", "/pair?t="+tok, nil)
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
+	h := pair.Handler(st, func(context.Context) (string, error) { return "LINK", nil })
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -51,13 +52,13 @@ func TestTapMintsAndRedirectsOnce(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	noBrain(t)
 	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
 	calls := 0
-	h := pair.Handler(st, func() (string, error) {
+	h := pair.Handler(st, func(context.Context) (string, error) {
 		calls++
 		return "https://oc.buyallmemes.com/auth/connect/abc", nil
 	})
-	req := httptest.NewRequest("GET", "/pair?t="+tok, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
@@ -67,7 +68,7 @@ func TestTapMintsAndRedirectsOnce(t *testing.T) {
 		t.Fatalf("want 1 mint, got %d", calls)
 	}
 	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/pair?t="+tok, nil))
+	h.ServeHTTP(rec2, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil))
 	if rec2.Code != http.StatusGone {
 		t.Fatalf("second tap want 410, got %d", rec2.Code)
 	}
@@ -82,14 +83,16 @@ func TestTapCountsOneSession(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	noBrain(t)
 	st := openStore(t)
-	tok, _ := st.IssueLink("admin", "admin")
-	h := pair.Handler(st, func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil })
+	tok, _ := st.IssueLink(t.Context(), "admin", "admin")
+	h := pair.Handler(st, func(context.Context) (string, error) {
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/pair?t="+tok, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("want 302, got %d", rec.Code)
 	}
-	if got := st.CountRecentMints("", time.Hour); got != 1 {
+	if got := st.CountRecentMints(t.Context(), "", time.Hour); got != 1 {
 		t.Fatalf("want 1 session counted, got %d", got)
 	}
 }
@@ -99,12 +102,12 @@ func TestRawUAStored(t *testing.T) {
 	noBrain(t)
 	ua := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X)"
 	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
-	h := pair.Handler(st, func() (string, error) { return "https://x/y", nil })
-	r := httptest.NewRequest("GET", "/pair?t="+tok, nil)
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
+	h := pair.Handler(st, func(context.Context) (string, error) { return "https://x/y", nil })
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil)
 	r.Header.Set("User-Agent", ua)
 	h.ServeHTTP(httptest.NewRecorder(), r)
-	rows := st.RecentAudit(3)
+	rows := st.RecentAudit(t.Context(), 3)
 	found := false
 	for _, row := range rows {
 		if row.Action == "consumed" && row.UA == ua {
@@ -120,9 +123,9 @@ func TestMissingTokenIs400(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	noBrain(t)
 	st := openStore(t)
-	h := pair.Handler(st, func() (string, error) { return "LINK", nil })
+	h := pair.Handler(st, func(context.Context) (string, error) { return "LINK", nil })
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/pair", nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", rec.Code)
 	}
@@ -161,30 +164,22 @@ func fakeBrain(t *testing.T, status int) <-chan brainRequest {
 	return got
 }
 
-// A tap tells the brain which link was used: the brain edits the message
-// it owns.
-func TestTapPushesTheLinkUsedEvent(t *testing.T) {
-	t.Setenv("OCD_PAIR_OPEN", "1")
-	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
-	brain := fakeBrain(t, http.StatusInternalServerError)
-
-	h := pair.Handler(st, func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil })
-	r := httptest.NewRequest("GET", "/pair?t="+tok, nil)
-	r.Header.Set("X-Forwarded-For", "10.0.0.7")
-	r.Header.Set("User-Agent", "Mozilla/5.0 (iPhone)")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, r)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("want 302, got %d", rec.Code)
-	}
-
-	var got brainRequest
+// waitForBrain waits for the event push the brain received.
+func waitForBrain(t *testing.T, brain <-chan brainRequest) brainRequest {
+	t.Helper()
 	select {
-	case got = <-brain:
+	case got := <-brain:
+		return got
 	case <-time.After(5 * time.Second):
 		t.Fatal("the brain never received the link-used event")
+		return brainRequest{}
 	}
+}
+
+// assertLinkUsedPush checks the push itself: where it went, who it came
+// from and what it carries.
+func assertLinkUsedPush(t *testing.T, got brainRequest) {
+	t.Helper()
 	if got.method != http.MethodPost {
 		t.Fatalf("want POST, got %q", got.method)
 	}
@@ -200,6 +195,12 @@ func TestTapPushesTheLinkUsedEvent(t *testing.T) {
 	if len(got.body.Events) != 1 {
 		t.Fatalf("want 1 event, got %d", len(got.body.Events))
 	}
+}
+
+// assertLinkUsedEvent checks what the event names: the link, the address
+// and the agent of the tapper.
+func assertLinkUsedEvent(t *testing.T, got brainRequest, tok string) {
+	t.Helper()
 	event := got.body.Events[0]
 	if event.Type != "link-used" {
 		t.Fatalf("want type link-used, got %q", event.Type)
@@ -215,18 +216,45 @@ func TestTapPushesTheLinkUsedEvent(t *testing.T) {
 	}
 }
 
+// A tap tells the brain which link was used: the brain edits the message
+// it owns.
+func TestTapPushesTheLinkUsedEvent(t *testing.T) {
+	t.Setenv("OCD_PAIR_OPEN", "1")
+	st := openStore(t)
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
+	brain := fakeBrain(t, http.StatusInternalServerError)
+
+	h := pair.Handler(st, func(context.Context) (string, error) {
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	})
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil)
+	r.Header.Set("X-Forwarded-For", "10.0.0.7")
+	r.Header.Set("User-Agent", "Mozilla/5.0 (iPhone)")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+
+	got := waitForBrain(t, brain)
+	assertLinkUsedPush(t, got)
+	assertLinkUsedEvent(t, got, tok)
+}
+
 // The brain is a separate service: its outage must not break a tap. The
 // failure is recorded in the box's audit log, never returned to the
 // tapper.
 func TestBrainOutageDoesNotBreakTheTap(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
 	brain := fakeBrain(t, http.StatusInternalServerError)
 
-	h := pair.Handler(st, func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil })
+	h := pair.Handler(st, func(context.Context) (string, error) {
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/pair?t="+tok, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("a dead brain must not break the tap: want 302, got %d", rec.Code)
 	}
@@ -236,7 +264,7 @@ func TestBrainOutageDoesNotBreakTheTap(t *testing.T) {
 		t.Fatal("the brain never received the link-used event")
 	}
 	if !waitForAudit(t, st, "push_failed") {
-		t.Fatalf("want a push_failed audit row, got %+v", st.RecentAudit(10))
+		t.Fatalf("want a push_failed audit row, got %+v", st.RecentAudit(t.Context(), 10))
 	}
 }
 
@@ -245,7 +273,7 @@ func TestBrainOutageDoesNotBreakTheTap(t *testing.T) {
 func TestTapDoesNotWaitForTheBrain(t *testing.T) {
 	t.Setenv("OCD_PAIR_OPEN", "1")
 	st := openStore(t)
-	tok, _ := st.IssueLink("mac", "telegram")
+	tok, _ := st.IssueLink(t.Context(), "mac", "telegram")
 
 	arrived := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -262,11 +290,13 @@ func TestTapDoesNotWaitForTheBrain(t *testing.T) {
 	t.Setenv("OCD_BOX_ID", "mac")
 	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
 
-	h := pair.Handler(st, func() (string, error) { return "https://oc.buyallmemes.com/auth/connect/abc", nil })
+	h := pair.Handler(st, func(context.Context) (string, error) {
+		return "https://oc.buyallmemes.com/auth/connect/abc", nil
+	})
 	done := make(chan int, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", "/pair?t="+tok, nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair?t="+tok, nil))
 		done <- rec.Code
 	}()
 
@@ -292,7 +322,7 @@ func waitForAudit(t *testing.T, st *store.Store, action string) bool {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		for _, row := range st.RecentAudit(10) {
+		for _, row := range st.RecentAudit(t.Context(), 10) {
 			if row.Action == action {
 				return true
 			}

@@ -36,7 +36,7 @@ func restartSystemdUnitOnDisk(ctx context.Context, unit string) error {
 	cmd := exec.CommandContext(ctx, bin, "--user", "restart", unit)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("systemctl --user restart %s: %v %s", unit, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("systemctl --user restart %s: %w %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -44,7 +44,7 @@ func restartSystemdUnitOnDisk(ctx context.Context, unit string) error {
 // restartLoginService restarts the macOS login service that runs the
 // daemon. It is a variable for the same reason as restartSystemdUnit.
 var restartLoginService = func(ctx context.Context) error {
-	_, err := InstallLoginService()
+	_, err := InstallLoginService(ctx)
 	return err
 }
 

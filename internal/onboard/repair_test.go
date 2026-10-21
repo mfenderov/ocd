@@ -22,20 +22,36 @@ func plantBoxConfig(t *testing.T, home, content string) {
 	}
 }
 
-func TestRepairEnvFixesDerivedValues(t *testing.T) {
-	dir := t.TempDir()
-	// Isolate from this machine's own tunnel config: the repair reads
-	// hostnames from it when it exists.
-	t.Setenv("HOME", dir)
-	envPath := filepath.Join(dir, "env")
-	// Stale wiring: tap url without /pair, pair url pointing at the tap host.
-	old := "OCD_BOX_ID=\"mac\"\n" +
-		"OCD_PUBLIC_URL=\"https://oc-tap-mac.buyallmemes.com\"\n" +
-		"OCD_PAIR_URL=\"https://oc-tap-mac.buyallmemes.com\"\n" +
-		"OCD_HEARTBEAT_TOKEN=\"keepme\"\n"
-	if err := os.WriteFile(envPath, []byte(old), 0o600); err != nil {
+// staleEnv is the env file of a box whose wiring is stale: the tap url
+// without /pair, the pair url pointing at the tap host.
+const staleEnv = "OCD_BOX_ID=\"mac\"\n" +
+	"OCD_PUBLIC_URL=\"https://oc-tap-mac.buyallmemes.com\"\n" +
+	"OCD_PAIR_URL=\"https://oc-tap-mac.buyallmemes.com\"\n" +
+	"OCD_HEARTBEAT_TOKEN=\"keepme\"\n"
+
+// plantEnv writes the env file of a box, with the given content.
+func plantEnv(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// staleEnvPath is the env file of a box with stale wiring, isolated from
+// this machine's own tunnel config: the repair reads hostnames from it
+// when it exists.
+func staleEnvPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	envPath := filepath.Join(dir, "env")
+	plantEnv(t, envPath, staleEnv)
+	return envPath
+}
+
+func TestRepairEnvFixesDerivedValues(t *testing.T) {
+	envPath := staleEnvPath(t)
+
 	changed, err := onboard.RepairEnv(envPath, "mac")
 	if err != nil {
 		t.Fatalf("repair: %v", err)
@@ -59,8 +75,16 @@ func TestRepairEnvFixesDerivedValues(t *testing.T) {
 	if vals["OCD_HEARTBEAT_TOKEN"] != "keepme" {
 		t.Fatalf("unrelated values must survive, got %q", vals["OCD_HEARTBEAT_TOKEN"])
 	}
-	// Running again finds nothing to change.
-	changed, err = onboard.RepairEnv(envPath, "mac")
+}
+
+// Running the repair again finds nothing to change.
+func TestRepairEnvIsIdempotent(t *testing.T) {
+	envPath := staleEnvPath(t)
+	if _, err := onboard.RepairEnv(envPath, "mac"); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+
+	changed, err := onboard.RepairEnv(envPath, "mac")
 	if err != nil {
 		t.Fatalf("second repair: %v", err)
 	}
@@ -226,13 +250,16 @@ func TestRepairTunnelLeavesTheMergedConfigAlone(t *testing.T) {
 
 // A rule the repair cannot pair is never written: the pairing shifts
 // and the tap rule would be written with the editor's port.
+// repairCase is one config the repair must refuse.
+type repairCase struct {
+	name string
+	rule string
+	want string
+}
+
 func TestRepairTunnelRefusesAConfigItCannotPair(t *testing.T) {
 	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
-	cases := []struct {
-		name string
-		rule string
-		want string
-	}{
+	cases := []repairCase{
 		{
 			name: "a service the repair cannot read",
 			rule: "  - hostname: oc-tap-home.buyallmemes.com\n    service: unix:/run/ocd.sock\n",
@@ -251,37 +278,44 @@ func TestRepairTunnelRefusesAConfigItCannotPair(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			// No opencode on PATH: nothing is asked of the machine.
-			t.Setenv("PATH", t.TempDir())
-			cfgPath := filepath.Join(dir, "config.yml")
-			old := "tunnel: " + id + "\n" +
-				"credentials-file: " + dir + "/" + id + ".json\n" +
-				"ingress:\n" +
-				tc.rule +
-				"  - hostname: oc-home.buyallmemes.com\n    service: http://127.0.0.1:49374\n" +
-				"  - service: http_status:404\n"
-			if err := os.WriteFile(cfgPath, []byte(old), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			fixed, err := onboard.RepairTunnel(cfgPath, "home")
-			if err == nil {
-				t.Fatal("a config whose rules cannot be paired must be refused")
-			}
-			if fixed {
-				t.Fatal("a refused config must not be written")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("the error must name what it found (%q), got: %v", tc.want, err)
-			}
-			raw, err := os.ReadFile(cfgPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(raw) != old {
-				t.Fatalf("the config must be left alone, got:\n%s", raw)
-			}
+			assertConfigRefused(t, id, tc)
 		})
+	}
+}
+
+// assertConfigRefused checks that the repair refuses a config it cannot
+// pair, and that the config is left alone.
+func assertConfigRefused(t *testing.T, id string, tc repairCase) {
+	t.Helper()
+	dir := t.TempDir()
+	// No opencode on PATH: nothing is asked of the machine.
+	t.Setenv("PATH", t.TempDir())
+	cfgPath := filepath.Join(dir, "config.yml")
+	old := "tunnel: " + id + "\n" +
+		"credentials-file: " + dir + "/" + id + ".json\n" +
+		"ingress:\n" +
+		tc.rule +
+		"  - hostname: oc-home.buyallmemes.com\n    service: http://127.0.0.1:49374\n" +
+		"  - service: http_status:404\n"
+	if err := os.WriteFile(cfgPath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := onboard.RepairTunnel(cfgPath, "home")
+	if err == nil {
+		t.Fatal("a config whose rules cannot be paired must be refused")
+	}
+	if fixed {
+		t.Fatal("a refused config must not be written")
+	}
+	if !strings.Contains(err.Error(), tc.want) {
+		t.Fatalf("the error must name what it found (%q), got: %v", tc.want, err)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != old {
+		t.Fatalf("the config must be left alone, got:\n%s", raw)
 	}
 }
 

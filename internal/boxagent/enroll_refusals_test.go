@@ -32,7 +32,8 @@ func TestEnrollRefusesAnEmptyHostname(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "", "tok", "", boxagent.EnrollOptions{})
+	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "", "tok", "", boxagent.EnrollOptions{})
 	if err == nil {
 		t.Fatal("want an error for an empty hostname")
 	}
@@ -52,7 +53,8 @@ func TestEnrollRefusesAnEmptyToken(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "h.example.com", "", "", boxagent.EnrollOptions{})
+	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "h.example.com", "", "", boxagent.EnrollOptions{})
 	if err == nil {
 		t.Fatal("want an error for an empty token")
 	}
@@ -69,7 +71,8 @@ func TestEnrollRefusesAnEmptyToken(t *testing.T) {
 func TestEnrollReportsARefusal(t *testing.T) {
 	srv := enrollServer(t, http.StatusForbidden, `{"error":"not_allowed"}`)
 
-	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
+	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
 	if err == nil {
 		t.Fatal("want an error when the worker refuses")
 	}
@@ -83,7 +86,8 @@ func TestEnrollReportsARefusal(t *testing.T) {
 func TestEnrollReportsAMissingStatus(t *testing.T) {
 	srv := enrollServer(t, http.StatusOK, `{"id":"box-9"}`)
 
-	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
+	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
 	if err == nil {
 		t.Fatal("want an error when the worker omits the status")
 	}
@@ -97,7 +101,8 @@ func TestEnrollReportsAMissingStatus(t *testing.T) {
 func TestEnrollReportsAnUnreadableAnswer(t *testing.T) {
 	srv := enrollServer(t, http.StatusOK, `not json`)
 
-	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
+	_, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{})
 	if err == nil {
 		t.Fatal("want an error when the answer cannot be read")
 	}
@@ -117,7 +122,8 @@ func TestEnrollSendsTheBearerWhenItHasOne(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL, "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{Bearer: "owner-token"})
+	out, err := boxagent.EnrollBox(context.Background(), srv.Client(), srv.URL,
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{Bearer: "owner-token"})
 	if err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
@@ -148,7 +154,8 @@ func TestEnrollKeepsTheDeadlineOfTheCaller(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err != nil {
+	if _, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL,
+		"box-9", "h.example.com", "tok", "", boxagent.EnrollOptions{}); err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
 }

@@ -3,6 +3,7 @@
 package geo
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -26,7 +27,9 @@ func Requests() int {
 	return requests
 }
 
-func Lookup(ip string) string {
+// Lookup resolves the city of a public IP. The caller's context bounds
+// the lookup: a caller that goes away does not wait for the answer.
+func Lookup(ctx context.Context, ip string) string {
 	parsed := net.ParseIP(ip)
 	if parsed == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() {
 		return ""
@@ -38,7 +41,7 @@ func Lookup(ip string) string {
 	}
 	mu.Unlock()
 
-	city := fetch(ip)
+	city := fetch(ctx, ip)
 
 	mu.Lock()
 	cache[ip] = city
@@ -46,11 +49,15 @@ func Lookup(ip string) string {
 	return city
 }
 
-func fetch(ip string) string {
+func fetch(ctx context.Context, ip string) string {
 	mu.Lock()
 	requests++
 	mu.Unlock()
-	resp, err := client.Get(Endpoint + ip + "?fields=status,city,countryCode")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, Endpoint+ip+"?fields=status,city,countryCode", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return ""
 	}

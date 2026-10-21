@@ -19,6 +19,7 @@ func fakeBinary(t *testing.T, name, body string) string {
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
 	script := "#!/bin/sh\necho \"$@\" >> " + calls + "\n" + body
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func TestRealExecMintsALinkAgainstThePairURL(t *testing.T) {
 	t.Setenv("OCD_PAIR_URL", "https://oc.example.com")
 	calls := fakeBinary(t, "opencode", "echo 'https://oc.example.com/?t=tok-1'\n")
 
-	out, err := realExec()
+	out, err := realExec(t.Context())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestRealExecFallsBackToTheDefaultPairURL(t *testing.T) {
 	t.Setenv("OCD_PAIR_URL", "")
 	calls := fakeBinary(t, "opencode", "echo 'https://oc.example.com/?t=tok-1'\n")
 
-	if _, err := realExec(); err != nil {
+	if _, err := realExec(t.Context()); err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	got := recordedCalls(t, calls)
@@ -74,7 +75,7 @@ func TestRealExecFallsBackToTheDefaultPairURL(t *testing.T) {
 func TestRealExecReportsAFailedMint(t *testing.T) {
 	fakeBinary(t, "opencode", "exit 1\n")
 
-	if _, err := realExec(); err == nil {
+	if _, err := realExec(t.Context()); err == nil {
 		t.Fatal("a failed mint must be reported")
 	}
 }
@@ -111,12 +112,12 @@ func TestWaitForWaitsOutTheBackoff(t *testing.T) {
 	}
 }
 
-// A box with a tunnel config must have the connector supervised by the
-// daemon: nobody else runs it.
-func TestEnsureTunnelManagedTurnsTheSupervisionOn(t *testing.T) {
+// boxWithTunnel plants a box that has a cloudflared config and an env
+// file, and returns the path of that env file.
+func boxWithTunnel(t *testing.T) string {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("OCD_MANAGE_TUNNEL", "")
 	credDir := filepath.Join(home, ".cloudflared")
 	if err := os.MkdirAll(credDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -131,6 +132,14 @@ func TestEnsureTunnelManagedTurnsTheSupervisionOn(t *testing.T) {
 	if err := os.WriteFile(envPath, []byte("OCD_BOX_ID=\"home\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return envPath
+}
+
+// A box with a tunnel config must have the connector supervised by the
+// daemon: nobody else runs it.
+func TestEnsureTunnelManagedTurnsTheSupervisionOn(t *testing.T) {
+	t.Setenv("OCD_MANAGE_TUNNEL", "")
+	envPath := boxWithTunnel(t)
 
 	if err := ensureTunnelManaged(); err != nil {
 		t.Fatalf("supervise: %v", err)
@@ -161,23 +170,8 @@ func TestEnsureTunnelManagedLeavesABoxWithoutATunnelAlone(t *testing.T) {
 // The environment wins: the operator asked for the daemon to run the
 // connector already.
 func TestEnsureTunnelManagedKeepsAnExplicitOptIn(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
 	t.Setenv("OCD_MANAGE_TUNNEL", "1")
-	credDir := filepath.Join(home, ".cloudflared")
-	if err := os.MkdirAll(credDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(credDir, "config.yml"), []byte("tunnel: x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	envPath := filepath.Join(home, ".ocd", "env")
-	if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(envPath, []byte("OCD_BOX_ID=\"home\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	envPath := boxWithTunnel(t)
 
 	if err := ensureTunnelManaged(); err != nil {
 		t.Fatalf("supervise: %v", err)

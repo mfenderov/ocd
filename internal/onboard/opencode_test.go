@@ -14,6 +14,7 @@ import (
 func TestDiscoverOpenCodePort(t *testing.T) {
 	dir := t.TempDir()
 	script := "#!/bin/sh\necho 'http://127.0.0.1:31047'\n"
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

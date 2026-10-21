@@ -29,12 +29,12 @@ func EnrollCommand(boxID, code string) string {
 // is; otherwise it is asked — it is the only question onboarding asks. A
 // code the caller already has is used as is; otherwise the user pastes
 // the one the bot issues.
-func ResolveEnroll(w io.Writer, givenBox, givenCode string) (boxID, code string, err error) {
-	boxID, err = resolveBoxID(givenBox)
+func ResolveEnroll(w io.Writer, givenBox, givenCode string) (string, string, error) {
+	boxID, err := resolveBoxID(givenBox)
 	if err != nil {
 		return "", "", err
 	}
-	code, err = resolveEnrollCode(w, boxID, givenCode)
+	code, err := resolveEnrollCode(w, boxID, givenCode)
 	if err != nil {
 		return "", "", err
 	}
