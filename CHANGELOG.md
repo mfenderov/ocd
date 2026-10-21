@@ -2,6 +2,36 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.22.0 - 2026-10-21
+#### Features
+- (**worker**) crap — the CRAP score for TypeScript - (10d2b56) - mfenderov
+#### Bug Fixes
+- (**box**) a writer that finds the database locked waits for it - (f0e7340) - mfenderov
+- (**box**) the service's uid still sliced the last byte - (e3fa5f2) - mfenderov
+- (**box**) two bugs the CRAP work found - (4013e0e) - mfenderov
+- (**ci**) the CRAP gate pins a tag that exists - (73ccdea) - mfenderov
+- (**worker,box**) the review's small findings - (cef0720) - mfenderov
+#### Continuous Integration
+- pin the CRAP tool the gate uses - (63d941e) - mfenderov
+- the CRAP bar is a gate, and the tool measures itself - (8ca3a28) - mfenderov
+#### Refactoring
+- (**box**) one rule for the database path - (fef7411) - mfenderov
+- (**box**) the box agent and the admin under the CRAP bar - (5bc286c) - opencode
+- (**box**) the CLI under the CRAP bar - (1a0225c) - opencode
+- (**box**) the fleet and the store under the CRAP bar - (031f8c5) - opencode
+- (**box**) the onboarding package under the CRAP bar - (3f52bf4) - opencode
+- (**worker**) the domain does not depend on the Durable Object - (9824a75) - mfenderov
+- (**worker**) the functions on the edge are split - (596fed4) - mfenderov
+- (**worker**) one place says the brain has no Durable Object - (c64fadb) - mfenderov
+- (**worker**) the relays are named functions - (ff2337a) - mfenderov
+- (**worker**) the enrolment's paths are named functions - (61470fd) - mfenderov
+- (**worker**) the bodies are validated field by field - (8f3c7bb) - mfenderov
+- (**worker**) the access checks are named functions - (29bb3ad) - mfenderov
+- (**worker**) the routes are tables, not switches - (5a3c29e) - mfenderov
+- every function under the CRAP bar, and the layers inward - (091f8a6) - mfenderov
+
+- - -
+
 ## v0.21.1 - 2026-10-21
 #### Bug Fixes
 - (**ci**) the bump step keeps its own flags - (8f7e043) - mfenderov
