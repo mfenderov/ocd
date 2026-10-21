@@ -1,4 +1,5 @@
 import { ensureBoxDns } from "./dns";
+import { optionalTextField, textField } from "./fields";
 import { hashToken, tokenMatches } from "./heartbeat";
 import { createTelegramClient, escapeHtml, TelegramError } from "./telegram";
 import type { BoxRow, DenialRow } from "./state";
@@ -156,40 +157,92 @@ export function parseEnrollBody(value: unknown, suffixes: string[] = DEFAULT_HOS
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const v = value as Record<string, unknown>;
-  if (typeof v["id"] !== "string" || v["id"].length === 0) {
+  const fields = validEnrollFields(value as Record<string, unknown>, suffixes);
+  if (!fields) {
     return null;
   }
-  if (typeof v["hostname"] !== "string" || !isPinnedHostname(v["hostname"], suffixes)) {
+  return enrollBody(fields);
+}
+
+// The body's fields, each by its own rule. Null when a field breaks its
+// rule.
+function validEnrollFields(v: Record<string, unknown>, suffixes: string[]): EnrollFields | null {
+  const id = textField(v["id"]);
+  if (id === null) {
     return null;
   }
-  if (typeof v["enroll_token"] !== "string" || v["enroll_token"].length === 0) {
+  const hostname = hostnameField(v["hostname"], suffixes);
+  if (hostname === null) {
     return null;
   }
-  if (v["admin_token"] !== undefined && (typeof v["admin_token"] !== "string" || v["admin_token"].length === 0)) {
+  const enrollToken = textField(v["enroll_token"]);
+  if (enrollToken === null) {
     return null;
   }
-  if (v["tunnel_id"] !== undefined && typeof v["tunnel_id"] !== "string") {
+  const adminToken = optionalTextField(v["admin_token"]);
+  if (adminToken === null) {
     return null;
   }
-  const body: EnrollBody = { id: v["id"], hostname: v["hostname"], enroll_token: v["enroll_token"] };
-  if (typeof v["admin_token"] === "string") {
-    body.admin_token = v["admin_token"];
+  const tunnelId = tunnelIdField(v["tunnel_id"]);
+  if (tunnelId === null) {
+    return null;
+  }
+  return { id, hostname, enrollToken, adminToken, tunnelId, quiet: v["quiet"] === true };
+}
+
+// The fields the body carries, once each has passed its rule.
+interface EnrollFields {
+  id: string;
+  hostname: string;
+  enrollToken: string;
+  adminToken?: string;
+  tunnelId: string;
+  quiet: boolean;
+}
+
+// The body, from the fields that passed their rules.
+function enrollBody(fields: EnrollFields): EnrollBody {
+  const body: EnrollBody = {
+    id: fields.id,
+    hostname: fields.hostname,
+    enroll_token: fields.enrollToken,
+  };
+  if (fields.adminToken !== undefined) {
+    body.admin_token = fields.adminToken;
   }
   // The tunnel id: a cloudflared tunnel id, empty when the box has none.
   // An empty value means "no tunnel" — the same the box's own body says
   // by leaving the field out.
-  const tunnelId = typeof v["tunnel_id"] === "string" ? v["tunnel_id"].trim() : "";
-  if (tunnelId.length > TUNNEL_ID_MAX_LEN) {
-    return null;
+  if (fields.tunnelId !== "") {
+    body.tunnel_id = fields.tunnelId;
   }
-  if (tunnelId !== "") {
-    body.tunnel_id = tunnelId;
-  }
-  if (v["quiet"] === true) {
+  if (fields.quiet) {
     body.quiet = true;
   }
   return body;
+}
+
+// The hostname: a string the enrolment may pin.
+function hostnameField(value: unknown, suffixes: string[]): string | null {
+  if (typeof value !== "string" || !isPinnedHostname(value, suffixes)) {
+    return null;
+  }
+  return value;
+}
+
+// The tunnel id: a string, trimmed, and short enough to keep.
+function tunnelIdField(value: unknown): string | null {
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length > TUNNEL_ID_MAX_LEN) {
+    return null;
+  }
+  return trimmed;
 }
 
 export type ResolveAction = "approve" | "deny";

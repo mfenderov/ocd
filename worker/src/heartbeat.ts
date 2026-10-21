@@ -1,3 +1,4 @@
+import { integerField, numberField, optionalIntegerField, optionalStringField, textField } from "./fields";
 import type { TombstoneRow } from "./mint";
 import type { BoxRow } from "./state";
 
@@ -29,36 +30,66 @@ export function parseHeartbeatBody(value: unknown): HeartbeatBody | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const v = value as Record<string, unknown>;
-  if (typeof v["id"] !== "string" || v["id"].length === 0) {
+  const fields = validHeartbeatFields(value as Record<string, unknown>);
+  if (!fields) {
     return null;
   }
-  if (!Number.isInteger(v["seq"]) || (v["seq"] as number) < 1) {
+  return heartbeatBody(fields);
+}
+
+// The body's fields, each by its own rule. Null when a field breaks its
+// rule.
+function validHeartbeatFields(v: Record<string, unknown>): HeartbeatFields | null {
+  const id = textField(v["id"]);
+  if (id === null) {
     return null;
   }
-  if (typeof v["box_now"] !== "number" || !(v["box_now"] as number > 0)) {
+  const seq = integerField(v["seq"], 1);
+  if (seq === null) {
     return null;
   }
-  if (!Number.isInteger(v["epoch"]) || (v["epoch"] as number) < 0) {
+  const boxNow = numberField(v["box_now"], 0);
+  if (boxNow === null) {
     return null;
   }
-  if (v["version"] !== undefined && typeof v["version"] !== "string") {
+  const epoch = integerField(v["epoch"], 0);
+  if (epoch === null) {
     return null;
   }
-  if (v["taps_24h"] !== undefined && !Number.isInteger(v["taps_24h"])) {
+  const version = optionalStringField(v["version"]);
+  if (version === null) {
     return null;
   }
+  const taps24h = optionalIntegerField(v["taps_24h"]);
+  if (taps24h === null) {
+    return null;
+  }
+  return { id, seq, boxNow, epoch, version, taps24h };
+}
+
+// The fields the body carries, once each has passed its rule.
+interface HeartbeatFields {
+  id: string;
+  seq: number;
+  boxNow: number;
+  epoch: number;
+  version?: string;
+  taps24h?: number;
+}
+
+// The body, from the fields that passed their rules.
+function heartbeatBody(fields: HeartbeatFields): HeartbeatBody {
   const body: HeartbeatBody = {
-    id: v["id"] as string,
-    seq: v["seq"] as number,
-    box_now: v["box_now"] as number,
-    epoch: v["epoch"] as number,
+    id: fields.id,
+    seq: fields.seq,
+    box_now: fields.boxNow,
+    epoch: fields.epoch,
   };
-  if (typeof v["version"] === "string") {
-    body.version = v["version"];
+  if (fields.version !== undefined) {
+    body.version = fields.version;
   }
-  if (Number.isInteger(v["taps_24h"])) {
-    body.taps_24h = v["taps_24h"] as number;
+  if (fields.taps24h !== undefined) {
+    body.taps_24h = fields.taps24h;
   }
   return body;
 }
