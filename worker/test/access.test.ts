@@ -24,7 +24,7 @@ function scopeOf(routes: readonly Route<unknown>[], method: string, pathname: st
 // instance, because every handler answers with the instance's own state.
 async function doRoutes(): Promise<readonly Route<unknown>[]> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return inState(stub, async (instance: FleetState) => instance.routes);
+  return inState(stub, (instance: FleetState) => instance.routes);
 }
 
 const BOOTSTRAP = "test-bootstrap-access-2";
@@ -65,7 +65,7 @@ async function mint(store: MemStore, scopes: unknown, bearer: string): Promise<s
     { bootstrapSecret: BOOTSTRAP },
   );
   expect(res.status).toBe(200);
-  return ((await res.json()) as { token: string }).token;
+  return (await res.json<{ token: string }>()).token;
 }
 
 function scopedRequest(path: string, method: string, bearer?: string, assertion?: string): Request {
@@ -98,9 +98,9 @@ function payload(overrides: Record<string, unknown> = {}): Record<string, unknow
 }
 
 function jwksFetcher(jwks: Record<string, unknown>, calls: string[] = []): typeof fetch {
-  return (async (url: string) => {
+  return ((url: string) => {
     calls.push(url.toString());
-    return Response.json(jwks);
+    return Promise.resolve(Response.json(jwks));
   }) as typeof fetch;
 }
 
@@ -250,11 +250,9 @@ describe("verifyAccessJwt", () => {
   it("JWKS transport failure denies without throwing and never logs the assertion", async () => {
     const { privateKey } = await makeKey("k1");
     const jwt = await signJwt(privateKey, { alg: "RS256", kid: "k1", typ: "JWT" }, payload());
-    const failing = (async () => {
-      throw new Error("conn refused");
-    }) as typeof fetch;
+    const failing: typeof fetch = () => Promise.reject(new Error("conn refused"));
     await expect(verifyAccessJwt(jwt, accessConfig(), deps(failing))).resolves.toBeNull();
-    const badJson = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+    const badJson: typeof fetch = () => Promise.resolve(new Response("nope", { status: 500 }));
     await expect(verifyAccessJwt(jwt, accessConfig(), deps(badJson))).resolves.toBeNull();
   });
 
@@ -263,9 +261,9 @@ describe("verifyAccessJwt", () => {
     const rotated = await makeKey("k2");
     let keys: unknown[] = [jwk];
     const calls: string[] = [];
-    const fetching = (async (url: string) => {
+    const fetching = ((url: string) => {
       calls.push(url.toString());
-      return Response.json({ keys });
+      return Promise.resolve(Response.json({ keys }));
     }) as typeof fetch;
     const jwt1 = await signJwt(privateKey, { alg: "RS256", kid: "k1", typ: "JWT" }, payload());
     expect(await verifyAccessJwt(jwt1, accessConfig(), deps(fetching))).toBe(EMAIL);

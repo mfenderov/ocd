@@ -28,7 +28,7 @@ beforeAll(async () => {
       { bootstrapSecret: BOOTSTRAP },
     );
     expect(res.status).toBe(200);
-    return ((await res.json()) as { token: string }).token;
+    return (await res.json<{ token: string }>()).token;
   });
 });
 
@@ -67,9 +67,9 @@ interface FetchCall {
 }
 
 function stubFetcher(status: number, body: string, calls: FetchCall[]): typeof fetch {
-  return (async (url: string, init?: RequestInit) => {
+  return ((url: string, init?: RequestInit) => {
     calls.push({ url: url.toString(), init: init ?? {} });
-    return new Response(body, { status });
+    return Promise.resolve(new Response(body, { status }));
   }) as typeof fetch;
 }
 
@@ -188,9 +188,7 @@ describe("mint relay idempotency (unit)", () => {
       deadlineMs: 20,
     });
     expect(timedOut.status).toBe(504);
-    const down = (async () => {
-      throw new Error("conn refused");
-    }) as typeof fetch;
+    const down: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const unreachable = await handleMintLink("mint-timeout", "k2", store, {
       sealKey: SEAL_KEY,
       fetcher: down,

@@ -111,7 +111,7 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
     }
     let envelope: TelegramEnvelope | null = null;
     try {
-      envelope = (await res.json()) as TelegramEnvelope | null;
+      envelope = await res.json<TelegramEnvelope | null>();
     } catch {
       // No body to read: the status is all we know.
     }

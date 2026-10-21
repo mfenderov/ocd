@@ -103,7 +103,7 @@ function nameOf(node: ts.Node, source: ts.SourceFile): string {
   if (ts.isFunctionDeclaration(node) && node.name) {
     return node.name.text;
   }
-  if (ts.isMethodDeclaration(node) && node.name) {
+  if (ts.isMethodDeclaration(node)) {
     return methodName(node, source);
   }
   return boundName(node, source);

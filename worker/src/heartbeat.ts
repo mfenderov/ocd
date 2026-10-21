@@ -367,5 +367,5 @@ function taintOf(store: HeartbeatStore, body: HeartbeatBody): boolean {
   if (tombstone && body.epoch > tombstone.epoch) {
     store.deleteTombstone?.(body.id);
   }
-  return tombstone !== undefined && tombstone !== null && body.epoch <= tombstone.epoch;
+  return tombstone !== undefined && body.epoch <= tombstone.epoch;
 }

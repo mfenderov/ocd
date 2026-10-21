@@ -30,6 +30,7 @@ import {
 } from "../src/enroll";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
+import { requestedUrl } from "./helpers";
 
 const NEW_TOKEN = "enroll-brand-new-token-1";
 const KNOWN_TOKEN = "enroll-known-token-1";
@@ -54,7 +55,7 @@ class MemStore implements EnrollStore {
     return this.pending.get(id);
   }
   putPending(row: PendingRow): void {
-    this.pending.set(row.id, { ...row, trusted: row.trusted ?? 0 });
+    this.pending.set(row.id, { ...row, trusted: row.trusted });
   }
   deletePending(id: string): void {
     this.pending.delete(id);
@@ -69,8 +70,9 @@ class MemStore implements EnrollStore {
 
 function recorder(): { texts: string[]; notify: NotifyFn } {
   const texts: string[] = [];
-  const notify: NotifyFn = async (text: string) => {
+  const notify: NotifyFn = (text: string) => {
     texts.push(text);
+    return Promise.resolve();
   };
   return { texts, notify };
 }
@@ -414,8 +416,9 @@ describe("heartbeat token mismatch is rejected + alerted", () => {
       heartbeatRequest("mm-1", 12, 6000, "wrong-token"),
       store,
       () => 1700000300,
-      async (id: string) => {
+      (id: string) => {
         alerts.push(mismatchAlertText(id));
+        return Promise.resolve();
       },
     );
     expect(res.status).toBe(401);
@@ -433,8 +436,9 @@ describe("heartbeat token mismatch is rejected + alerted", () => {
       heartbeatRequest("mm-2", 12, 6000, null),
       store,
       () => 1700000300,
-      async (id: string) => {
+      (id: string) => {
         alerts.push(id);
+        return Promise.resolve();
       },
     );
     expect(missing.status).toBe(401);
@@ -443,8 +447,9 @@ describe("heartbeat token mismatch is rejected + alerted", () => {
       heartbeatRequest("ghost", 1, 100, KNOWN_TOKEN),
       store,
       () => 1700000300,
-      async (id: string) => {
+      (id: string) => {
         alerts.push(id);
+        return Promise.resolve();
       },
     );
     expect(ghost.status).toBe(401);
@@ -455,9 +460,11 @@ describe("heartbeat token mismatch is rejected + alerted", () => {
 describe("telegram ping (Bot API, through the client)", () => {
   it("posts chat_id + text to sendMessage and reports ok", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
-    const fetcher = (async (url: string, init?: RequestInit) => {
+    const fetcher = ((url: string, init?: RequestInit) => {
       calls.push({ url, init: init ?? {} });
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 }),
+      );
     }) as typeof fetch;
     // The env carries the chat id as a string; the client sends a number.
     const ok = await sendTelegramMessage("bot-secret-1", "42", "hello", fetcher);
@@ -475,11 +482,9 @@ describe("telegram ping (Bot API, through the client)", () => {
 
   it("never throws and never logs secrets on transport or API failure", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const apiFail = (async () => new Response("nope", { status: 429 })) as typeof fetch;
+    const apiFail: typeof fetch = () => Promise.resolve(new Response("nope", { status: 429 }));
     await expect(sendTelegramMessage("bot-secret-9", "9", "t", apiFail)).resolves.toBe(false);
-    const netFail = (async () => {
-      throw new Error("down");
-    }) as typeof fetch;
+    const netFail: typeof fetch = () => Promise.reject(new Error("down"));
     await expect(sendTelegramMessage("bot-secret-9", "9", "t", netFail)).resolves.toBe(false);
     const logged = error.mock.calls.map((args) => args.map(String).join(" ")).join("\n");
     expect(logged).not.toContain("bot-secret-9");
@@ -489,9 +494,11 @@ describe("telegram ping (Bot API, through the client)", () => {
   it("a chat id that is not a number fails without asking telegram", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const calls: Array<{ url: string; init: RequestInit }> = [];
-    const fetcher = (async (url: string, init?: RequestInit) => {
+    const fetcher = ((url: string, init?: RequestInit) => {
       calls.push({ url, init: init ?? {} });
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 }),
+      );
     }) as typeof fetch;
 
     await expect(sendTelegramMessage("bot-secret-1", "not-a-chat-id", "hello", fetcher)).resolves.toBe(false);
@@ -502,7 +509,7 @@ describe("telegram ping (Bot API, through the client)", () => {
 describe("enroll routes through the worker + DO", () => {
   function readPending(id: string): Promise<PendingRow | undefined> {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    return runInDurableObject<FleetState, PendingRow | undefined>(stub, async (instance) => instance.getPending(id));
+    return runInDurableObject<FleetState, PendingRow | undefined>(stub, (instance) => instance.getPending(id));
   }
 
   // Test env carries no capability/seal secrets (by design — they are Worker
@@ -1382,29 +1389,34 @@ describe("the enrolment writes the box's DNS", () => {
     failWith: { status: number; code: number } | null = null;
 
     get fetcher(): typeof fetch {
-      return (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input));
+      return (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(requestedUrl(input));
         const method = (init?.method ?? "GET").toUpperCase();
-        const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
+        // The body is JSON text: the brain sends text, never a blob.
+        const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : null;
         this.calls.push({ method, url: url.toString(), body });
         if (this.failWith) {
-          return this.reply(this.failWith.status, {
-            success: false,
-            errors: [{ code: this.failWith.code }],
-            result: null,
-          });
+          return Promise.resolve(
+            this.reply(this.failWith.status, {
+              success: false,
+              errors: [{ code: this.failWith.code }],
+              result: null,
+            }),
+          );
         }
         if (method === "GET") {
-          return this.reply(200, {
-            success: true,
-            result: this.records,
-            result_info: { total_pages: 1 },
-          });
+          return Promise.resolve(
+            this.reply(200, {
+              success: true,
+              result: this.records,
+              result_info: { total_pages: 1 },
+            }),
+          );
         }
         const record = { id: `rec-${this.records.length + 1}`, ...body };
         this.records.push(record);
-        return this.reply(200, { success: true, result: record });
-      }) as typeof fetch;
+        return Promise.resolve(this.reply(200, { success: true, result: record }));
+      };
     }
 
     private reply(status: number, doc: unknown): Response {
@@ -1527,7 +1539,7 @@ describe("the enrolment writes the box's DNS", () => {
       config,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toMatch(/^failed:/);
     expect(body.dns).toContain("dns-6");
     expect(cf.calls).toHaveLength(0);
@@ -1542,7 +1554,7 @@ describe("the enrolment writes the box's DNS", () => {
     // today): it enrols, and the brain has nothing to point at.
     const res = await enroll(store, config, "dns-2", "oc-tap-dns-2.buyallmemes.com");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body).toMatchObject({ status: "enrolled", enrolled: true });
     expect(body.dns).toBe("skipped: no tunnel id recorded for dns-2 — re-enrol to bind one");
     // The API was never called: there was nothing to point at.
@@ -1557,7 +1569,7 @@ describe("the enrolment writes the box's DNS", () => {
 
     const res = await enroll(store, config, "dns-3", "oc-tap-dns-3.buyallmemes.com", "tun-3");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body).toMatchObject({ status: "enrolled", enrolled: true });
     expect(body.dns).toMatch(/^failed:/);
     expect(body.dns).toContain("403");
@@ -1657,7 +1669,7 @@ describe("the enrolment writes the box's DNS", () => {
       config,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toBe("skipped: no tunnel id recorded for dns-8 — re-enrol to bind one");
     expect(cf.calls).toHaveLength(0);
   });
@@ -1665,15 +1677,15 @@ describe("the enrolment writes the box's DNS", () => {
   it("a Cloudflare call that hangs is a reported failure, not a hung enrolment", async () => {
     const store = new MemStore();
     // The API never answers: the deadline must end the call.
-    const hanging: typeof fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    const hanging: typeof fetch = (_input: RequestInfo | URL, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-      })) as typeof fetch;
+      });
     const config = configWith(hanging, 50);
 
     const res = await enroll(store, config, "dns-9", "oc-tap-dns-9.buyallmemes.com", "tun-9");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body).toMatchObject({ status: "enrolled", enrolled: true });
     expect(body.dns).toMatch(/^failed:/);
     expect(body.dns).toContain("did not answer");
@@ -1696,21 +1708,25 @@ describe("the DNS failure reaches the owner", () => {
   // A Cloudflare that answers every call with an empty zone: the brain
   // writes the records and says "ok".
   function workingFetcher(): typeof fetch {
-    return (async () =>
-      new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      })) as typeof fetch;
+    return () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
   }
 
   // A Cloudflare that refuses every write: the brain could not write the
   // records and says so.
   function refusingFetcher(): typeof fetch {
-    return (async () =>
-      new Response(JSON.stringify({ success: false, errors: [{ code: 9109 }], result: null }), {
-        status: 403,
-        headers: { "content-type": "application/json" },
-      })) as typeof fetch;
+    return () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: false, errors: [{ code: 9109 }], result: null }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      );
   }
 
   const configWith = (fetcher: typeof fetch): EnrollConfig => ({
@@ -1739,7 +1755,7 @@ describe("the DNS failure reaches the owner", () => {
       configWith(refusingFetcher()),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toMatch(/^failed:/);
 
     // Exactly one message, and it is about the DNS.
@@ -1770,7 +1786,7 @@ describe("the DNS failure reaches the owner", () => {
       configWith(workingFetcher()),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toBe("ok");
     expect(rec.texts).toHaveLength(0);
   });
@@ -1799,7 +1815,7 @@ describe("the DNS failure reaches the owner", () => {
       configWith(refusingFetcher()),
     );
     expect(res.status).toBe(200);
-    expect((await res.json()) as EnrolResponse).toMatchObject({ status: "enrolled" });
+    expect(await res.json<EnrolResponse>()).toMatchObject({ status: "enrolled" });
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).toContain("own-3");
     expect(rec.texts[0]).toMatch(/DNS/);
@@ -1818,7 +1834,7 @@ describe("the DNS failure reaches the owner", () => {
     const link = await linkFor("approve", "own-4", NOW + 900);
     const res = await handleEnrollApprove(getRequest(link), store, configWith(refusingFetcher()), () => NOW, rec.notify);
     expect(res.status).toBe(200);
-    expect((await res.json()) as EnrolResponse).toMatchObject({ status: "approved" });
+    expect(await res.json<EnrolResponse>()).toMatchObject({ status: "approved" });
     expect(rec.texts).toHaveLength(1);
     expect(rec.texts[0]).toContain("own-4");
     expect(rec.texts[0]).toMatch(/DNS/);
@@ -1843,7 +1859,7 @@ describe("the DNS failure reaches the owner", () => {
       configWith(refusingFetcher()),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toMatch(/^skipped:/);
     expect(rec.texts).toHaveLength(0);
   });
@@ -1860,9 +1876,7 @@ describe("the DNS failure reaches the owner", () => {
         enroll_token: KNOWN_TOKEN,
       }),
       store,
-      async () => {
-        throw new Error("the notifier is broken");
-      },
+      () => Promise.reject(new Error("the notifier is broken")),
       () => NOW,
       configWith(refusingFetcher()),
     );
@@ -1871,7 +1885,7 @@ describe("the DNS failure reaches the owner", () => {
     // into a 500 — the box would report a failure for an enrolment that
     // succeeded, and would not write its env file.
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnrolResponse;
+    const body = await res.json<EnrolResponse>();
     expect(body.dns).toMatch(/^failed:/);
     expect(store.getBox("own-6")?.enrolled).toBe(1);
   });

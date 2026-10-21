@@ -10,15 +10,20 @@
     "crap": "node --experimental-strip-types tools/crap/cli.ts",
     "crap:self": "vitest run --config tools/vitest.config.ts --coverage && node --experimental-strip-types tools/crap/cli.ts -c tools/coverage/coverage-final.json --root tools --src . -max 10",
     "typecheck": "tsc --noEmit && tsc -p tools/tsconfig.json --noEmit",
+    "lint": "eslint .",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.5",
     "@cloudflare/workers-types": "^5.20261018.1",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
     "@vitest/coverage-v8": "^4.1.12",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
     "typescript": "^5.6.3",
+    "typescript-eslint": "^8.72.0",
     "vitest": "^4.1.11",
     "wrangler": "^4.151.1"
   }

@@ -35,7 +35,7 @@ beforeAll(async () => {
       { bootstrapSecret: BOOTSTRAP },
     );
     expect(res.status).toBe(200);
-    return ((await res.json()) as { token: string }).token;
+    return (await res.json<{ token: string }>()).token;
   });
 });
 

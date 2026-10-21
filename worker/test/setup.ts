@@ -1,4 +1,5 @@
 import { afterEach, beforeEach } from "vitest";
+import { requestedUrl } from "./helpers";
 
 // The suite never talks to the network. A test that needs an outbound
 // fetch installs its own stub (and says so); anything else that reaches
@@ -12,9 +13,8 @@ import { afterEach, beforeEach } from "vitest";
 const original = globalThis.fetch;
 
 beforeEach(() => {
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    throw new Error(`the test suite made an outbound fetch: ${String(input)}`);
-  }) as typeof fetch;
+  globalThis.fetch = (input: RequestInfo | URL) =>
+    Promise.reject(new Error(`the test suite made an outbound fetch: ${requestedUrl(input)}`));
 });
 
 afterEach(() => {

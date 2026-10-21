@@ -4,7 +4,7 @@ import type { BoxRow } from "../src/boxes";
 import { sealAdminToken } from "../src/enroll";
 import type { TelegramClient } from "../src/telegram";
 import { handleMintToken } from "../src/tokens";
-import { inState } from "./helpers";
+import { inState, requestedUrl } from "./helpers";
 
 // The seal secret the test env configures (vitest.config.ts): the brain
 // reads the box's admin token with it.
@@ -57,7 +57,7 @@ describe("fleet DO (real SQLite backend)", () => {
         { bootstrapSecret: "test-bootstrap-backends-2" },
       );
       expect(res.status).toBe(200);
-      return ((await res.json()) as { token: string }).token;
+      return (await res.json<{ token: string }>()).token;
     });
     const authed = { authorization: `Bearer ${routeToken}` };
     backendsToken = routeToken;
@@ -67,13 +67,13 @@ describe("fleet DO (real SQLite backend)", () => {
 
     // Seed the real "fleet" DO behind the route. If the route served the
     // no-env fallback instead of the DO, this row would never appear.
-    await inState(stub, async (instance) => {
+    await inState(stub, (instance) => {
       instance.putBox(BOX);
     });
 
     const seeded = await SELF.fetch("https://fleet.local/api/backends", { headers: authed });
     expect(seeded.status).toBe(200);
-    const rows = (await seeded.json()) as Array<Record<string, unknown>>;
+    const rows = await seeded.json<Array<Record<string, unknown>>>();
     expect(rows).toEqual([PUBLIC_BOX]);
     // Secret material must never leave the DO over this route.
     for (const row of rows) {
@@ -90,12 +90,12 @@ describe("fleet DO (real SQLite backend)", () => {
     const stub = env.FLEET_STATE.get(
       env.FLEET_STATE.idFromName("fleet-write-read"),
     );
-    const rows = await inState(stub, async (instance) => {
+    const rows = await inState(stub, (instance) => {
       instance.putBox(BOX);
       return instance.listBackends();
     });
     expect(rows).toEqual([PUBLIC_BOX]);
-    const full = await inState(stub, async (instance) => instance.listBoxes());
+    const full = await inState(stub, (instance) => instance.listBoxes());
     expect(full).toEqual([{ ...BOX }]);
   });
 
@@ -103,7 +103,7 @@ describe("fleet DO (real SQLite backend)", () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tunnel"));
     // The columns live in the DO's own SQLite: a row that names a tunnel
     // must come back with it.
-    const rows = await inState(stub, async (instance) => {
+    const rows = await inState(stub, (instance) => {
       instance.putBox({ ...BOX, id: "tun-box", tunnel_id: "tunnel-abc" });
       instance.putPending({
         id: "tun-pending",
@@ -125,7 +125,7 @@ describe("fleet DO (real SQLite backend)", () => {
   it("GET /api/backends marks a server-side tombstoned box tombstoned:true", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
     // Tombstone at the box's own epoch: isTainted holds, no heartbeat heal.
-    await inState(stub, async (instance) => {
+    await inState(stub, (instance) => {
       instance.putBox({ ...BOX, id: "box-tomb-1", hostname: "host-tomb-1" });
       instance.putTombstone({ box_id: "box-tomb-1", epoch: 1 });
     });
@@ -133,7 +133,7 @@ describe("fleet DO (real SQLite backend)", () => {
       headers: { authorization: `Bearer ${backendsToken}` },
     });
     expect(res.status).toBe(200);
-    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    const rows = await res.json<Array<Record<string, unknown>>>();
     const tomb = rows.find((r) => r["id"] === "box-tomb-1");
     expect(tomb).toMatchObject({ id: "box-tomb-1", tombstoned: true });
     // Untombstoned boxes stay false so the console can tell them apart.
@@ -145,13 +145,13 @@ describe("fleet DO (real SQLite backend)", () => {
 // test records what the brain would have sent to the owner.
 function recordingTelegram(replies: string[]): TelegramClient {
   return {
-    sendMessage: async (_chatId, text) => {
+    sendMessage: (_chatId, text) => {
       replies.push(text);
-      return { message_id: replies.length };
+      return Promise.resolve({ message_id: replies.length });
     },
-    editMessageText: async () => true,
-    answerCallbackQuery: async () => {},
-    setWebhook: async () => {},
+    editMessageText: () => Promise.resolve(true),
+    answerCallbackQuery: () => Promise.resolve(),
+    setWebhook: () => Promise.resolve(),
   };
 }
 
@@ -165,13 +165,15 @@ describe("the /status relay", () => {
     await inState(stub, async (instance) => {
       const globals = globalThis as unknown as Record<string, unknown>;
       globals["__prevFetch"] = globalThis.fetch;
-      globalThis.fetch = (async (input: RequestInfo | URL) => {
-        asked.push(String(input));
-        return new Response("running\n", {
-          status: 200,
-          headers: { "content-type": "text/plain" },
-        });
-      }) as typeof fetch;
+      globalThis.fetch = (input: RequestInfo | URL) => {
+        asked.push(requestedUrl(input));
+        return Promise.resolve(
+          new Response("running\n", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          }),
+        );
+      };
       instance.putBox({
         ...BOX,
         id: "home",
@@ -187,7 +189,7 @@ describe("the /status relay", () => {
       expect(asked).toEqual(["https://status-box.example/_oc/status"]);
       expect(replies[0]).toContain("running");
     } finally {
-      await inState(stub, async () => {
+      await inState(stub, () => {
         const globals = globalThis as unknown as Record<string, unknown>;
         globalThis.fetch = globals["__prevFetch"] as typeof fetch;
         delete globals["__prevFetch"];
@@ -201,9 +203,7 @@ describe("the /status relay", () => {
     await inState(stub, async (instance) => {
       const globals = globalThis as unknown as Record<string, unknown>;
       globals["__prevFetch"] = globalThis.fetch;
-      globalThis.fetch = (async () => {
-        throw new Error("the box is gone");
-      }) as typeof fetch;
+      globalThis.fetch = () => Promise.reject(new Error("the box is gone"));
       instance.putBox({
         ...BOX,
         id: "home",
@@ -219,7 +219,7 @@ describe("the /status relay", () => {
       // empty: an empty line would read as a healthy box.
       expect(replies[0]).toContain("the box did not answer");
     } finally {
-      await inState(stub, async () => {
+      await inState(stub, () => {
         const globals = globalThis as unknown as Record<string, unknown>;
         globalThis.fetch = globals["__prevFetch"] as typeof fetch;
         delete globals["__prevFetch"];

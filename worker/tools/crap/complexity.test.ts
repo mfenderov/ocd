@@ -6,7 +6,7 @@ import ts from "typescript";
 function complexityOfSource(body: string): number {
   const source = ts.createSourceFile("t.ts", `function f() { ${body} }`, ts.ScriptTarget.ES2022, true);
   const fn = source.statements[0];
-  return complexityOf(fn as ts.FunctionDeclaration);
+  return complexityOf(fn);
 }
 
 describe("complexity", () => {

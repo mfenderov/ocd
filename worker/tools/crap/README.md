@@ -91,6 +91,10 @@ Its first draft failed that bar on four of its own functions — the flag
 parsing, the name resolution, the decision-point table and the command
 line. Splitting them is what the tool asks of everything else.
 
+The tools are linted with the brain's own ESLint config, type-aware rules
+and all: `npm run lint` covers `worker/src`, `worker/test` and
+`worker/tools`.
+
 ## The shape
 
 ```

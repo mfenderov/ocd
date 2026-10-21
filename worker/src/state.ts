@@ -309,7 +309,7 @@ export class FleetState implements DurableObject {
       mintLink: (boxId) => this.mintLink(boxId),
       // The history: the brain's own table. The boxes pushed these rows,
       // so a box that is offline — or gone for good — keeps its history.
-      audit: async (boxId, limit) => this.auditLogRows(boxId, limit),
+      audit: (boxId, limit) => Promise.resolve(this.auditLogRows(boxId, limit)),
       revoke: (boxId) => this.revokeBox(boxId),
       revokeAll: () => this.revokeEveryBox(),
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
@@ -988,7 +988,7 @@ export class FleetState implements DurableObject {
   private buildRoutes(): DoRoute[] {
     return [
       // The reads: the boxes the brain knows, and the fleet's history.
-      { method: "GET", path: exact("/backends"), scope: "audit", handler: async (s) => Response.json(s.listBackends()) },
+      { method: "GET", path: exact("/backends"), scope: "audit", handler: (s) => Promise.resolve(Response.json(s.listBackends())) },
       { method: "GET", path: exact("/audit"), scope: "audit", handler: (s, c) => handleAudit(c.request, s, { sealKey: s.sealKey }) },
       // The brain's front door: Telegram's webhook, forwarded by the edge.
       { method: "POST", path: exact("/tg"), handler: (s, c) => s.telegramRoute(c.request) },

@@ -33,18 +33,22 @@ class RecordingTelegram implements TelegramClient {
   readonly edits: Array<{ chatId: number; messageId: number; text: string }> = [];
   editLands = true;
 
-  async sendMessage(): Promise<{ message_id: number }> {
-    return { message_id: 1 };
+  sendMessage(): Promise<{ message_id: number }> {
+    return Promise.resolve({ message_id: 1 });
   }
 
-  async editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
+  editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
     this.edits.push({ chatId, messageId, text });
-    return this.editLands;
+    return Promise.resolve(this.editLands);
   }
 
-  async answerCallbackQuery(): Promise<void> {}
+  answerCallbackQuery(): Promise<void> {
+    return Promise.resolve();
+  }
 
-  async setWebhook(): Promise<void> {}
+  setWebhook(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 // The box's door: POST /api/events, the bearer and the box's own id.
@@ -399,7 +403,7 @@ describe("the DO's door", () => {
   // dead door.
   it("takes the events even when the edit cannot land", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-events-door"));
-    await inState(stub, async (instance) => {
+    await inState(stub, (instance) => {
       instance.putBox(BOX);
       instance.putLink(link());
     });

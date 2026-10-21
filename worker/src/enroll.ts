@@ -488,8 +488,10 @@ export function telegramNotifier(
   fetcher: typeof fetch = fetch,
 ): NotifyFn {
   if (!botToken || !chatId) {
-    return async () => {
+    // The notifier still answers with a promise: the caller awaits it.
+    return () => {
       console.error("enroll: telegram not configured; ping dropped");
+      return Promise.resolve();
     };
   }
   return async (text: string) => {
@@ -704,8 +706,11 @@ async function claimable(pending: PendingRow, body: EnrollBody, nowSec: () => nu
 // sealed admin token that differs from the bound one.
 function rotatedByClaim(store: EnrollStore, boxId: string): boolean {
   const known = store.getBox(boxId);
+  if (!known) {
+    return false;
+  }
   const sealed = store.getPending(boxId)?.admin_token_sealed ?? "";
-  return !!known && sealed !== "" && sealed !== (known.admin_token_sealed ?? "");
+  return sealed !== "" && sealed !== known.admin_token_sealed;
 }
 
 // The pending path: a fresh pending row and the ping that asks the owner
@@ -933,7 +938,7 @@ function withDeadline(fetcher: typeof fetch, deadlineMs: number): typeof fetch {
       return await fetcher(input, { ...init, signal });
     } catch (err) {
       if (signal.aborted) {
-        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`);
+        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`, { cause: err });
       }
       throw err;
     }
@@ -1019,11 +1024,10 @@ function approvedRow(pending: PendingRow, known: BoxRow | undefined): BoxRow {
 // fast path — ping the owner (id + time, never tokens) instead of
 // swapping silently.
 function rotatedAdmin(pending: PendingRow, known: BoxRow | undefined): boolean {
-  return (
-    !!known &&
-    pending.admin_token_sealed !== "" &&
-    pending.admin_token_sealed !== known.admin_token_sealed
-  );
+  if (!known) {
+    return false;
+  }
+  return pending.admin_token_sealed !== "" && pending.admin_token_sealed !== known.admin_token_sealed;
 }
 
 export function denyEnrollment(

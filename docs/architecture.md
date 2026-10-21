@@ -384,6 +384,40 @@ npm run crap:self
 
 Both run in CI, and both fail the build when a function crosses the bar.
 
+### The brain is linted too
+
+The compiler checks the types. The linter checks the shapes the types
+cannot see. The brain is linted with `@eslint/js`'s recommended rules,
+typescript-eslint's recommended rules, and the **type-aware** ones on top
+of them — the type-aware rules are the point: a promise nobody awaits, a
+promise handed over where a plain value is expected, a condition the
+types prove can never be false, and an `await` of something that is not a
+promise are all invisible to `tsc`.
+
+On top of the recommended sets there is a short list of the mistakes this
+codebase has actually made: `eqeqeq`, `no-var`, `prefer-const`,
+`object-shorthand`, `no-implicit-coercion`, `consistent-type-imports`,
+`no-explicit-any` and `no-non-null-assertion`.
+
+`no-console` is off on purpose: in a Worker the console **is** the log,
+and the brain logs to it on purpose.
+
+The type-aware rules need the project, so the config turns on
+`projectService`: every file is checked against the nearest tsconfig —
+`worker/tsconfig.json` for the brain and its tests,
+`worker/tools/tsconfig.json` for the tools, which run in node.
+
+The test files are exempt from the two assertion rules
+(`no-non-null-assertion`, `no-explicit-any`): a test may assert hard.
+
+```bash
+cd worker
+npm run lint     # the brain, the tests and the tools
+```
+
+It runs in CI — in the `worker` job and in the `tools` job — and it fails
+the build on any finding.
+
 **The layers point inward.** The brain's domain modules never import the
 Durable Object: the types they share live in `worker/src/boxes.ts`, and
 `worker/test/architecture.test.ts` fails the build if one of them reaches

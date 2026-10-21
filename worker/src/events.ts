@@ -353,7 +353,7 @@ async function editLink(
     // the edit when the brain has a token again.
     return;
   }
-  let landed = false;
+  let landed: boolean;
   try {
     landed = await telegram.editMessageText(link.chat_id, link.message_id, text);
   } catch (err) {
