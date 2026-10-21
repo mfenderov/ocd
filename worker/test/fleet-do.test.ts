@@ -1,8 +1,14 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { sealAdminToken } from "../src/enroll";
 import type { BoxRow } from "../src/state";
+import type { TelegramClient } from "../src/telegram";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";
+
+// The seal secret the test env configures (vitest.config.ts): the brain
+// reads the box's admin token with it.
+const SEAL_KEY = "test-admin-seal-secret";
 
 const BOX: BoxRow = {
   id: "box-1",
@@ -132,5 +138,92 @@ describe("fleet DO (real SQLite backend)", () => {
     expect(tomb).toMatchObject({ id: "box-tomb-1", tombstoned: true });
     // Untombstoned boxes stay false so the console can tell them apart.
     expect(rows.find((r) => r["id"] === "box-1")).toMatchObject({ tombstoned: false });
+  });
+});
+
+// The Telegram client is the seam the command layer answers through: the
+// test records what the brain would have sent to the owner.
+function recordingTelegram(replies: string[]): TelegramClient {
+  return {
+    sendMessage: async (_chatId, text) => {
+      replies.push(text);
+      return { message_id: replies.length };
+    },
+    editMessageText: async () => true,
+    answerCallbackQuery: async () => {},
+    setWebhook: async () => {},
+  };
+}
+
+// The /status relay: the brain asks the box and prints the box's own
+// line. Nothing else drives it, so nothing else proves it works.
+describe("the /status relay", () => {
+  it("prints the line the box answered with", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-status"));
+    const asked: string[] = [];
+    const replies: string[] = [];
+    await inState(stub, async (instance) => {
+      const globals = globalThis as unknown as Record<string, unknown>;
+      globals["__prevFetch"] = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        asked.push(String(input));
+        return new Response("running\n", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }) as typeof fetch;
+      instance.putBox({
+        ...BOX,
+        id: "home",
+        hostname: "status-box.example",
+        admin_token_sealed: await sealAdminToken(SEAL_KEY, "admin-plain"),
+      });
+    });
+    try {
+      await inState(stub, async (instance) => {
+        await instance.dispatchCommand({ name: "/status", args: [], chatId: 7 }, recordingTelegram(replies));
+      });
+      // The box was asked over its pinned hostname, on the status route.
+      expect(asked).toEqual(["https://status-box.example/_oc/status"]);
+      expect(replies[0]).toContain("running");
+    } finally {
+      await inState(stub, async () => {
+        const globals = globalThis as unknown as Record<string, unknown>;
+        globalThis.fetch = globals["__prevFetch"] as typeof fetch;
+        delete globals["__prevFetch"];
+      });
+    }
+  });
+
+  it("says the box did not answer when the box is gone", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-status-gone"));
+    const replies: string[] = [];
+    await inState(stub, async (instance) => {
+      const globals = globalThis as unknown as Record<string, unknown>;
+      globals["__prevFetch"] = globalThis.fetch;
+      globalThis.fetch = (async () => {
+        throw new Error("the box is gone");
+      }) as typeof fetch;
+      instance.putBox({
+        ...BOX,
+        id: "home",
+        hostname: "status-box.example",
+        admin_token_sealed: await sealAdminToken(SEAL_KEY, "admin-plain"),
+      });
+    });
+    try {
+      await inState(stub, async (instance) => {
+        await instance.dispatchCommand({ name: "/status", args: [], chatId: 7 }, recordingTelegram(replies));
+      });
+      // The owner is told the box did not answer, not that the status is
+      // empty: an empty line would read as a healthy box.
+      expect(replies[0]).toContain("the box did not answer");
+    } finally {
+      await inState(stub, async () => {
+        const globals = globalThis as unknown as Record<string, unknown>;
+        globalThis.fetch = globals["__prevFetch"] as typeof fetch;
+        delete globals["__prevFetch"];
+      });
+    }
   });
 });

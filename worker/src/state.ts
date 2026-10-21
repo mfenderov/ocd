@@ -183,6 +183,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS audit_log_key ON audit_log(box_id, at, action,
 const COLUMNS =
   "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, tunnel_id, epoch, last_seq, last_ts, last_seen, enrolled";
 
+// A column the brain added after the first release: the column's name
+// and the statement that adds it. A DB without the column gets it here,
+// so a fresh DB and an old one converge.
+interface ColumnMigration {
+  column: string;
+  sql: string;
+}
+
+const BOX_MIGRATIONS: readonly ColumnMigration[] = [
+  { column: "last_ts", sql: "ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0" },
+  { column: "admin_token_sealed", sql: "ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''" },
+  { column: "suspected_offline", sql: "ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0" },
+  { column: "tunnel_id", sql: "ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''" },
+];
+
+const PENDING_MIGRATIONS: readonly ColumnMigration[] = [
+  { column: "admin_token_sealed", sql: "ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''" },
+  { column: "trusted", sql: "ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0" },
+  { column: "tunnel_id", sql: "ALTER TABLE pending ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''" },
+];
+
 const PUBLIC_COLUMNS = "id, hostname, epoch, last_seq, last_ts, last_seen, enrolled";
 
 const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, tunnel_id, first_seen, trusted";
@@ -493,40 +514,36 @@ export class FleetState implements DurableObject {
 
   private ensureSchema(): void {
     this.state.storage.sql.exec(SCHEMA);
-    const boxCols = this.state.storage.sql.exec("PRAGMA table_info(boxes)").toArray() as Array<{
+    this.addMissingColumns("boxes", BOX_MIGRATIONS);
+    this.addMissingColumns("pending", PENDING_MIGRATIONS);
+    this.ensureTokenTable();
+  }
+
+  // The columns a table is missing, added one statement each. A fresh DB
+  // has them all (the SCHEMA above), an old one has some: the two
+  // converge here.
+  private addMissingColumns(table: string, migrations: readonly ColumnMigration[]): void {
+    const existing = this.columnNames(table);
+    for (const migration of migrations) {
+      if (!existing.includes(migration.column)) {
+        this.state.storage.sql.exec(migration.sql);
+      }
+    }
+  }
+
+  // The columns a table has.
+  private columnNames(table: string): string[] {
+    const rows = this.state.storage.sql.exec(`PRAGMA table_info(${table})`).toArray() as Array<{
       name: string;
     }>;
-    if (!boxCols.some((c) => c.name === "last_ts")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!boxCols.some((c) => c.name === "admin_token_sealed")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
-    }
-    if (!boxCols.some((c) => c.name === "suspected_offline")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!boxCols.some((c) => c.name === "tunnel_id")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
-    }
-    const pendingCols = this.state.storage.sql.exec("PRAGMA table_info(pending)").toArray() as Array<{
-      name: string;
-    }>;
-    if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
-    }
-    if (!pendingCols.some((c) => c.name === "trusted")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!pendingCols.some((c) => c.name === "tunnel_id")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
-    }
-    // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
-    // a missing table reads as zero columns, so fresh and existing DBs
-    // converge here instead of in the one-shot SCHEMA string.
-    const tokenCols = this.state.storage.sql.exec("PRAGMA table_info(cli_tokens)").toArray() as Array<{
-      name: string;
-    }>;
-    if (tokenCols.length === 0) {
+    return rows.map((row) => row.name);
+  }
+
+  // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
+  // a missing table reads as zero columns, so fresh and existing DBs
+  // converge here instead of in the one-shot SCHEMA string.
+  private ensureTokenTable(): void {
+    if (this.columnNames("cli_tokens").length === 0) {
       this.state.storage.sql.exec(
         "CREATE TABLE cli_tokens(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)",
       );

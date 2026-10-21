@@ -66,19 +66,8 @@ export async function relayToBox(
   if (!box || box.enrolled !== 1) {
     return { answered: false, reason: "unknown_box" };
   }
-  if (!deps.sealKey) {
-    console.error("relay: seal key not configured");
-    return { answered: false, reason: "misconfigured" };
-  }
-  let adminToken: string | null;
-  try {
-    adminToken = await unsealAdminToken(deps.sealKey, box.admin_token_sealed);
-  } catch {
-    console.error("relay: admin token unseal failed");
-    return { answered: false, reason: "misconfigured" };
-  }
-  if (!adminToken) {
-    console.error("relay: no admin token bound for box");
+  const adminToken = await adminTokenFor(deps.sealKey, box);
+  if (adminToken === null) {
     return { answered: false, reason: "misconfigured" };
   }
   const signal = AbortSignal.timeout(deps.deadlineMs ?? BOX_READ_DEADLINE_MS);
@@ -100,6 +89,31 @@ export async function relayToBox(
     body: await boxRes.text(),
     contentType: boxRes.headers.get("content-type") ?? "text/plain;charset=utf-8",
   };
+}
+
+// The admin token the relay carries, or null when the brain cannot read
+// it: no seal key, a binding it cannot read, or a box with no admin
+// token bound.
+//
+// The admin token is decrypted at call time only (the same rule the mint
+// and audit relays follow) and is never logged.
+async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<string | null> {
+  if (!sealKey) {
+    console.error("relay: seal key not configured");
+    return null;
+  }
+  let adminToken: string | null;
+  try {
+    adminToken = await unsealAdminToken(sealKey, box.admin_token_sealed);
+  } catch {
+    console.error("relay: admin token unseal failed");
+    return null;
+  }
+  if (!adminToken) {
+    console.error("relay: no admin token bound for box");
+    return null;
+  }
+  return adminToken;
 }
 
 // The status a failed relay answers with.

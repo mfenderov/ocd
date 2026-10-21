@@ -59,16 +59,32 @@ export async function handleMintLink(
   if (isTainted(box.epoch, store.getTombstone(boxId))) {
     return Response.json({ error: "tainted" }, { status: 409 });
   }
-  if (!deps.sealKey) {
+  const adminToken = await adminTokenFor(deps.sealKey, box);
+  if (adminToken instanceof Response) {
+    return adminToken;
+  }
+  const signal = AbortSignal.timeout(deps.deadlineMs ?? MINT_DEADLINE_MS);
+  const boxRes = await callBox(box, boxId, adminToken, consoleKey, deps, signal);
+  if (!boxRes) {
+    return unreachable(signal);
+  }
+  return boxAnswer(boxRes);
+}
+
+// The admin token the relay carries, or the answer that says it cannot:
+// a brain without the seal key, a binding it cannot read, or a box with
+// no admin token bound.
+//
+// Decrypt only at call time, right before the relay. Wrong key or tampered
+// blob is a hard failure, never a fallback.
+async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<string | Response> {
+  if (!sealKey) {
     console.error("mint: seal key not configured");
     return Response.json({ error: "misconfigured" }, { status: 500 });
   }
-  // Decrypt only at call time, right before the relay. Wrong key or tampered
-  // blob is a hard failure, never a fallback; a box with no bound admin
-  // token cannot be minted.
   let adminToken: string | null;
   try {
-    adminToken = await unsealAdminToken(deps.sealKey, box.admin_token_sealed);
+    adminToken = await unsealAdminToken(sealKey, box.admin_token_sealed);
   } catch {
     console.error("mint: admin token unseal failed");
     return Response.json({ error: "misconfigured" }, { status: 500 });
@@ -77,11 +93,23 @@ export async function handleMintLink(
     console.error("mint: no admin token bound for box");
     return Response.json({ error: "misconfigured" }, { status: 500 });
   }
+  return adminToken;
+}
+
+// The call to the box: the mint itself, with the console's idempotency
+// key (one per console request, so a retry never mints twice). Null when
+// the box was not reached.
+async function callBox(
+  box: BoxRow,
+  boxId: string,
+  adminToken: string,
+  consoleKey: string | null,
+  deps: MintDeps,
+  signal: AbortSignal,
+): Promise<Response | null> {
   const key = consoleKey && consoleKey.length > 0 ? consoleKey : (deps.generateKey ?? defaultGenerateKey)();
-  const signal = AbortSignal.timeout(deps.deadlineMs ?? MINT_DEADLINE_MS);
-  let boxRes: Response;
   try {
-    boxRes = await fetchBox(
+    return await fetchBox(
       pinnedRegistry([box]),
       boxId,
       BOX_API.mint,
@@ -93,11 +121,20 @@ export async function handleMintLink(
       deps.fetcher,
     );
   } catch {
-    if (signal.aborted) {
-      return Response.json({ error: "box_timeout" }, { status: 504 });
-    }
-    return Response.json({ error: "box_unreachable" }, { status: 502 });
+    return null;
   }
+}
+
+// The answer for a box that was not reached: it timed out, or it is gone.
+function unreachable(signal: AbortSignal): Response {
+  if (signal.aborted) {
+    return Response.json({ error: "box_timeout" }, { status: 504 });
+  }
+  return Response.json({ error: "box_unreachable" }, { status: 502 });
+}
+
+// The box's own answer: its body, with its status.
+async function boxAnswer(boxRes: Response): Promise<Response> {
   if (boxRes.status === 200) {
     return new Response(await boxRes.text(), {
       status: 200,
