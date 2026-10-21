@@ -173,11 +173,16 @@ func TestDeleteLinkTokensOnlyTheBrains(t *testing.T) {
 	}
 }
 
-// The watermark is a rowid of the trail, and the trail never gives its
-// rowids back: the prune keeps the newest row (it was written a moment
-// ago), so the trail is never empty and the rowids never repeat. The
-// watermark therefore always points at a rowid the trail still knows, and
-// a stale watermark — one past the trail's last row — cannot happen.
+// The prune keeps the newest row — it was written a moment ago — so the
+// trail does not normally empty and its rowids do not repeat. The
+// watermark is a rowid of the trail, so it keeps pointing at a rowid the
+// trail knows.
+//
+// The trail can be emptied one day (a prune that runs before any write, a
+// command that clears the audit, a VACUUM): its rowids start over, and
+// the watermark then points past every row that follows. The sweep
+// repairs it then (RepairAuditWatermark) instead of obeying it, so the
+// push continues.
 func TestPruneKeepsTheNewestRow(t *testing.T) {
 	st, err := Open(":memory:")
 	if err != nil {
