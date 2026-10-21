@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.21.1 - 2026-10-21
+#### Bug Fixes
+- (**ci**) the bump step keeps its own flags - (8f7e043) - mfenderov
+- (**ci**) the bump job stops racing itself for the tag - (556e78b) - mfenderov
+#### Documentation
+- the old names are gone - (a71ae1b) - mfenderov
+
+- - -
+
 ## v0.21.0 - 2026-10-21
 #### Features
 - (**box**) the tunnel config serves the old names and the new ones - (6ed8c87) - mfenderov
