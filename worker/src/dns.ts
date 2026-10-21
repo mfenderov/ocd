@@ -22,9 +22,21 @@
 //   - { ok: false, reason } — the brain refuses to write (the box has no
 //     tunnel to point at). Nothing broke; there is simply nothing to do.
 //   - a thrown Error — the API refused us (403 without the DNS scope, a
-//     zone that is not ours, a network failure). The message names the
-//     status and the API's error code, never the credential.
+//     zone that is not ours, a listing we could not read) or the brain
+//     was handed a box it cannot write for (no tap host). The message
+//     names the status, the API's error code and what that code means
+//     here, never the credential.
 const CF_API = "https://api.cloudflare.com/client/v4";
+
+// What Cloudflare's error codes mean, in the words the operator needs. A
+// code alone is a lookup, and the API's own free text is not echoed: it
+// can talk about the credential, which must never reach a log.
+const API_ERROR_MEANINGS: Record<number, string | undefined> = {
+  7003: "the zone id does not resolve to a zone",
+  81057: "a record with that name already exists",
+  9109: "this credential may not write the zone's DNS",
+  10000: "the credential was refused",
+};
 
 // The two hostnames the brain owns for one box, and where they point.
 export interface BoxDns {
@@ -48,9 +60,20 @@ interface DnsRecord {
   proxied?: boolean;
 }
 
+// The CNAME the brain writes. Always the same shape: proxied, with an
+// automatic TTL.
+interface DnsWrite {
+  type: "CNAME";
+  name: string;
+  content: string;
+  ttl: 1;
+  proxied: true;
+}
+
 // The API's envelope. The result shape differs per call, so it stays
 // untyped here and each caller reads what it expects.
 interface CfEnvelope {
+  success?: boolean;
   result?: unknown;
   result_info?: { total_pages?: number };
   errors?: Array<{ code?: number }>;
@@ -62,13 +85,31 @@ export async function ensureBoxDns(
   deps: { fetcher?: typeof fetch; zoneId: string; token: string },
   box: BoxDns,
 ): Promise<DnsOutcome> {
+  // The tap host is the brain's address for the box's tap. Without it
+  // there is nothing to write, and that is a brain bug, not a box to fix:
+  // it fails loudly instead of leaving the box without DNS. The box's own
+  // onboarding says the same about its tap host (internal/onboard/tunnel.go).
+  const tapHost = box.tapHost.trim();
+  const uiHost = box.uiHost.trim();
+  const target = box.target.trim();
+  if (!tapHost) {
+    throw new Error("dns: the box has no tap host (a brain bug, not a box to fix)");
+  }
   // No tunnel id means no target: a record that points nowhere is worse
   // than no record at all, so the brain refuses instead of writing one.
-  if (!box.target) {
+  if (!target) {
     return {
       ok: false,
       reason: "no tunnel target recorded for the box — nothing to point at",
     };
+  }
+  // The UI host is optional: the box's own onboarding skips it when the
+  // box has no UI (internal/onboard/tunnel.go). The same name twice is
+  // one record, not two: the listing is read once, so writing it twice
+  // would make the api answer "record already exists" for the second one.
+  const hosts: string[] = [tapHost];
+  if (uiHost && uiHost !== tapHost) {
+    hosts.push(uiHost);
   }
   const fetcher = deps.fetcher ?? fetch;
   const headers = {
@@ -78,34 +119,34 @@ export async function ensureBoxDns(
   const records = await listRecords(fetcher, headers, deps.zoneId);
   const created: string[] = [];
   const updated: string[] = [];
-  for (const host of [box.tapHost, box.uiHost]) {
-    const record = {
+  for (const host of hosts) {
+    const record: DnsWrite = {
       type: "CNAME",
       name: host,
-      content: box.target,
+      content: target,
       ttl: 1, // automatic
       proxied: true,
     };
     const existing = records.find((r) => r.name === host && r.type === "CNAME");
     if (!existing) {
-      await cfRequest(
+      await writeRecord(
         fetcher,
+        headers,
         `${CF_API}/zones/${deps.zoneId}/dns_records`,
         "POST",
-        headers,
         record,
       );
       created.push(host);
       continue;
     }
-    if (pointsWhereWeWant(existing, box.target)) {
+    if (pointsWhereWeWant(existing, target)) {
       continue;
     }
-    await cfRequest(
+    await writeRecord(
       fetcher,
+      headers,
       `${CF_API}/zones/${deps.zoneId}/dns_records/${existing.id}`,
       "PATCH",
-      headers,
       record,
     );
     updated.push(host);
@@ -113,11 +154,30 @@ export async function ensureBoxDns(
   return { ok: true, created, updated };
 }
 
-// A record that already points at the target is left alone. One that says
-// it is not proxied is fixed: the brain's records are proxied, so a
+// A record that already points at the target is left alone — unless it
+// says it is not proxied: the brain's records are proxied, so a
 // grey-cloud CNAME would answer from the origin, not from the edge.
 function pointsWhereWeWant(record: DnsRecord, target: string): boolean {
-  return record.content === target && record.proxied !== false;
+  if (record.proxied === false) {
+    return false;
+  }
+  return record.content === target;
+}
+
+// One CNAME write. The envelope must say the write happened: a 200 that
+// refuses, and a body we cannot read, both mean the record may not be
+// there, and the brain must not count it as written.
+async function writeRecord(
+  fetcher: typeof fetch,
+  headers: Record<string, string>,
+  url: string,
+  method: "POST" | "PATCH",
+  record: DnsWrite,
+): Promise<void> {
+  const doc = await cfRequest(fetcher, url, method, headers, record);
+  if (doc.success !== true) {
+    throw apiError("cloudflare api refused the write", doc.errors?.[0]?.code);
+  }
 }
 
 // The zone's records, one listing. The API's default page size is 20, so a
@@ -137,9 +197,15 @@ async function listRecords(
       "GET",
       headers,
     );
-    if (Array.isArray(doc.result)) {
-      records.push(...(doc.result as DnsRecord[]));
+    // A listing we cannot read is not an empty zone. Carrying on would
+    // create records that already exist.
+    if (doc.success === false || !Array.isArray(doc.result)) {
+      throw apiError(
+        "cloudflare api could not list the zone's records",
+        doc.errors?.[0]?.code,
+      );
     }
+    records.push(...(doc.result as DnsRecord[]));
     const total = doc.result_info?.total_pages;
     if (total === undefined || total <= page) {
       return records;
@@ -147,11 +213,9 @@ async function listRecords(
   }
 }
 
-// One API call. A non-2xx becomes an error that names the status and the
-// API's error code (9109 = the credential may not touch this zone). The
-// API's free text is not echoed: the code is the stable, documented part
-// of the answer, and the free text can talk about the credential — which
-// must never reach a log.
+// One API call. A non-2xx is an error; the envelope's own success flag is
+// the caller's business, because a listing and a write mean different
+// things when they fail.
 async function cfRequest(
   fetcher: typeof fetch,
   url: string,
@@ -166,13 +230,18 @@ async function cfRequest(
   });
   const doc = await readEnvelope(res);
   if (!res.ok) {
-    const code = doc?.errors?.[0]?.code;
-    const where = code === undefined
-      ? `dns: cloudflare api ${res.status}`
-      : `dns: cloudflare api ${res.status} (code ${code})`;
-    throw new Error(where);
+    throw apiError(`cloudflare api ${res.status}`, doc?.errors?.[0]?.code);
   }
   return doc ?? {};
+}
+
+// The error an API refusal becomes: the status, the API's error code and
+// what that code means here. Never the credential.
+function apiError(head: string, code: number | undefined): Error {
+  const codePart = code === undefined ? "" : ` (code ${code})`;
+  const meaning = code === undefined ? undefined : API_ERROR_MEANINGS[code];
+  const meaningPart = meaning === undefined ? "" : `: ${meaning}`;
+  return new Error(`dns: ${head}${codePart}${meaningPart}`);
 }
 
 // The API's envelope, or null when the answer is not JSON.

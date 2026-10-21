@@ -37,6 +37,17 @@ class FakeCloudflare {
   records: CfRecord[];
   // Set to make every call answer with this status and API code.
   failWith: { status: number; code: number } | null = null;
+  // Set to make the listing answer 200 with success:false — an envelope
+  // that says the call failed while the status says it did not.
+  listSaysFailure = false;
+  // Set to make the listing answer 200 with a body that is not JSON.
+  listIsGarbage = false;
+  // Set to make a write answer 200 with success:false — the write did not
+  // happen, whatever the status says.
+  writeSaysFailure = false;
+  // Set to make a write answer 200 with a body that is not the API's
+  // envelope at all.
+  writeIsGarbage = false;
 
   constructor(records: CfRecord[] = []) {
     this.records = records;
@@ -63,6 +74,19 @@ class FakeCloudflare {
         });
       }
       if (method === "GET") {
+        if (this.listSaysFailure) {
+          return this.reply(200, {
+            success: false,
+            errors: [{ code: 1000, message: "the api refused the call" }],
+            result: null,
+          });
+        }
+        if (this.listIsGarbage) {
+          return new Response("<html>gateway error</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          });
+        }
         // The API's default page size is 20: a zone with more records
         // than that answers with the first page only.
         const page = Number(url.searchParams.get("page") ?? "1");
@@ -81,6 +105,19 @@ class FakeCloudflare {
         });
       }
       const record = { id: `rec-${this.records.length + 1}`, ...body } as CfRecord;
+      if (this.writeSaysFailure) {
+        return this.reply(200, {
+          success: false,
+          errors: [{ code: 81057, message: "the record already exists" }],
+          result: null,
+        });
+      }
+      if (this.writeIsGarbage) {
+        return new Response("<html>gateway error</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
       if (method === "POST") {
         this.records.push(record);
         return this.reply(200, { success: true, result: record });
@@ -120,6 +157,11 @@ describe("the brain's DNS writer", () => {
     const posts = cf.calls.filter((c) => c.method === "POST");
     expect(posts).toHaveLength(2);
     // The Cloudflare v4 API: /zones/<zone>/dns_records under /client/v4.
+    const gets = cf.calls.filter((c) => c.method === "GET");
+    expect(gets).toHaveLength(1);
+    expect(gets[0].url).toBe(
+      `https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records`,
+    );
     expect(posts.map((c) => c.url)).toEqual([
       `https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records`,
       `https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records`,
@@ -249,6 +291,158 @@ describe("the brain's DNS writer", () => {
     expect(cf.records.filter((r) => r.name === "oc-tap-mac.buyallmemes.com")).toHaveLength(1);
   });
 
+  it("repairs a record that points at the tunnel but is not proxied", async () => {
+    const cf = new FakeCloudflare([
+      {
+        id: "rec-1",
+        name: "oc-tap-mac.buyallmemes.com",
+        type: "CNAME",
+        content: "tun-1.cfargotunnel.com",
+        proxied: false,
+        ttl: 1,
+      },
+    ]);
+
+    const outcome = await ensureBoxDns(
+      { fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN },
+      BOX,
+    );
+
+    expect(outcome).toEqual({
+      ok: true,
+      created: ["oc-mac.buyallmemes.com"],
+      updated: ["oc-tap-mac.buyallmemes.com"],
+    });
+
+    // The brain owns these records: a grey-cloud CNAME is repaired, not
+    // trusted — it would answer from the origin, not from the edge.
+    const patches = cf.calls.filter((c) => c.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0].body).toMatchObject({
+      type: "CNAME",
+      name: "oc-tap-mac.buyallmemes.com",
+      content: "tun-1.cfargotunnel.com",
+      proxied: true,
+      ttl: 1,
+    });
+  });
+
+  it("stops when the listing says the call failed, instead of reading it as an empty zone", async () => {
+    const cf = new FakeCloudflare();
+    cf.listSaysFailure = true;
+
+    let failure: unknown;
+    try {
+      await ensureBoxDns({ fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN }, BOX);
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("list");
+    // Nothing was written: the writer did not mistake the zone for empty.
+    expect(cf.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+  });
+
+  it("stops when the listing is not JSON, instead of reading it as an empty zone", async () => {
+    const cf = new FakeCloudflare();
+    cf.listIsGarbage = true;
+
+    let failure: unknown;
+    try {
+      await ensureBoxDns({ fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN }, BOX);
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("list");
+    expect(cf.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+  });
+
+  it("stops when a write says it refused, instead of counting a record that is not there", async () => {
+    const cf = new FakeCloudflare();
+    cf.writeSaysFailure = true;
+
+    let failure: unknown;
+    try {
+      await ensureBoxDns({ fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN }, BOX);
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("refused");
+    expect((failure as Error).message).toContain("81057");
+  });
+
+  it("stops when a write answers with something that is not the API's envelope", async () => {
+    const cf = new FakeCloudflare();
+    cf.writeIsGarbage = true;
+
+    let failure: unknown;
+    try {
+      await ensureBoxDns({ fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN }, BOX);
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("refused");
+  });
+
+  it("writes one record when the box's two hosts are the same name", async () => {
+    const cf = new FakeCloudflare();
+
+    const outcome = await ensureBoxDns(
+      { fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN },
+      { ...BOX, uiHost: BOX.tapHost },
+    );
+
+    expect(outcome).toEqual({
+      ok: true,
+      created: ["oc-tap-mac.buyallmemes.com"],
+      updated: [],
+    });
+    expect(cf.calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  it("writes only the tap host when the box has no UI host", async () => {
+    const cf = new FakeCloudflare();
+
+    const outcome = await ensureBoxDns(
+      { fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN },
+      { ...BOX, uiHost: "" },
+    );
+
+    expect(outcome).toEqual({
+      ok: true,
+      created: ["oc-tap-mac.buyallmemes.com"],
+      updated: [],
+    });
+    const posts = cf.calls.filter((c) => c.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body?.["name"]).toBe("oc-tap-mac.buyallmemes.com");
+  });
+
+  it("fails loudly when the box has no tap host: that is a brain bug", async () => {
+    const cf = new FakeCloudflare();
+
+    let failure: unknown;
+    try {
+      await ensureBoxDns(
+        { fetcher: cf.fetcher, zoneId: ZONE, token: TOKEN },
+        { ...BOX, tapHost: "" },
+      );
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("tap host");
+    expect(cf.calls).toHaveLength(0);
+  });
+
   it("names the 403 and the API code, and never the credential", async () => {
     const cf = new FakeCloudflare();
     cf.failWith = { status: 403, code: 9109 };
@@ -264,6 +458,9 @@ describe("the brain's DNS writer", () => {
     const message = (failure as Error).message;
     expect(message).toContain("403");
     expect(message).toContain("9109");
+    // The code is named with what it means: the credential may not write
+    // this zone's DNS.
+    expect(message).toContain("may not write the zone's DNS");
     expect(message).not.toContain(TOKEN);
     expect(message).not.toMatch(/token/i);
   });
