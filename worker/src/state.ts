@@ -2,6 +2,7 @@ import { handleAudit } from "./audit";
 import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type LinkRecord } from "./botcommands";
+import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
 import { BOX_API, relayFailureStatus, relayToBox } from "./boxapi";
 import {
   handleEnrollApprove,
@@ -55,46 +56,6 @@ export type DoRoute = Route<(state: FleetState, ctx: DoContext) => Promise<Respo
 // The answer for a path that names nothing.
 function badRequest(): Response {
   return Response.json({ error: "bad_request" }, { status: 400 });
-}
-
-export interface BoxRow {
-  id: string;
-  hostname: string;
-  heartbeat_token_hash: string;
-  admin_token_hash: string;
-  admin_token_sealed: string;
-  // tunnel_id is the box's cloudflared tunnel id, empty when the box has
-  // no tunnel. Phase 2 creates the box's DNS records from it.
-  tunnel_id: string;
-  epoch: number;
-  last_seq: number;
-  last_ts: number;
-  last_seen: number;
-  enrolled: number;
-}
-
-// Public backends shape: everything the console needs, none of the secret
-// material. GET /backends serves exactly this — token hashes and the sealed
-// admin blob never leave the DO over that route. `tombstoned` is the
-// server-side pending-revoke marker (same isTainted rule as mint/audit), so
-// the console renders it on fresh load instead of guessing offline vs
-// blocked.
-export interface BoxPublic {
-  id: string;
-  hostname: string;
-  epoch: number;
-  last_seq: number;
-  last_ts: number;
-  last_seen: number;
-  enrolled: number;
-  tombstoned: boolean;
-}
-
-// Deny marker: a refused enrollment leaves id + timestamp (never tokens) so
-// denials are auditable instead of silent.
-export interface DenialRow {
-  id: string;
-  denied_at: number;
 }
 
 // One row of the brain's own history: the row the box pushed plus the flag

@@ -2,7 +2,7 @@ import { ensureBoxDns } from "./dns";
 import { optionalTextField, textField } from "./fields";
 import { hashToken, tokenMatches } from "./heartbeat";
 import { createTelegramClient, escapeHtml, TelegramError } from "./telegram";
-import type { BoxRow, DenialRow } from "./state";
+import type { BoxRow, DenialRow } from "./boxes";
 
 // Enrollment request body (box JSON contract, snake_case): a box that wants
 // to join (or re-bind after a token change) sends {id, hostname,

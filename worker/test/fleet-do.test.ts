@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { BoxRow } from "../src/boxes";
 import { sealAdminToken } from "../src/enroll";
-import type { BoxRow } from "../src/state";
 import type { TelegramClient } from "../src/telegram";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";

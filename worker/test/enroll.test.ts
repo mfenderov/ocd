@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import type { FleetState } from "../src/state";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BoxRow, DenialRow } from "../src/boxes";
 import {
   approveEnrollment,
   capBinding,
@@ -29,7 +30,6 @@ import {
 } from "../src/enroll";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
-import type { BoxRow, DenialRow } from "../src/state";
 
 const NEW_TOKEN = "enroll-brand-new-token-1";
 const KNOWN_TOKEN = "enroll-known-token-1";

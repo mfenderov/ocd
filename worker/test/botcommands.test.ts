@@ -1,9 +1,9 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "../src/botcommands";
+import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
-import type { BoxPublic, BoxRow } from "../src/state";
 import type { TelegramClient } from "../src/telegram";
 import { inState } from "./helpers";
 

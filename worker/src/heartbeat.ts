@@ -1,6 +1,6 @@
 import { integerField, numberField, optionalIntegerField, optionalStringField, textField } from "./fields";
 import type { TombstoneRow } from "./mint";
-import type { BoxRow } from "./state";
+import type { BoxRow } from "./boxes";
 
 // Heartbeat request body (box JSON contract, snake_case). The box sends
 // {id, seq, box_now, epoch, version[, enroll_token]} with

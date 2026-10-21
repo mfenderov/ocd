@@ -1,6 +1,6 @@
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
-import type { BoxRow } from "./state";
+import type { BoxRow } from "./boxes";
 import { BOX_API } from "./boxapi";
 
 // Mint relay: console POST /api/backends/:id/link → box POST /admin/mint.

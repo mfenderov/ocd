@@ -1,5 +1,5 @@
 import { OFFLINE_AFTER_SEC } from "./liveness";
-import type { BoxPublic } from "./state";
+import type { BoxPublic } from "./boxes";
 
 // The brain's inline keyboards: the buttons the owner taps.
 //

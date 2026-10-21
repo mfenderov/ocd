@@ -9,7 +9,7 @@ import {
   type Keyboard,
 } from "./botbuttons";
 import type { RevokeResult } from "./revoke";
-import type { BoxPublic } from "./state";
+import type { BoxPublic } from "./boxes";
 import { escapeHtml, type TelegramClient } from "./telegram";
 
 // The brain's command layer: one Telegram command in, one message out.

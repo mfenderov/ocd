@@ -1,9 +1,10 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { BoxRow } from "../src/boxes";
 import { handleEvents, type LinkRow } from "../src/events";
 import { hashToken } from "../src/heartbeat";
 import app, { type Env as EdgeEnv } from "../src/index";
-import type { BoxRow, FleetState } from "../src/state";
+import type { FleetState } from "../src/state";
 import type { TelegramClient } from "../src/telegram";
 import { inState } from "./helpers";
 

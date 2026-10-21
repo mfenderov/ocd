@@ -11,7 +11,7 @@
 // whether the box answered.
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
-import type { BoxRow } from "./state";
+import type { BoxRow } from "./boxes";
 
 export const BOX_API = {
   mint: "/_oc/mint",
