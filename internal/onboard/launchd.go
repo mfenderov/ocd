@@ -192,15 +192,15 @@ func ServiceStatus() (string, error) {
 }
 
 // serviceUID is the uid of this login session, when it can be read:
-// $UID, else `id -u`. The second value says whether it was readable.
+// $UID, else `id -u`. The second value says whether it was readable: an
+// empty uid is not readable, so the service is reported as installed and
+// its state unknown.
 func serviceUID() (string, bool) {
-	uid := os.Getenv("UID")
-	if uid == "" {
-		out, err := exec.Command("id", "-u").Output()
-		if err != nil {
-			return "", false
-		}
-		uid = string(out[:len(out)-1])
+	// The same rule as the login session's uid, so the two can never
+	// drift apart: $UID first, then `id -u` behind the idCommand seam.
+	uid, err := loginUID()
+	if err != nil || uid == "" {
+		return "", false
 	}
 	return uid, true
 }

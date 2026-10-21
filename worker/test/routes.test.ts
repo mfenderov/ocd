@@ -114,6 +114,13 @@ const EDGE_CASES: Array<{ call: Call; status: number; error?: string; body?: Rec
   // A degenerate id is no route: the scope check does not fire either.
   { call: { method: "POST", path: "/api/backends//revoke" }, status: 404 },
   { call: { method: "POST", path: "/api/backends//link" }, status: 404 },
+  // The id may hold a "/", so a path with three slashes names the id
+  // "/" — and that is a route: the scope check fires and the handler
+  // answers. The empty id is the only one that is not a route.
+  { call: { method: "POST", path: "/api/backends///revoke" }, status: 401, error: "unauthorized" },
+  { call: { method: "POST", path: "/api/backends///link" }, status: 401, error: "unauthorized" },
+  { call: { method: "GET", path: "/api/backends///presence" }, status: 401, error: "unauthorized" },
+  { call: { method: "GET", path: "/api/backends///status" }, status: 401, error: "unauthorized" },
   // The guarded routes with a credential: the handler answers.
   { call: { method: "GET", path: "/api/backends", bearer: "TOKEN" }, status: 200 },
   { call: { method: "GET", path: "/api/audit?box=ghost", bearer: "TOKEN" }, status: 404 },
@@ -127,6 +134,13 @@ const EDGE_CASES: Array<{ call: Call; status: number; error?: string; body?: Rec
   { call: { method: "POST", path: "/api/backends/ghost/link", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
   { call: { method: "GET", path: "/api/backends/ghost/presence", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
   { call: { method: "GET", path: "/api/backends/ghost/status", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
+  // The empty id is no route, with a credential either.
+  { call: { method: "POST", path: "/api/backends//revoke", bearer: "TOKEN" }, status: 404 },
+  // The id "/" is a route like any other: the handler answers it.
+  { call: { method: "POST", path: "/api/backends///revoke", bearer: "TOKEN" }, status: 400, error: "confirm_required" },
+  { call: { method: "POST", path: "/api/backends///link", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
+  { call: { method: "GET", path: "/api/backends///presence", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
+  { call: { method: "GET", path: "/api/backends///status", bearer: "TOKEN" }, status: 404, error: "unknown_box" },
   { call: { method: "POST", path: "/api/tokens/t-1/rotate", bearer: "TOKEN" }, status: 404, error: "unknown_token" },
   { call: { method: "DELETE", path: "/api/tokens/t-1", bearer: "TOKEN" }, status: 404, error: "unknown_token" },
 ];
