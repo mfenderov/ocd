@@ -195,37 +195,72 @@ const (
 // does not follow it.
 func unreproducibleParts(raw string) []string {
 	var parts []string
-	expectService := false
-	host := ""
+	scan := ruleScan{}
 	for _, line := range strings.Split(raw, "\n") {
-		text := strings.TrimSpace(line)
-		if text == "" || strings.HasPrefix(text, "#") {
-			continue
-		}
-		m := writerLineRe.FindStringSubmatch(line)
-		if m == nil {
-			parts = append(parts, unreproduciblePart(line))
-			continue
-		}
-		if m[hostGroup] != "" {
-			if expectService {
-				parts = append(parts, "a rule with no service: "+host)
-			}
-			host = m[hostGroup]
-			expectService = true
-			continue
-		}
-		if m[portGroup] != "" {
-			if !expectService {
-				parts = append(parts, "a service with no hostname: "+text)
-			}
-			expectService = false
-		}
+		parts = append(parts, scan.read(line)...)
 	}
-	if expectService {
-		parts = append(parts, "a rule with no service: "+host)
+	return append(parts, scan.unclosedRule()...)
+}
+
+// ruleScan reads a config line by line, keeping the rule it is in: a
+// rule's hostname waits for its service.
+type ruleScan struct {
+	host   string
+	expect bool
+}
+
+// read takes one line of the config and names what a rewrite would drop.
+func (s *ruleScan) read(line string) []string {
+	text := strings.TrimSpace(line)
+	if text == "" || strings.HasPrefix(text, "#") {
+		return nil
 	}
+	m := writerLineRe.FindStringSubmatch(line)
+	if m == nil {
+		return []string{unreproduciblePart(line)}
+	}
+	return s.readRule(m, text)
+}
+
+// readRule takes a line the writer emits.
+func (s *ruleScan) readRule(m []string, text string) []string {
+	switch {
+	case m[hostGroup] != "":
+		return s.readHost(m[hostGroup])
+	case m[portGroup] != "":
+		return s.readService(text)
+	}
+	return nil
+}
+
+// readHost takes the hostname of a rule: a rule that never got a
+// service is a problem.
+func (s *ruleScan) readHost(host string) []string {
+	var parts []string
+	if s.expect {
+		parts = append(parts, "a rule with no service: "+s.host)
+	}
+	s.host = host
+	s.expect = true
 	return parts
+}
+
+// readService takes the service of a rule.
+func (s *ruleScan) readService(text string) []string {
+	var parts []string
+	if !s.expect {
+		parts = append(parts, "a service with no hostname: "+text)
+	}
+	s.expect = false
+	return parts
+}
+
+// unclosedRule names the rule that never got a service.
+func (s *ruleScan) unclosedRule() []string {
+	if !s.expect {
+		return nil
+	}
+	return []string{"a rule with no service: " + s.host}
 }
 
 // unreproduciblePart names what a line the writer does not emit holds.
@@ -326,12 +361,30 @@ func writeTunnelConfig(path, content string) error {
 // existing login, an API token (flag or env), or — interactive only — a
 // guided `cloudflared tunnel login` run. Never stores anything.
 func EnsureCloudflaredLogin(ctx context.Context, credDir, apiToken string, interactive bool, w io.Writer) error {
-	if HasCert(credDir) || strings.TrimSpace(apiToken) != "" || os.Getenv("CLOUDFLARE_API_TOKEN") != "" {
+	if cloudflaredAuthenticated(credDir, apiToken) {
 		return nil
 	}
 	if !interactive {
 		return fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or set CLOUDFLARE_API_TOKEN")
 	}
+	return runCloudflaredLogin(ctx, credDir, w)
+}
+
+// cloudflaredAuthenticated says whether this box can talk to Cloudflare:
+// a login, an API token (flag or env).
+func cloudflaredAuthenticated(credDir, apiToken string) bool {
+	if HasCert(credDir) {
+		return true
+	}
+	if strings.TrimSpace(apiToken) != "" {
+		return true
+	}
+	return os.Getenv("CLOUDFLARE_API_TOKEN") != ""
+}
+
+// runCloudflaredLogin opens the browser login and waits for it to write
+// the credentials.
+func runCloudflaredLogin(ctx context.Context, credDir string, w io.Writer) error {
 	_, _ = fmt.Fprintln(w, "opening cloudflared login in your browser…")
 	cmd := exec.CommandContext(ctx, "cloudflared", "tunnel", "login")
 	cmd.Stdin = os.Stdin
@@ -379,29 +432,10 @@ type TunnelSetup struct {
 // writes them too), and the route overwrites, so running it again
 // changes nothing.
 func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (TunnelSetup, error) {
-	say := func(s string) {
-		if progress != nil {
-			progress(s)
-		}
-	}
-	if strings.TrimSpace(plan.TapHost) == "" {
-		return TunnelSetup{}, fmt.Errorf("onboard: tap hostname is required")
-	}
-	if plan.Port <= 0 {
-		plan.Port = DaemonPort
-	}
-	if plan.UIPort <= 0 {
-		plan.UIPort = OpenCodePort
-	}
-	if strings.TrimSpace(plan.CredDir) == "" {
-		dir, err := DefaultCredDir()
-		if err != nil {
-			return TunnelSetup{}, err
-		}
-		plan.CredDir = dir
-	}
-	if !HasCert(plan.CredDir) && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
-		return TunnelSetup{}, fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
+	say := notifier(progress)
+	plan, err := setupPlan(plan)
+	if err != nil {
+		return TunnelSetup{}, err
 	}
 	cfgPath := filepath.Join(plan.CredDir, "config.yml")
 	id, created, err := resolveTunnelID(ctx, plan, cfgPath, say)
@@ -422,6 +456,47 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (T
 		return TunnelSetup{}, err
 	}
 	return TunnelSetup{ID: id, Created: created}, nil
+}
+
+// setupPlan is the plan the setup runs with: the defaults filled in and
+// the Cloudflare login checked.
+func setupPlan(plan TunnelPlan) (TunnelPlan, error) {
+	if strings.TrimSpace(plan.TapHost) == "" {
+		return plan, fmt.Errorf("onboard: tap hostname is required")
+	}
+	plan, err := planDefaults(plan)
+	if err != nil {
+		return plan, err
+	}
+	return plan, checkCloudflaredLogin(plan)
+}
+
+// planDefaults fills the blanks of the plan: the ports, and the
+// credentials directory.
+func planDefaults(plan TunnelPlan) (TunnelPlan, error) {
+	if plan.Port <= 0 {
+		plan.Port = DaemonPort
+	}
+	if plan.UIPort <= 0 {
+		plan.UIPort = OpenCodePort
+	}
+	if strings.TrimSpace(plan.CredDir) != "" {
+		return plan, nil
+	}
+	dir, err := DefaultCredDir()
+	if err != nil {
+		return plan, err
+	}
+	plan.CredDir = dir
+	return plan, nil
+}
+
+// checkCloudflaredLogin refuses a setup that cannot talk to Cloudflare.
+func checkCloudflaredLogin(plan TunnelPlan) error {
+	if cloudflaredAuthenticated(plan.CredDir, plan.APIToken) {
+		return nil
+	}
+	return fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
 }
 
 // resolveTunnelID resolves the tunnel id this box serves, and says

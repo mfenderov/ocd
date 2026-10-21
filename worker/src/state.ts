@@ -1,7 +1,8 @@
 import { handleAudit } from "./audit";
-import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
+import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type LinkRecord } from "./botcommands";
+import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
 import { BOX_API, relayFailureStatus, relayToBox } from "./boxapi";
 import {
   handleEnrollApprove,
@@ -31,6 +32,7 @@ import {
   revokeOneBox,
   type RevokeResult,
 } from "./revoke";
+import { exact, findRoute, optionalId, optionalSingleId, type Route } from "./routes";
 import { createTelegramClient, type TelegramClient } from "./telegram";
 import {
   handleDeleteToken,
@@ -40,44 +42,20 @@ import {
   type TokenRow,
 } from "./tokens";
 
-export interface BoxRow {
+// What a route's handler gets: the request, the URL, and the id the path
+// names.
+export interface DoContext {
+  request: Request;
+  url: URL;
+  // The id the path names, empty when the path names none.
   id: string;
-  hostname: string;
-  heartbeat_token_hash: string;
-  admin_token_hash: string;
-  admin_token_sealed: string;
-  // tunnel_id is the box's cloudflared tunnel id, empty when the box has
-  // no tunnel. Phase 2 creates the box's DNS records from it.
-  tunnel_id: string;
-  epoch: number;
-  last_seq: number;
-  last_ts: number;
-  last_seen: number;
-  enrolled: number;
 }
 
-// Public backends shape: everything the console needs, none of the secret
-// material. GET /backends serves exactly this — token hashes and the sealed
-// admin blob never leave the DO over that route. `tombstoned` is the
-// server-side pending-revoke marker (same isTainted rule as mint/audit), so
-// the console renders it on fresh load instead of guessing offline vs
-// blocked.
-export interface BoxPublic {
-  id: string;
-  hostname: string;
-  epoch: number;
-  last_seq: number;
-  last_ts: number;
-  last_seen: number;
-  enrolled: number;
-  tombstoned: boolean;
-}
+export type DoRoute = Route<(state: FleetState, ctx: DoContext) => Promise<Response>>;
 
-// Deny marker: a refused enrollment leaves id + timestamp (never tokens) so
-// denials are auditable instead of silent.
-export interface DenialRow {
-  id: string;
-  denied_at: number;
+// The answer for a path that names nothing.
+function badRequest(): Response {
+  return Response.json({ error: "bad_request" }, { status: 400 });
 }
 
 // One row of the brain's own history: the row the box pushed plus the flag
@@ -165,6 +143,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS audit_log_key ON audit_log(box_id, at, action,
 
 const COLUMNS =
   "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, tunnel_id, epoch, last_seq, last_ts, last_seen, enrolled";
+
+// A column the brain added after the first release: the column's name
+// and the statement that adds it. A DB without the column gets it here,
+// so a fresh DB and an old one converge.
+interface ColumnMigration {
+  column: string;
+  sql: string;
+}
+
+const BOX_MIGRATIONS: readonly ColumnMigration[] = [
+  { column: "last_ts", sql: "ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0" },
+  { column: "admin_token_sealed", sql: "ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''" },
+  { column: "suspected_offline", sql: "ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0" },
+  { column: "tunnel_id", sql: "ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''" },
+];
+
+const PENDING_MIGRATIONS: readonly ColumnMigration[] = [
+  { column: "admin_token_sealed", sql: "ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''" },
+  { column: "trusted", sql: "ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0" },
+  { column: "tunnel_id", sql: "ALTER TABLE pending ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''" },
+];
 
 const PUBLIC_COLUMNS = "id, hostname, epoch, last_seq, last_ts, last_seen, enrolled";
 
@@ -256,6 +255,9 @@ export class FleetState implements DurableObject {
   // hands in its own, so the sweep runs without Telegram and without the
   // network.
   alarmDeps: AlarmDeps;
+  // The routes the DO answers: the table the router looks up. Public so
+  // the tests can read the scope each route needs off it.
+  readonly routes: DoRoute[];
 
   constructor(state: DurableObjectState, env?: FleetEnv) {
     this.state = state;
@@ -279,6 +281,7 @@ export class FleetState implements DurableObject {
       probePresence: (boxId) => this.probePresence(boxId),
       nowSec: () => nowSec(),
     };
+    this.routes = this.buildRoutes();
   }
 
   private notifier(): NotifyFn {
@@ -472,40 +475,36 @@ export class FleetState implements DurableObject {
 
   private ensureSchema(): void {
     this.state.storage.sql.exec(SCHEMA);
-    const boxCols = this.state.storage.sql.exec("PRAGMA table_info(boxes)").toArray() as Array<{
+    this.addMissingColumns("boxes", BOX_MIGRATIONS);
+    this.addMissingColumns("pending", PENDING_MIGRATIONS);
+    this.ensureTokenTable();
+  }
+
+  // The columns a table is missing, added one statement each. A fresh DB
+  // has them all (the SCHEMA above), an old one has some: the two
+  // converge here.
+  private addMissingColumns(table: string, migrations: readonly ColumnMigration[]): void {
+    const existing = this.columnNames(table);
+    for (const migration of migrations) {
+      if (!existing.includes(migration.column)) {
+        this.state.storage.sql.exec(migration.sql);
+      }
+    }
+  }
+
+  // The columns a table has.
+  private columnNames(table: string): string[] {
+    const rows = this.state.storage.sql.exec(`PRAGMA table_info(${table})`).toArray() as Array<{
       name: string;
     }>;
-    if (!boxCols.some((c) => c.name === "last_ts")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!boxCols.some((c) => c.name === "admin_token_sealed")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
-    }
-    if (!boxCols.some((c) => c.name === "suspected_offline")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!boxCols.some((c) => c.name === "tunnel_id")) {
-      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
-    }
-    const pendingCols = this.state.storage.sql.exec("PRAGMA table_info(pending)").toArray() as Array<{
-      name: string;
-    }>;
-    if (!pendingCols.some((c) => c.name === "admin_token_sealed")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''");
-    }
-    if (!pendingCols.some((c) => c.name === "trusted")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!pendingCols.some((c) => c.name === "tunnel_id")) {
-      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
-    }
-    // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
-    // a missing table reads as zero columns, so fresh and existing DBs
-    // converge here instead of in the one-shot SCHEMA string.
-    const tokenCols = this.state.storage.sql.exec("PRAGMA table_info(cli_tokens)").toArray() as Array<{
-      name: string;
-    }>;
-    if (tokenCols.length === 0) {
+    return rows.map((row) => row.name);
+  }
+
+  // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
+  // a missing table reads as zero columns, so fresh and existing DBs
+  // converge here instead of in the one-shot SCHEMA string.
+  private ensureTokenTable(): void {
+    if (this.columnNames("cli_tokens").length === 0) {
       this.state.storage.sql.exec(
         "CREATE TABLE cli_tokens(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)",
       );
@@ -963,142 +962,192 @@ export class FleetState implements DurableObject {
     // The brain's clock starts with its first request: the alarm is
     // armed once, and it keeps itself armed from then on.
     await this.ensureAlarm();
+    const found = findRoute(this.routes, request.method, url.pathname);
+    if (!found) {
+      return new Response("Not Found", { status: 404 });
+    }
     // Task 2 guards: link needs link scope, revoke/revoke-all need revoke,
     // backends/audit reads need audit — or a valid Access JWT (browser
     // bypass). Auth runs before existence checks, so unknown ids with bad
     // credentials read 401, never 404. Heartbeat/enroll/token routes keep
     // their own auth and are untouched.
-    const scope = scopeForDoRoute(request.method, url.pathname);
-    if (scope && !(await authorizeRequest(request, this, scope, this.accessConfig()))) {
+    if (
+      found.route.scope &&
+      !(await authorizeRequest(request, this, found.route.scope, this.accessConfig()))
+    ) {
       return unauthorized();
     }
-    if (request.method === "GET" && url.pathname === "/backends") {
-      return Response.json(this.listBackends());
-    }
-    if (request.method === "GET" && url.pathname === "/audit") {
-      return handleAudit(request, this, { sealKey: this.sealKey });
-    }
-    if (request.method === "POST" && url.pathname === "/tg") {
-      // The brain's front door: Telegram's webhook, forwarded by the
-      // edge. The settings come from the Worker env; a brain that is not
-      // configured fails loud (500) instead of dropping every update
-      // silently.
-      const brain = resolveBrainConfig({
-        botToken: this.botToken,
-        ownerChatId: this.ownerChatId,
-        webhookSecret: this.webhookSecret,
-      });
-      if (!brain) {
-        return Response.json({ error: "misconfigured" }, { status: 500 });
-      }
-      return handleTelegramWebhook(request, this, {
-        ...brain,
-        dispatch: (cmd) => this.dispatchCommand(cmd, brain.telegram),
-      });
-    }
-    if (request.method === "POST" && url.pathname === "/events") {
+    return found.route.handler(this, { request, url, id: found.id });
+  }
+
+  // The DO's routes: a table, not a switch.
+  //
+  // Each row says which method and path it answers, the scope it needs (a
+  // row without a scope carries its own auth), and the handler that
+  // answers. The order is the order the brain answers in.
+  private buildRoutes(): DoRoute[] {
+    return [
+      // The reads: the boxes the brain knows, and the fleet's history.
+      { method: "GET", path: exact("/backends"), scope: "audit", handler: async (s) => Response.json(s.listBackends()) },
+      { method: "GET", path: exact("/audit"), scope: "audit", handler: (s, c) => handleAudit(c.request, s, { sealKey: s.sealKey }) },
+      // The brain's front door: Telegram's webhook, forwarded by the edge.
+      { method: "POST", path: exact("/tg"), handler: (s, c) => s.telegramRoute(c.request) },
       // The boxes' door: the box authenticates itself with its heartbeat
       // token and names itself in the body, so this route carries no
       // console scope — a console token must not forge box events.
-      // The Telegram client is optional: a brain without a token still
-      // stores the events and marks the links, and the edits stay owed
-      // until the alarm sweep drives them.
-      return handleEvents(request, this, {
-        telegram: this.telegramClient(),
-        verifyBox: (id, token) => this.verifyBoxToken(id, token),
-      });
+      { method: "POST", path: exact("/events"), handler: (s, c) => s.eventsRoute(c.request) },
+      { method: "POST", path: exact("/heartbeat"), handler: (s, c) => s.heartbeatRoute(c.request) },
+      // The enrolment: the request, the approve tap and the deny tap.
+      { method: "POST", path: exact("/enroll"), handler: (s, c) => s.enrollRoute(c.request) },
+      { method: "GET", path: exact("/enroll/approve"), handler: (s, c) => s.enrollApproveRoute(c.request) },
+      { method: "GET", path: exact("/enroll/deny"), handler: (s, c) => s.enrollDenyRoute(c.request) },
+      // The revokes.
+      { method: "POST", path: exact("/revoke-all"), scope: "revoke", handler: (s, c) => handleRevokeAll(c.request, s, { sealKey: s.sealKey }) },
+      { method: "POST", path: optionalId("/revoke/"), scope: "revoke", handler: (s, c) => s.revokeRoute(c.request, c.id) },
+      // The mint: the box mints its own tap code.
+      { method: "POST", path: optionalId("/link/"), scope: "link", handler: (s, c) => s.linkRoute(c.request, c.id) },
+      // The per-box relays: the box's presence and its status.
+      { method: "GET", path: optionalId("/presence/"), scope: "audit", handler: (s, c) => s.presenceRoute(c.id) },
+      { method: "GET", path: optionalId("/status/"), scope: "audit", handler: (s, c) => s.statusRoute(c.id) },
+      // The token lifecycle: mint, rotate, revoke. These carry their own auth.
+      { method: "POST", path: exact("/tokens"), handler: (s, c) => handleMintToken(c.request, s, { bootstrapSecret: s.bootstrapSecret }) },
+      { method: "POST", path: optionalId("/tokens/", "/rotate"), handler: (s, c) => s.rotateTokenRoute(c.request, c.id) },
+      { method: "DELETE", path: optionalSingleId("/tokens/"), handler: (s, c) => s.deleteTokenRoute(c.request, c.id) },
+    ];
+  }
+
+  // The brain's front door: the settings come from the Worker env; a brain
+  // that is not configured fails loud (500) instead of dropping every
+  // update silently.
+  private async telegramRoute(request: Request): Promise<Response> {
+    const brain = resolveBrainConfig({
+      botToken: this.botToken,
+      ownerChatId: this.ownerChatId,
+      webhookSecret: this.webhookSecret,
+    });
+    if (!brain) {
+      return Response.json({ error: "misconfigured" }, { status: 500 });
     }
-    if (request.method === "POST" && url.pathname === "/heartbeat") {
-      const notify = this.notifier();
-      return handleHeartbeat(
-        request,
-        this,
-        undefined,
-        async (id: string) => {
-          if (!shouldPingMismatch(this.mismatchPinged, id, Date.now())) return;
-          await notify(mismatchAlertText(id));
-        },
-        async (id: string) => {
-          if (!shouldPingReenroll(this.reenrollPinged, id, Date.now())) return;
-          await notify(reenrollPingText(id));
-        },
-      );
+    return handleTelegramWebhook(request, this, {
+      ...brain,
+      dispatch: (cmd) => this.dispatchCommand(cmd, brain.telegram),
+    });
+  }
+
+  // The boxes' door: the Telegram client is optional — a brain without a
+  // token still stores the events and marks the links, and the edits stay
+  // owed until the alarm sweep drives them.
+  private eventsRoute(request: Request): Promise<Response> {
+    return handleEvents(request, this, {
+      telegram: this.telegramClient(),
+      verifyBox: (id, token) => this.verifyBoxToken(id, token),
+    });
+  }
+
+  // The box's own heartbeat: the wrong-token and the seq-reset pings.
+  private heartbeatRoute(request: Request): Promise<Response> {
+    const notify = this.notifier();
+    return handleHeartbeat(
+      request,
+      this,
+      undefined,
+      async (id: string) => {
+        if (!shouldPingMismatch(this.mismatchPinged, id, Date.now())) return;
+        await notify(mismatchAlertText(id));
+      },
+      async (id: string) => {
+        if (!shouldPingReenroll(this.reenrollPinged, id, Date.now())) return;
+        await notify(reenrollPingText(id));
+      },
+    );
+  }
+
+  // The enrolment request. Trust comes from the caller, not the body: a
+  // CLI token with the "enroll" scope means the owner asked for this box in
+  // Telegram. Unauthenticated requests may still start an enrollment, but
+  // their pending row needs the approve tap.
+  private async enrollRoute(request: Request): Promise<Response> {
+    const bearer = extractBearer(request);
+    const trusted = bearer !== null && (await requireScope(this, bearer, "enroll")) !== null;
+    return handleEnrollRequest(request, this, this.notifier(), undefined, {
+      ...this.enrollConfig(),
+      trusted,
+    });
+  }
+
+  // The approve tap.
+  private enrollApproveRoute(request: Request): Promise<Response> {
+    return handleEnrollApprove(request, this, this.enrollConfig(), undefined, this.notifier());
+  }
+
+  // The deny tap.
+  private enrollDenyRoute(request: Request): Promise<Response> {
+    return handleEnrollDeny(request, this, this.enrollConfig());
+  }
+
+  // The revoke of one box.
+  private revokeRoute(request: Request, rawId: string): Promise<Response> {
+    const boxId = this.decodedId(rawId);
+    if (boxId === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "POST" && url.pathname === "/enroll") {
-      // Trust comes from the caller, not the body: a CLI token with the
-      // "enroll" scope means the owner asked for this box in Telegram.
-      // Unauthenticated requests may still start an enrollment, but their
-      // pending row needs the approve tap.
-      const bearer = extractBearer(request);
-      const trusted = bearer !== null && (await requireScope(this, bearer, "enroll")) !== null;
-      return handleEnrollRequest(request, this, this.notifier(), undefined, {
-        ...this.enrollConfig(),
-        trusted,
-      });
+    return handleRevoke(boxId, request, this, { sealKey: this.sealKey });
+  }
+
+  // The mint of one box's tap code.
+  private linkRoute(request: Request, rawId: string): Promise<Response> {
+    const boxId = this.decodedId(rawId);
+    if (boxId === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "GET" && url.pathname === "/enroll/approve") {
-      return handleEnrollApprove(request, this, this.enrollConfig(), undefined, this.notifier());
+    return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
+      sealKey: this.sealKey,
+    });
+  }
+
+  // The box's presence, relayed.
+  private presenceRoute(rawId: string): Promise<Response> {
+    const boxId = this.decodedId(rawId);
+    if (boxId === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "GET" && url.pathname === "/enroll/deny") {
-      return handleEnrollDeny(request, this, this.enrollConfig());
+    return this.relayRoute(boxId, BOX_API.presence);
+  }
+
+  // The box's status, relayed as text.
+  private statusRoute(rawId: string): Promise<Response> {
+    const boxId = this.decodedId(rawId);
+    if (boxId === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "POST" && url.pathname === "/revoke-all") {
-      return handleRevokeAll(request, this, { sealKey: this.sealKey });
+    return this.relayRoute(boxId, BOX_API.status);
+  }
+
+  // The rotation of a token.
+  private rotateTokenRoute(request: Request, rawId: string): Promise<Response> {
+    const id = this.decodedId(rawId);
+    if (id === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "POST" && url.pathname.startsWith("/revoke/")) {
-      const boxId = decodeURIComponent(url.pathname.slice("/revoke/".length));
-      if (!boxId) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return handleRevoke(boxId, request, this, { sealKey: this.sealKey });
+    return handleRotateToken(id, request, this);
+  }
+
+  // The revocation of a token.
+  private deleteTokenRoute(request: Request, rawId: string): Promise<Response> {
+    const id = this.decodedId(rawId);
+    if (id === null) {
+      return Promise.resolve(badRequest());
     }
-    if (request.method === "POST" && url.pathname.startsWith("/link/")) {
-      const boxId = decodeURIComponent(url.pathname.slice("/link/".length));
-      if (!boxId) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
-        sealKey: this.sealKey,
-      });
+    return handleDeleteToken(id, request, this);
+  }
+
+  // The id a path names, decoded. Null when the path names nothing — the
+  // answer for a path with no name in it.
+  private decodedId(rawId: string): string | null {
+    if (rawId === "") {
+      return null;
     }
-    if (request.method === "GET" && url.pathname.startsWith("/presence/")) {
-      // The box's own presence: the console asks, the box answers.
-      const boxId = decodeURIComponent(url.pathname.slice("/presence/".length));
-      if (!boxId) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return this.relayRoute(boxId, BOX_API.presence);
-    }
-    if (request.method === "GET" && url.pathname.startsWith("/status/")) {
-      // The box's own status, relayed as text.
-      const boxId = decodeURIComponent(url.pathname.slice("/status/".length));
-      if (!boxId) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return this.relayRoute(boxId, BOX_API.status);
-    }
-    if (request.method === "POST" && url.pathname === "/tokens") {
-      return handleMintToken(request, this, { bootstrapSecret: this.bootstrapSecret });
-    }
-    if (request.method === "POST" && url.pathname.startsWith("/tokens/") && url.pathname.endsWith("/rotate")) {
-      const id = decodeURIComponent(url.pathname.slice("/tokens/".length, -"/rotate".length));
-      if (!id) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return handleRotateToken(id, request, this);
-    }
-    if (
-      request.method === "DELETE" &&
-      url.pathname.startsWith("/tokens/") &&
-      !url.pathname.slice("/tokens/".length).includes("/")
-    ) {
-      const id = decodeURIComponent(url.pathname.slice("/tokens/".length));
-      if (!id) {
-        return Response.json({ error: "bad_request" }, { status: 400 });
-      }
-      return handleDeleteToken(id, request, this);
-    }
-    return new Response("Not Found", { status: 404 });
+    return decodeURIComponent(rawId);
   }
 }
 

@@ -9,7 +9,7 @@ import {
   type Keyboard,
 } from "./botbuttons";
 import type { RevokeResult } from "./revoke";
-import type { BoxPublic } from "./state";
+import type { BoxPublic } from "./boxes";
 import { escapeHtml, type TelegramClient } from "./telegram";
 
 // The brain's command layer: one Telegram command in, one message out.
@@ -142,29 +142,61 @@ export async function runCommand(cmd: BotCommand, deps: CommandDeps): Promise<vo
     // An unknown command is ignored: no reply at all.
     return;
   }
-  let reply: Reply | undefined;
-  try {
-    reply = await handler(cmd, deps);
-  } catch (err) {
-    reply = { text: fleetFailedText(err) };
-  }
+  const reply = await commandReply(handler, cmd, deps);
   if (reply === undefined) {
     return;
   }
-  let sent: { message_id: number };
-  try {
-    sent = await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
-  } catch (err) {
-    // Telegram is down. Nothing can be said about it, and the answer
-    // must not escape: the webhook would be retried forever.
-    console.error(`bot: the reply failed (${errorText(err)})`);
+  const sent = await sendReply(cmd, reply, deps);
+  if (!sent) {
     return;
   }
+  recordReplyLink(cmd, reply, sent, deps);
+}
+
+// The handler's answer. A handler that throws becomes a short failure
+// answer: the exception must not escape into the webhook, which would
+// retry the update in a loop.
+async function commandReply(
+  handler: CommandHandler,
+  cmd: BotCommand,
+  deps: CommandDeps,
+): Promise<Reply | undefined> {
+  try {
+    return await handler(cmd, deps);
+  } catch (err) {
+    return { text: fleetFailedText(err) };
+  }
+}
+
+// The reply, sent. Telegram is down: nothing can be said about it, and
+// the answer must not escape — the webhook would be retried forever.
+async function sendReply(
+  cmd: BotCommand,
+  reply: Reply,
+  deps: CommandDeps,
+): Promise<{ message_id: number } | undefined> {
+  try {
+    return await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
+  } catch (err) {
+    console.error(`bot: the reply failed (${errorText(err)})`);
+    return undefined;
+  }
+}
+
+// The link registry: the brain has to know which message carries the
+// link, so it can edit that message when the link is spent or dies.
+//
+// The message is already sent when this runs, so a registry that fails
+// must not take the answer down with it: the link lives on.
+function recordReplyLink(
+  cmd: BotCommand,
+  reply: Reply,
+  sent: { message_id: number },
+  deps: CommandDeps,
+): void {
   if (!reply.link) {
     return;
   }
-  // The link registry: the brain has to know which message carries the
-  // link, so it can edit that message when the link is spent or dies.
   const token = linkToken(reply.link.url);
   if (!token) {
     return;
@@ -172,8 +204,6 @@ export async function runCommand(cmd: BotCommand, deps: CommandDeps): Promise<vo
   try {
     deps.recordLink({ token, box: reply.link.box, chatId: cmd.chatId, messageId: sent.message_id });
   } catch (err) {
-    // The message is sent; only the registry is missing. The link lives
-    // on, so this must not take the answer down with it.
     console.error(`bot: the link was not recorded (${errorText(err)})`);
   }
 }
@@ -479,10 +509,19 @@ function revokeText(result: RevokeResult, box: string): string {
     return `💀 <code>${escapeHtml(box)}</code> revoked at epoch ${epoch}.`;
   }
   if (result.status === "tombstoned") {
-    const blocked = `⛔ <code>${escapeHtml(box)}</code> blocked at epoch ${epoch} — no new links until it returns.`;
-    return result.detail ? `${blocked}\n<i>${escapeHtml(result.detail)}</i>` : blocked;
+    return blockedText(box, epoch, result.detail);
   }
   return `⚠️ revoke: ${escapeHtml(result.status)}`;
+}
+
+// The blocked box: the credentials rotate, so no new link until the box
+// comes back. The detail says why, when the revoke had one to give.
+function blockedText(box: string, epoch: number, detail?: string): string {
+  const blocked = `⛔ <code>${escapeHtml(box)}</code> blocked at epoch ${epoch} — no new links until it returns.`;
+  if (!detail) {
+    return blocked;
+  }
+  return `${blocked}\n<i>${escapeHtml(detail)}</i>`;
 }
 
 // The revoke prompt: the credentials rotate, so the owner confirms.

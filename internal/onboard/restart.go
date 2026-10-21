@@ -24,7 +24,11 @@ var platform = runtime.GOOS
 
 // restartSystemdUnit restarts a systemd user unit. It is a variable so
 // a test can stand in for the machine: no test runs systemctl.
-var restartSystemdUnit = func(ctx context.Context, unit string) error {
+var restartSystemdUnit = restartSystemdUnitOnDisk
+
+// restartSystemdUnitOnDisk is the real thing: it asks systemd to
+// restart the unit.
+func restartSystemdUnitOnDisk(ctx context.Context, unit string) error {
 	bin, err := exec.LookPath("systemctl")
 	if err != nil {
 		return fmt.Errorf("systemctl is not on this box: %w", err)

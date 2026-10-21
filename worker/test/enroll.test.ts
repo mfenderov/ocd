@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import type { FleetState } from "../src/state";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BoxRow, DenialRow } from "../src/boxes";
 import {
   approveEnrollment,
   capBinding,
@@ -29,7 +30,6 @@ import {
 } from "../src/enroll";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
-import type { BoxRow, DenialRow } from "../src/state";
 
 const NEW_TOKEN = "enroll-brand-new-token-1";
 const KNOWN_TOKEN = "enroll-known-token-1";
@@ -315,6 +315,22 @@ describe("the box's tunnel id", () => {
     // A box with no tunnel says nothing: the field stays absent.
     expect(parseEnrollBody(body)?.tunnel_id).toBeUndefined();
     expect(parseEnrollBody({ ...body, tunnel_id: "" })?.tunnel_id).toBeUndefined();
+  });
+
+  // A tunnel id that is not a string is a bad body, not "no tunnel": the
+  // base refused it and the enrolment never happened. "No tunnel" is
+  // said by leaving the field out, not by sending the wrong thing.
+  it("refuses a tunnel id that is not a string", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    const body = { id: "tun-bad", hostname: "tun-bad.buyallmemes.com", enroll_token: NEW_TOKEN };
+    for (const tunnel_id of [123, { a: 1 }, null, true]) {
+      expect(parseEnrollBody({ ...body, tunnel_id })).toBeNull();
+      const res = await handleEnrollRequest(jsonRequest("/enroll", { ...body, tunnel_id }), store, rec.notify);
+      expect(res.status).toBe(400);
+    }
+    expect(store.pending.size).toBe(0);
+    expect(rec.texts).toHaveLength(0);
   });
 
   it("parks the tunnel id on the pending row and carries it to the box row", async () => {

@@ -1,15 +1,31 @@
+import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   ACCESS_ASSERTION_HEADER,
   authorizeRequest,
   clearAccessCache,
-  scopeForDoRoute,
-  scopeForEdgeRoute,
   verifyAccessJwt,
   type AccessConfig,
 } from "../src/access";
+import { EDGE_ROUTES } from "../src/index";
+import { findRoute, type Route } from "../src/routes";
+import type { FleetState } from "../src/state";
 import { handleMintToken, type TokenRow, type TokenStore } from "../src/tokens";
 import { b64url, generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
+import { inState } from "./helpers";
+
+// The scope a route needs, read from the route table the router uses.
+function scopeOf(routes: readonly Route<unknown>[], method: string, pathname: string): string | null {
+  const found = findRoute(routes, method, pathname);
+  return found?.route.scope ?? null;
+}
+
+// The DO's routes, read off a live instance: the table is built per
+// instance, because every handler answers with the instance's own state.
+async function doRoutes(): Promise<readonly Route<unknown>[]> {
+  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+  return inState(stub, async (instance: FleetState) => instance.routes);
+}
 
 const BOOTSTRAP = "test-bootstrap-access-2";
 
@@ -94,47 +110,49 @@ beforeEach(() => {
   clearAccessCache();
 });
 
-describe("scopeForEdgeRoute (/api/* paths)", () => {
+describe("the edge routes' scopes (/api/* paths)", () => {
   it("maps each guarded route to its scope", () => {
-    expect(scopeForEdgeRoute("GET", "/api/backends")).toBe("audit");
-    expect(scopeForEdgeRoute("GET", "/api/audit")).toBe("audit");
-    expect(scopeForEdgeRoute("POST", "/api/revoke-all")).toBe("revoke");
-    expect(scopeForEdgeRoute("POST", "/api/backends/box-1/revoke")).toBe("revoke");
-    expect(scopeForEdgeRoute("POST", "/api/backends/box-1/link")).toBe("link");
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/backends")).toBe("audit");
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/audit")).toBe("audit");
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/revoke-all")).toBe("revoke");
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/backends/box-1/revoke")).toBe("revoke");
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/backends/box-1/link")).toBe("link");
   });
 
   it("leaves box, enrollment, token, and unknown routes unguarded", () => {
-    expect(scopeForEdgeRoute("POST", "/api/heartbeat")).toBeNull();
-    expect(scopeForEdgeRoute("POST", "/api/enroll")).toBeNull();
-    expect(scopeForEdgeRoute("GET", "/api/enroll/approve")).toBeNull();
-    expect(scopeForEdgeRoute("GET", "/api/enroll/deny")).toBeNull();
-    expect(scopeForEdgeRoute("POST", "/api/tokens")).toBeNull();
-    expect(scopeForEdgeRoute("POST", "/api/tokens/t-1/rotate")).toBeNull();
-    expect(scopeForEdgeRoute("DELETE", "/api/tokens/t-1")).toBeNull();
-    expect(scopeForEdgeRoute("GET", "/api/nope")).toBeNull();
-    expect(scopeForEdgeRoute("GET", "/api/backends")).toBe("audit");
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/heartbeat")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/enroll")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/enroll/approve")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/enroll/deny")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/tokens")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/tokens/t-1/rotate")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "DELETE", "/api/tokens/t-1")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/nope")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "GET", "/api/backends")).toBe("audit");
     // Degenerate ids never match a mutating route, same predicate as the router.
-    expect(scopeForEdgeRoute("POST", "/api/backends//revoke")).toBeNull();
-    expect(scopeForEdgeRoute("POST", "/api/backends//link")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/backends//revoke")).toBeNull();
+    expect(scopeOf(EDGE_ROUTES, "POST", "/api/backends//link")).toBeNull();
   });
 });
 
-describe("scopeForDoRoute (DO-internal paths)", () => {
-  it("maps each guarded DO path to its scope", () => {
-    expect(scopeForDoRoute("GET", "/backends")).toBe("audit");
-    expect(scopeForDoRoute("GET", "/audit")).toBe("audit");
-    expect(scopeForDoRoute("POST", "/revoke-all")).toBe("revoke");
-    expect(scopeForDoRoute("POST", "/revoke/box-1")).toBe("revoke");
-    expect(scopeForDoRoute("POST", "/link/box-1")).toBe("link");
+describe("the DO routes' scopes (DO-internal paths)", () => {
+  it("maps each guarded DO path to its scope", async () => {
+    const routes = await doRoutes();
+    expect(scopeOf(routes, "GET", "/backends")).toBe("audit");
+    expect(scopeOf(routes, "GET", "/audit")).toBe("audit");
+    expect(scopeOf(routes, "POST", "/revoke-all")).toBe("revoke");
+    expect(scopeOf(routes, "POST", "/revoke/box-1")).toBe("revoke");
+    expect(scopeOf(routes, "POST", "/link/box-1")).toBe("link");
   });
 
-  it("leaves box, enrollment, token, and unknown DO paths unguarded", () => {
-    expect(scopeForDoRoute("POST", "/heartbeat")).toBeNull();
-    expect(scopeForDoRoute("POST", "/enroll")).toBeNull();
-    expect(scopeForDoRoute("POST", "/tokens")).toBeNull();
-    expect(scopeForDoRoute("POST", "/tokens/t-1/rotate")).toBeNull();
-    expect(scopeForDoRoute("DELETE", "/tokens/t-1")).toBeNull();
-    expect(scopeForDoRoute("GET", "/nope")).toBeNull();
+  it("leaves box, enrollment, token, and unknown DO paths unguarded", async () => {
+    const routes = await doRoutes();
+    expect(scopeOf(routes, "POST", "/heartbeat")).toBeNull();
+    expect(scopeOf(routes, "POST", "/enroll")).toBeNull();
+    expect(scopeOf(routes, "POST", "/tokens")).toBeNull();
+    expect(scopeOf(routes, "POST", "/tokens/t-1/rotate")).toBeNull();
+    expect(scopeOf(routes, "DELETE", "/tokens/t-1")).toBeNull();
+    expect(scopeOf(routes, "GET", "/nope")).toBeNull();
   });
 });
 

@@ -149,20 +149,42 @@ const botChallengeHint = "Cloudflare bot protection blocked the worker→box rel
 // server's {"error": code} shape and falling back to the HTTP status text.
 func decodeError(resp *http.Response) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusForbidden && isChallengePage(raw) {
-		return &APIError{Status: resp.StatusCode, Code: botChallengeHint}
+	if code := errorCode(resp, raw); code != "" {
+		return &APIError{Status: resp.StatusCode, Code: code}
 	}
+	return &APIError{Status: resp.StatusCode, Code: http.StatusText(resp.StatusCode)}
+}
+
+// errorCode is the code the worker replied: its own code, else the
+// status of the revoke it answered. Empty when the body says neither.
+func errorCode(resp *http.Response, raw []byte) string {
+	if resp.StatusCode == http.StatusForbidden && isChallengePage(raw) {
+		return botChallengeHint
+	}
+	if code := codedError(raw); code != "" {
+		return code
+	}
+	return revokeStatus(raw)
+}
+
+// codedError is the {"error": code} the worker replies.
+func codedError(raw []byte) string {
 	var coded struct {
 		Error string `json:"error"`
 	}
-	if json.Unmarshal(raw, &coded) == nil && coded.Error != "" {
-		return &APIError{Status: resp.StatusCode, Code: coded.Error}
+	if json.Unmarshal(raw, &coded) != nil {
+		return ""
 	}
+	return coded.Error
+}
+
+// revokeStatus is the status of the revoke the worker answered.
+func revokeStatus(raw []byte) string {
 	var res RevokeResult
-	if json.Unmarshal(raw, &res) == nil && res.Status != "" {
-		return &APIError{Status: resp.StatusCode, Code: res.Status}
+	if json.Unmarshal(raw, &res) != nil {
+		return ""
 	}
-	return &APIError{Status: resp.StatusCode, Code: http.StatusText(resp.StatusCode)}
+	return res.Status
 }
 
 // isChallengePage reports whether a body is a Cloudflare challenge page

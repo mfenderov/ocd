@@ -80,7 +80,13 @@ function functionsOf(entry: RawFileCoverage): Map<string, number> {
   return functions;
 }
 
-/** The coverage of a function, as a percentage. */
+/**
+ * The coverage of a function, as a percentage.
+ *
+ * A statement counts when it overlaps the function's lines, the way
+ * gocrap counts it: a statement that starts inside the function and
+ * ends outside it still belongs to it.
+ */
 export function coverageFor(
   report: CoverageReport,
   file: string,
@@ -92,7 +98,7 @@ export function coverageFor(
   if (!entry) {
     return 0;
   }
-  const inside = entry.statements.filter((s) => s.startLine >= startLine && s.endLine <= endLine);
+  const inside = entry.statements.filter((s) => s.endLine >= startLine && s.startLine <= endLine);
   if (inside.length === 0) {
     return 0;
   }

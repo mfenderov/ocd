@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"runtime"
 	"time"
 
@@ -53,63 +54,71 @@ func onboardCmd() *cobra.Command {
 
 // runOnboard is the whole enrollment: one question, one Telegram round
 // trip, then everything else automatic.
-func runOnboard(w interface {
-	Write([]byte) (int, error)
-}, opts onboard.Options,
-) error {
+func runOnboard(w io.Writer, opts onboard.Options) error {
 	ctx := context.Background()
 	envPath, err := onboard.DefaultEnvPath()
 	if err != nil {
 		return err
 	}
-	if id, ok := onboard.ExistingIdentity(envPath); ok && !opts.Force {
-		// Report what this box is before asking anything: on a box that
-		// is already in the fleet, `ocd` is a status command.
-		onboard.RenderIdentity(w, id)
-		if !onboard.IsTTY() {
-			return fmt.Errorf("already onboarded as %q — re-onboard with `ocd onboard --force`", id.BoxID)
-		}
-		again, err := onboard.AskReonboard(id.BoxID)
-		if err != nil {
-			return err
-		}
-		if !again {
-			return nil
-		}
+	again, err := confirmReonboard(w, envPath, opts)
+	if err != nil {
+		return err
+	}
+	if !again {
+		return nil
 	}
 	boxID, code, err := onboard.ResolveEnroll(w, opts.BoxID, opts.EnrollCode)
 	if err != nil {
 		return err
 	}
+	cfg, err := onboardConfig(ctx, w, opts, envPath, boxID, code)
+	if err != nil {
+		return err
+	}
+	res, err := runEnrollment(ctx, w, cfg)
+	if err != nil {
+		return err
+	}
+	return reportOnboard(w, cfg, res, opts)
+}
+
+// confirmReonboard asks a box that is already in the fleet whether it
+// may start over. It reports false when the run must not continue.
+func confirmReonboard(w io.Writer, envPath string, opts onboard.Options) (bool, error) {
+	id, ok := onboard.ExistingIdentity(envPath)
+	if !ok || opts.Force {
+		return true, nil
+	}
+	// Report what this box is before asking anything: on a box that
+	// is already in the fleet, `ocd` is a status command.
+	onboard.RenderIdentity(w, id)
+	if !onboard.IsTTY() {
+		return false, fmt.Errorf("already onboarded as %q — re-onboard with `ocd onboard --force`", id.BoxID)
+	}
+	again, err := onboard.AskReonboard(id.BoxID)
+	if err != nil {
+		return false, err
+	}
+	return again, nil
+}
+
+// onboardConfig is the configuration the enrollment runs with.
+func onboardConfig(ctx context.Context, w io.Writer, opts onboard.Options, envPath, boxID, code string) (onboard.Config, error) {
 	host := onboard.TapHost(boxID)
 	uiHost := onboard.UIHost(boxID)
 	uiPort, note := onboard.OpenCodePortOrDefault(ctx)
 	if note != "" {
 		_, _ = fmt.Fprintf(w, "opencode: %s — assuming port %d\n", note, uiPort)
 	}
-	tunnel := &onboard.TunnelPlan{
-		Name:     "oc-" + boxID,
-		TapHost:  host,
-		UIHost:   uiHost,
-		APIToken: opts.CFToken,
-		Port:     onboard.DaemonPort,
-		UIPort:   uiPort,
-	}
-	if opts.SkipTunnel {
-		tunnel = nil
-	} else {
-		credDir, err := onboard.DefaultCredDir()
-		if err == nil {
-			if err := onboard.EnsureCloudflaredLogin(ctx, credDir, opts.CFToken, onboard.IsTTY(), w); err != nil {
-				return err
-			}
-		}
+	tunnel, err := tunnelPlan(ctx, w, opts, boxID, host, uiHost, uiPort)
+	if err != nil {
+		return onboard.Config{}, err
 	}
 	workerURL := opts.WorkerURL
 	if workerURL == "" {
 		workerURL = onboard.DefaultWorkerURL
 	}
-	cfg := onboard.Config{
+	return onboard.Config{
 		BoxID:      boxID,
 		WorkerURL:  workerURL,
 		PublicHost: host,
@@ -119,18 +128,48 @@ func runOnboard(w interface {
 		Tunnel:     tunnel,
 		EnvPath:    envPath,
 		Timeout:    10 * time.Minute,
+	}, nil
+}
+
+// tunnelPlan is the tunnel the box will serve, and the login it needs
+// before that tunnel can be created.
+func tunnelPlan(ctx context.Context, w io.Writer, opts onboard.Options, boxID, host, uiHost string, uiPort int) (*onboard.TunnelPlan, error) {
+	if opts.SkipTunnel {
+		return nil, nil
 	}
-	var res onboard.Result
-	if onboard.IsTTY() {
-		res, err = onboard.RunSpinner(ctx, cfg)
-	} else {
-		res, err = onboard.RunPlain(ctx, w, cfg)
+	tunnel := &onboard.TunnelPlan{
+		Name:     "oc-" + boxID,
+		TapHost:  host,
+		UIHost:   uiHost,
+		APIToken: opts.CFToken,
+		Port:     onboard.DaemonPort,
+		UIPort:   uiPort,
 	}
+	credDir, err := onboard.DefaultCredDir()
 	if err != nil {
-		return err
+		return tunnel, nil
 	}
+	if err := onboard.EnsureCloudflaredLogin(ctx, credDir, opts.CFToken, onboard.IsTTY(), w); err != nil {
+		return nil, err
+	}
+	return tunnel, nil
+}
+
+// runEnrollment runs the enrollment: the spinner on a terminal, plain
+// prints otherwise.
+func runEnrollment(ctx context.Context, w io.Writer, cfg onboard.Config) (onboard.Result, error) {
+	if onboard.IsTTY() {
+		return onboard.RunSpinner(ctx, cfg)
+	}
+	return onboard.RunPlain(ctx, w, cfg)
+}
+
+// reportOnboard prints what the onboarding did, and what did not
+// happen.
+func reportOnboard(w io.Writer, cfg onboard.Config, res onboard.Result, opts onboard.Options) error {
 	serviced := false
 	if opts.InstallService || onboard.IsTTY() {
+		var err error
 		serviced, err = installService(w)
 		if err != nil {
 			return err
@@ -148,14 +187,16 @@ func runOnboard(w interface {
 
 // installService installs the macOS login service. Other platforms print
 // manual guidance instead.
-func installService(w interface {
-	Write([]byte) (int, error)
-},
-) (bool, error) {
+func installService(w io.Writer) (bool, error) {
 	if runtime.GOOS != "darwin" {
 		_, _ = fmt.Fprintln(w, "service: automatic install supports macOS only — run ocd serve via your supervisor")
 		return false, nil
 	}
+	return installLoginService(w)
+}
+
+// installLoginService installs the login service and says where it went.
+func installLoginService(w io.Writer) (bool, error) {
 	path, err := onboard.InstallLoginService()
 	if err != nil {
 		return false, err

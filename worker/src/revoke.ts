@@ -1,7 +1,7 @@
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { TombstoneRow } from "./mint";
-import type { BoxRow } from "./state";
+import type { BoxRow } from "./boxes";
 import { BOX_API } from "./boxapi";
 
 // Revoke relay: console POST /api/backends/:id/revoke (or POST
@@ -104,28 +104,66 @@ export async function revokeOneBox(
   if (!box || box.enrolled !== 1) {
     return { id: boxId, status: "unknown_box" };
   }
-  if (!deps.sealKey) {
-    console.error("revoke: seal key not configured");
-    return { id: boxId, status: "misconfigured" };
-  }
-  // Decrypt only at call time, right before the relay. Wrong key or tampered
-  // blob is a hard failure, never a fallback; a box with no bound admin
-  // token cannot be revoked.
-  let adminToken: string | null;
-  try {
-    adminToken = await unsealAdminToken(deps.sealKey, box.admin_token_sealed);
-  } catch {
-    console.error("revoke: admin token unseal failed");
-    return { id: boxId, status: "misconfigured" };
-  }
-  if (!adminToken) {
-    console.error("revoke: no admin token bound for box");
+  const adminToken = await adminTokenFor(deps.sealKey, box);
+  if (adminToken === null) {
     return { id: boxId, status: "misconfigured" };
   }
   const signal = AbortSignal.timeout(deps.deadlineMs ?? REVOKE_DEADLINE_MS);
-  let boxRes: Response;
+  const boxRes = await callBox(box, boxId, adminToken, deps, signal);
+  if (!boxRes) {
+    // Offline (or timed out): sticky tombstone at the last-known epoch so
+    // mint stays refused until the box heartbeats back past it. The timeout
+    // vs unreachable distinction is diagnostic detail only.
+    raiseTombstone(store, boxId, box.epoch);
+    return {
+      id: boxId,
+      status: "tombstoned",
+      epoch: box.epoch,
+      detail: signal.aborted ? "box_timeout" : "box_unreachable",
+    };
+  }
+  if (boxRes.status === 200) {
+    return revokedResult(store, box, boxRes);
+  }
+  return refusedResult(store, box, boxRes);
+}
+
+// The admin token the relay carries, or null when the brain cannot read
+// it: no seal key, a binding it cannot read, or a box with no admin
+// token bound.
+//
+// Decrypt only at call time, right before the relay. Wrong key or tampered
+// blob is a hard failure, never a fallback.
+async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<string | null> {
+  if (!sealKey) {
+    console.error("revoke: seal key not configured");
+    return null;
+  }
+  let adminToken: string | null;
   try {
-    boxRes = await fetchBox(
+    adminToken = await unsealAdminToken(sealKey, box.admin_token_sealed);
+  } catch {
+    console.error("revoke: admin token unseal failed");
+    return null;
+  }
+  if (!adminToken) {
+    console.error("revoke: no admin token bound for box");
+    return null;
+  }
+  return adminToken;
+}
+
+// The call to the box: the revoke itself. Null when the box was not
+// reached.
+async function callBox(
+  box: BoxRow,
+  boxId: string,
+  adminToken: string,
+  deps: RevokeDeps,
+  signal: AbortSignal,
+): Promise<Response | null> {
+  try {
+    return await fetchBox(
       pinnedRegistry([box]),
       boxId,
       BOX_API.revoke,
@@ -141,44 +179,43 @@ export async function revokeOneBox(
       deps.fetcher,
     );
   } catch {
-    // Offline (or timed out): sticky tombstone at the last-known epoch so
-    // mint stays refused until the box heartbeats back past it. The timeout
-    // vs unreachable distinction is diagnostic detail only.
-    raiseTombstone(store, boxId, box.epoch);
-    return {
-      id: boxId,
-      status: "tombstoned",
-      epoch: box.epoch,
-      detail: signal.aborted ? "box_timeout" : "box_unreachable",
-    };
+    return null;
   }
-  if (boxRes.status === 200) {
-    const epoch = await parseRevokeEpoch(boxRes);
-    if (epoch === null) {
-      // Box claims success but names no epoch: fail closed at the
-      // last-known epoch (a 200 means it likely rotated; taint until a
-      // heartbeat proves the new epoch).
-      raiseTombstone(store, boxId, box.epoch);
-      return { id: boxId, status: "tombstoned", epoch: box.epoch, detail: "box_bad_epoch" };
-    }
-    // Greatest stale epoch: every epoch below the new one is dead. The
-    // worker-row max guards a row that already runs ahead of the box reply;
-    // raiseTombstone keeps a pre-existing higher tombstone on top of that.
-    raiseTombstone(store, boxId, Math.max(box.epoch, epoch - 1));
-    return { id: boxId, status: "revoked", epoch };
+}
+
+// The revoked result: the box's new epoch, or a fail-closed tombstone
+// when the box claims success but names no epoch.
+async function revokedResult(store: RevokeStore, box: BoxRow, boxRes: Response): Promise<RevokeResult> {
+  const epoch = await parseRevokeEpoch(boxRes);
+  if (epoch === null) {
+    // Box claims success but names no epoch: fail closed at the
+    // last-known epoch (a 200 means it likely rotated; taint until a
+    // heartbeat proves the new epoch).
+    raiseTombstone(store, box.id, box.epoch);
+    return { id: box.id, status: "tombstoned", epoch: box.epoch, detail: "box_bad_epoch" };
   }
-  // A 5xx means the revoke did not take effect, so the box must be
-  // blocked either way: its sessions may still be alive. What differs is
-  // who answered. The edge could not reach the origin (520-527, 530:
-  // "error 1016" no DNS, "error 1033" tunnel not connected) — the box is
-  // gone. Any other 5xx came from the box itself: it ran and failed the
-  // rotation, so it is still there and it still needs fixing.
+  // Greatest stale epoch: every epoch below the new one is dead. The
+  // worker-row max guards a row that already runs ahead of the box reply;
+  // raiseTombstone keeps a pre-existing higher tombstone on top of that.
+  raiseTombstone(store, box.id, Math.max(box.epoch, epoch - 1));
+  return { id: box.id, status: "revoked", epoch };
+}
+
+// The result for a box that did not revoke.
+//
+// A 5xx means the revoke did not take effect, so the box must be blocked
+// either way: its sessions may still be alive. What differs is who
+// answered. The edge could not reach the origin (520-527, 530: "error
+// 1016" no DNS, "error 1033" tunnel not connected) — the box is gone. Any
+// other 5xx came from the box itself: it ran and failed the rotation, so
+// it is still there and it still needs fixing.
+async function refusedResult(store: RevokeStore, box: BoxRow, boxRes: Response): Promise<RevokeResult> {
   if (boxRes.status >= 500) {
-    raiseTombstone(store, boxId, box.epoch);
+    raiseTombstone(store, box.id, box.epoch);
     const body = (await boxRes.text()).slice(0, 256);
     const reason = isEdgeError(boxRes.status, body) ? "box_unreachable" : "box_revoke_failed";
     return {
-      id: boxId,
+      id: box.id,
       status: "tombstoned",
       epoch: box.epoch,
       box_status: boxRes.status,
@@ -188,7 +225,7 @@ export async function revokeOneBox(
   // Box refused (e.g. 400/401/409): rotation did not happen, so no
   // tombstone — the per-box result carries the box status for diagnosis.
   const detail = (await boxRes.text()).slice(0, 256);
-  return { id: boxId, status: "box_error", box_status: boxRes.status, detail };
+  return { id: box.id, status: "box_error", box_status: boxRes.status, detail };
 }
 
 // Every enrolled row is attempted; results are per-box so no box is ever

@@ -110,23 +110,37 @@ function chatOf(update: BotUpdate): number | undefined {
 function commandOf(update: BotUpdate, chatId: number): BotCommand | undefined {
   const tap = update.callback_query;
   if (tap) {
-    const data = tap.data;
-    if (typeof data !== "string") {
-      return undefined;
-    }
-    const parsed = parseCallback(data);
-    if (!parsed) {
-      return undefined;
-    }
-    const cmd: BotCommand = { name: parsed.action, args: parsed.boxId ? [parsed.boxId] : [], chatId };
-    if (tap.id) {
-      cmd.callbackId = tap.id;
-    }
-    if (tap.message?.message_id !== undefined) {
-      cmd.messageId = tap.message.message_id;
-    }
-    return cmd;
+    return tapCommand(tap, chatId);
   }
+  return typedCommand(update, chatId);
+}
+
+// A tap's command: the action it names, with the box it names as the
+// command's argument.
+function tapCommand(
+  tap: NonNullable<BotUpdate["callback_query"]>,
+  chatId: number,
+): BotCommand | undefined {
+  const data = tap.data;
+  if (typeof data !== "string") {
+    return undefined;
+  }
+  const parsed = parseCallback(data);
+  if (!parsed) {
+    return undefined;
+  }
+  const cmd: BotCommand = { name: parsed.action, args: parsed.boxId ? [parsed.boxId] : [], chatId };
+  if (tap.id) {
+    cmd.callbackId = tap.id;
+  }
+  if (tap.message?.message_id !== undefined) {
+    cmd.messageId = tap.message.message_id;
+  }
+  return cmd;
+}
+
+// A typed command: the first word plus its arguments.
+function typedCommand(update: BotUpdate, chatId: number): BotCommand | undefined {
   const text = update.message?.text;
   if (typeof text !== "string") {
     return undefined;

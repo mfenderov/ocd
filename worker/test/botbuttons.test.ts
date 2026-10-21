@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { callbackData, fleetBoard, linkMenu, openButton, parseCallback } from "../src/botbuttons";
-import type { BoxPublic } from "../src/state";
+import type { BoxPublic } from "../src/boxes";
 
 // The clock the board reads. A fixed second, so the labels are exact:
 // the board takes the clock from its caller, it does not read one of

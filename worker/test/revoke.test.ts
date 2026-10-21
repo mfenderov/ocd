@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { BoxRow } from "../src/boxes";
 import { sealAdminToken } from "../src/enroll";
 import { handleHeartbeat, hashToken } from "../src/heartbeat";
 import app from "../src/index";
@@ -11,7 +12,6 @@ import {
   revokeOneBox,
   type RevokeStore,
 } from "../src/revoke";
-import type { BoxRow } from "../src/state";
 import type { TombstoneRow } from "../src/mint";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";

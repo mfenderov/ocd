@@ -20,3 +20,30 @@ func TestAddAndGetDevice(t *testing.T) {
 		t.Fatalf("want mac, got %+v ok=%v", d, ok)
 	}
 }
+
+// The devices are listed by name: the console shows them in one stable
+// order.
+func TestListDevices(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, name := range []string{"mac", "box", "wsl"} {
+		if err := st.AddDevice(name, "linux"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := st.ListDevices()
+
+	want := []string{"box", "mac", "wsl"}
+	if len(got) != len(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want %v, got %v", want, got)
+		}
+	}
+}

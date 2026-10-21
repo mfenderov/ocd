@@ -1,7 +1,9 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute } from "../src/access";
-import { handleMintToken } from "../src/tokens";
+import { ACCESS_ASSERTION_HEADER } from "../src/access";
+import { EDGE_ROUTES } from "../src/index";
+import { findRoute } from "../src/routes";
+import { handleMintToken, type CliScope } from "../src/tokens";
 import { generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
 import { inState } from "./helpers";
 
@@ -125,25 +127,30 @@ describe("scope guards through the worker + DO", () => {
 });
 
 describe("guarded-route exhaustiveness (anonymous must 401 everywhere)", () => {
-  // Explicit route table — there is no shared router table, so this MUST
-  // mirror the guarded branches in worker/src/index.ts fetch() (edge
-  // fast-path) and the scopeForDoRoute dispatch in worker/src/access.ts (DO
-  // enforcement). ADD NEW GUARDED ROUTES HERE when the router gains them:
-  // a mutating route missing from both mappers serves anonymous callers and
-  // must fail these tests.
-  const GUARDED: Array<{ method: string; path: string; body?: unknown }> = [
-    { method: "GET", path: "/api/backends" },
-    { method: "GET", path: "/api/audit" },
-    { method: "POST", path: "/api/revoke-all", body: {} },
-    { method: "POST", path: "/api/backends/rt-exhaust/link" },
-    { method: "POST", path: "/api/backends/rt-exhaust/revoke", body: { confirm: true } },
-    { method: "GET", path: "/api/backends/rt-exhaust/presence" },
-    { method: "GET", path: "/api/backends/rt-exhaust/status" },
+  // Explicit route table — the router's own table lists the guarded
+  // routes, so this MUST mirror the guarded rows in worker/src/index.ts
+  // (the edge fast-path) and the guarded rows of the DO's table in
+  // worker/src/state.ts (the DO enforcement). ADD NEW GUARDED ROUTES HERE
+  // when the router gains them: a mutating route missing from both tables
+  // serves anonymous callers and must fail these tests.
+  //
+  // The scope each route needs is written out here, so the list is the
+  // expectation and the router's table is what is checked against it: a
+  // route the router guards with another scope fails the test below.
+  const GUARDED: Array<{ method: string; path: string; scope: CliScope; body?: unknown }> = [
+    { method: "GET", path: "/api/backends", scope: "audit" },
+    { method: "GET", path: "/api/audit", scope: "audit" },
+    { method: "POST", path: "/api/revoke-all", scope: "revoke", body: {} },
+    { method: "POST", path: "/api/backends/rt-exhaust/link", scope: "link" },
+    { method: "POST", path: "/api/backends/rt-exhaust/revoke", scope: "revoke", body: { confirm: true } },
+    { method: "GET", path: "/api/backends/rt-exhaust/presence", scope: "audit" },
+    { method: "GET", path: "/api/backends/rt-exhaust/status", scope: "audit" },
   ];
 
-  it("every listed route maps to an edge scope (mapper parity with the router)", () => {
+  it("every listed route is guarded by the scope it needs", () => {
     for (const route of GUARDED) {
-      expect(scopeForEdgeRoute(route.method, route.path)).not.toBeNull();
+      const found = findRoute(EDGE_ROUTES, route.method, route.path);
+      expect(found?.route.scope ?? null, `${route.method} ${route.path}`).toBe(route.scope);
     }
   });
 

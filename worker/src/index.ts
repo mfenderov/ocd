@@ -1,7 +1,7 @@
-import { ACCESS_ASSERTION_HEADER, scopeForEdgeRoute, unauthorized } from "./access";
+import { ACCESS_ASSERTION_HEADER, unauthorized } from "./access";
 import { extractBearer } from "./heartbeat";
+import { exact, findRoute, requiredId, singleId, type Route } from "./routes";
 import { FleetState } from "./state";
-import type { CliScope } from "./tokens";
 
 export { FleetState };
 
@@ -14,6 +14,18 @@ export interface Env {
   ACCESS_ALLOWED_EMAIL?: string;
 }
 
+// The brain's Durable Object: the one binding every route needs. A brain
+// without it fails loud — the answer says so, and the log says why.
+function fleetStub(env: Env | undefined): DurableObjectStub | Response {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  return env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+}
+
 // Single choke point for every plain DO passthrough: binding check, then
 // forward method + mapped path + headers + body verbatim. Backends reads go
 // through here too so the Authorization/Access headers reach the DO scope
@@ -24,164 +36,144 @@ export async function forwardToDo(
   env: Env | undefined,
   doPath: string,
 ): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+  const stub = fleetStub(env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
   return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
-async function handleEnrollApi(request: Request, env: Env | undefined, doPath: string): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
-  }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  // Preserve the query string: capability links carry id/exp/sig as params.
-  const search = new URL(request.url).search;
-  return await stub.fetch(new Request(`http://do${doPath}${search}`, request));
+// What a route's handler gets: the request, the env, the URL, and the id
+// the path names.
+interface EdgeContext {
+  request: Request;
+  env?: Env;
+  url: URL;
+  // The id the path names, empty when the path names none.
+  id: string;
 }
 
-async function handleLinkApi(request: Request, env: Env | undefined): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+type EdgeRoute = Route<(ctx: EdgeContext) => Promise<Response>>;
+
+// The edge's routes: a table, not a switch.
+//
+// Each row says which method and path it answers, the scope it needs (a
+// row without a scope carries its own auth: the boxes bring their own
+// tokens, the enrolment approves through capability links), and the
+// handler that answers. The order is the order the brain answers in.
+export const EDGE_ROUTES: readonly EdgeRoute[] = [
+  // The brain's front door. The secret header rides along to the DO, which
+  // is the one that checks it.
+  { method: "POST", path: exact("/tg/webhook"), handler: (c) => forwardToDo(c.request, c.env, "/tg") },
+  // The reads: the boxes the brain knows, and the fleet's history.
+  { method: "GET", path: exact("/api/backends"), scope: "audit", handler: (c) => forwardToDo(c.request, c.env, "/backends") },
+  { method: "GET", path: exact("/api/audit"), scope: "audit", handler: handleAuditApi },
+  // The revokes.
+  { method: "POST", path: exact("/api/revoke-all"), scope: "revoke", handler: (c) => forwardToDo(c.request, c.env, "/revoke-all") },
+  {
+    method: "POST",
+    path: requiredId("/api/backends/", "/revoke"),
+    scope: "revoke",
+    handler: (c) => forwardToDo(c.request, c.env, `/revoke/${encodeURIComponent(c.id)}`),
+  },
+  // The mint: the box mints its own tap code.
+  {
+    method: "POST",
+    path: requiredId("/api/backends/", "/link"),
+    scope: "link",
+    handler: handleLinkApi,
+  },
+  // The per-box relays: the box's presence and its status. Both are reads
+  // and need the audit scope, like the other read routes.
+  {
+    method: "GET",
+    path: requiredId("/api/backends/", "/presence"),
+    scope: "audit",
+    handler: (c) => forwardToDo(c.request, c.env, `/presence/${encodeURIComponent(c.id)}`),
+  },
+  {
+    method: "GET",
+    path: requiredId("/api/backends/", "/status"),
+    scope: "audit",
+    handler: (c) => forwardToDo(c.request, c.env, `/status/${encodeURIComponent(c.id)}`),
+  },
+  // The boxes' own door: the box authenticates itself with its heartbeat
+  // token and names itself in the body. The route carries no scope — a
+  // console token must not be able to forge box events.
+  { method: "POST", path: exact("/api/heartbeat"), handler: (c) => forwardToDo(c.request, c.env, "/heartbeat") },
+  { method: "POST", path: exact("/api/events"), handler: (c) => forwardToDo(c.request, c.env, "/events") },
+  // The enrolment: the request, the approve tap and the deny tap.
+  { method: "POST", path: exact("/api/enroll"), handler: (c) => handleEnrollApi(c, "/enroll") },
+  { method: "GET", path: exact("/api/enroll/approve"), handler: (c) => handleEnrollApi(c, "/enroll/approve") },
+  { method: "GET", path: exact("/api/enroll/deny"), handler: (c) => handleEnrollApi(c, "/enroll/deny") },
+  // The token lifecycle: mint, rotate, revoke. These carry their own auth.
+  { method: "POST", path: exact("/api/tokens"), handler: (c) => forwardToDo(c.request, c.env, "/tokens") },
+  {
+    method: "POST",
+    path: requiredId("/api/tokens/", "/rotate"),
+    handler: (c) => forwardToDo(c.request, c.env, `/tokens/${encodeURIComponent(c.id)}/rotate`),
+  },
+  {
+    method: "DELETE",
+    path: singleId("/api/tokens/"),
+    handler: (c) => forwardToDo(c.request, c.env, `/tokens/${encodeURIComponent(c.id)}`),
+  },
+];
+
+// The enrolment routes: the query string rides along — capability links
+// carry id/exp/sig as params.
+async function handleEnrollApi(ctx: EdgeContext, doPath: string): Promise<Response> {
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  const pathname = new URL(request.url).pathname;
-  const id = pathname.slice(0, -"/link".length).slice("/api/backends/".length);
+  const search = ctx.url.search;
+  return await stub.fetch(new Request(`http://do${doPath}${search}`, ctx.request));
+}
+
+// The link route: the box id comes out of the path.
+async function handleLinkApi(ctx: EdgeContext): Promise<Response> {
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
+  }
   return await stub.fetch(
-    new Request(`http://do/link/${encodeURIComponent(id)}`, request),
+    new Request(`http://do/link/${encodeURIComponent(ctx.id)}`, ctx.request),
   );
 }
 
-async function handleAuditApi(request: Request, env?: Env): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+// The audit route: the box/n filter params belong to the DO handler.
+async function handleAuditApi(ctx: EdgeContext): Promise<Response> {
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  // Preserve the query string: box/n filter params belong to the DO handler.
-  const search = new URL(request.url).search;
-  return await stub.fetch(new Request(`http://do/audit${search}`, request));
+  const search = ctx.url.search;
+  return await stub.fetch(new Request(`http://do/audit${search}`, ctx.request));
+}
+
+// The fast path: a guarded route with no credential at all (no bearer, no
+// Access assertion) cannot authorize — 401 without a DO roundtrip.
+// Scope/JWT validity is enforced DO-side in state.ts. With no binding the
+// route handlers still fail loud 500 below, so this yields to them when
+// env is missing.
+function credentialless(route: EdgeRoute, request: Request, env?: Env): boolean {
+  if (!route.scope || !env?.FLEET_STATE) {
+    return false;
+  }
+  return !extractBearer(request) && !request.headers.get(ACCESS_ASSERTION_HEADER);
 }
 
 export default {
   async fetch(request: Request, env?: Env): Promise<Response> {
     const url = new URL(request.url);
-    // Task 2 edge fast-path: a guarded route with no credential at all (no
-    // bearer, no Access assertion) cannot authorize — 401 without a DO
-    // roundtrip. Scope/JWT validity is enforced DO-side in state.ts. With no
-    // binding the route handlers still fail loud 500 below, so this yields
-    // to them when env is missing.
-    const scope: CliScope | null = scopeForEdgeRoute(request.method, url.pathname);
-    if (
-      scope &&
-      env?.FLEET_STATE &&
-      !extractBearer(request) &&
-      !request.headers.get(ACCESS_ASSERTION_HEADER)
-    ) {
+    const found = findRoute(EDGE_ROUTES, request.method, url.pathname);
+    if (!found) {
+      return new Response("Not Found", { status: 404 });
+    }
+    if (credentialless(found.route, request, env)) {
       return unauthorized();
     }
-    if (request.method === "POST" && url.pathname === "/tg/webhook") {
-      // Telegram's webhook: the brain's front door. The secret header
-      // rides along to the DO, which is the one that checks it.
-      return forwardToDo(request, env, "/tg");
-    }
-    if (request.method === "GET" && url.pathname === "/api/backends") {
-      return forwardToDo(request, env, "/backends");
-    }
-    if (request.method === "GET" && url.pathname === "/api/audit") {
-      return handleAuditApi(request, env);
-    }
-    if (request.method === "POST" && url.pathname === "/api/revoke-all") {
-      return forwardToDo(request, env, "/revoke-all");
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname.startsWith("/api/backends/") &&
-      url.pathname.endsWith("/revoke") &&
-      url.pathname.length > "/api/backends//revoke".length
-    ) {
-      const id = url.pathname.slice(0, -"/revoke".length).slice("/api/backends/".length);
-      return forwardToDo(request, env, `/revoke/${encodeURIComponent(id)}`);
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname.startsWith("/api/backends/") &&
-      url.pathname.endsWith("/link") &&
-      url.pathname.length > "/api/backends//link".length
-    ) {
-      return handleLinkApi(request, env);
-    }
-    // The per-box relays: the box's presence and its status. Both are
-    // reads and need the audit scope, like the other read routes.
-    if (
-      request.method === "GET" &&
-      url.pathname.startsWith("/api/backends/") &&
-      url.pathname.endsWith("/presence") &&
-      url.pathname.length > "/api/backends//presence".length
-    ) {
-      const id = url.pathname.slice("/api/backends/".length, -"/presence".length);
-      return forwardToDo(request, env, `/presence/${encodeURIComponent(id)}`);
-    }
-    if (
-      request.method === "GET" &&
-      url.pathname.startsWith("/api/backends/") &&
-      url.pathname.endsWith("/status") &&
-      url.pathname.length > "/api/backends//status".length
-    ) {
-      const id = url.pathname.slice("/api/backends/".length, -"/status".length);
-      return forwardToDo(request, env, `/status/${encodeURIComponent(id)}`);
-    }
-    if (request.method === "POST" && url.pathname === "/api/heartbeat") {
-      return forwardToDo(request, env, "/heartbeat");
-    }
-    if (request.method === "POST" && url.pathname === "/api/events") {
-      // The boxes' door: the box authenticates itself with its heartbeat
-      // token and names itself in the body. The route is not in the scope
-      // map — a console token must not be able to forge box events.
-      return forwardToDo(request, env, "/events");
-    }
-    if (request.method === "POST" && url.pathname === "/api/enroll") {
-      return handleEnrollApi(request, env, "/enroll");
-    }
-    if (request.method === "GET" && url.pathname === "/api/enroll/approve") {
-      return handleEnrollApi(request, env, "/enroll/approve");
-    }
-    if (request.method === "GET" && url.pathname === "/api/enroll/deny") {
-      return handleEnrollApi(request, env, "/enroll/deny");
-    }
-    if (request.method === "POST" && url.pathname === "/api/tokens") {
-      return forwardToDo(request, env, "/tokens");
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname.startsWith("/api/tokens/") &&
-      url.pathname.endsWith("/rotate") &&
-      url.pathname.length > "/api/tokens//rotate".length
-    ) {
-      const id = url.pathname.slice("/api/tokens/".length, -"/rotate".length);
-      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}/rotate`);
-    }
-    if (
-      request.method === "DELETE" &&
-      url.pathname.startsWith("/api/tokens/") &&
-      !url.pathname.slice("/api/tokens/".length).includes("/") &&
-      url.pathname.length > "/api/tokens/".length
-    ) {
-      const id = url.pathname.slice("/api/tokens/".length);
-      return forwardToDo(request, env, `/tokens/${encodeURIComponent(id)}`);
-    }
-    return new Response("Not Found", { status: 404 });
+    return found.route.handler({ request, env, url, id: found.id });
   },
 };

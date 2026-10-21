@@ -1,5 +1,6 @@
+import { integerField, numberField, optionalIntegerField, optionalStringField, textField } from "./fields";
 import type { TombstoneRow } from "./mint";
-import type { BoxRow } from "./state";
+import type { BoxRow } from "./boxes";
 
 // Heartbeat request body (box JSON contract, snake_case). The box sends
 // {id, seq, box_now, epoch, version[, enroll_token]} with
@@ -29,36 +30,66 @@ export function parseHeartbeatBody(value: unknown): HeartbeatBody | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const v = value as Record<string, unknown>;
-  if (typeof v["id"] !== "string" || v["id"].length === 0) {
+  const fields = validHeartbeatFields(value as Record<string, unknown>);
+  if (!fields) {
     return null;
   }
-  if (!Number.isInteger(v["seq"]) || (v["seq"] as number) < 1) {
+  return heartbeatBody(fields);
+}
+
+// The body's fields, each by its own rule. Null when a field breaks its
+// rule.
+function validHeartbeatFields(v: Record<string, unknown>): HeartbeatFields | null {
+  const id = textField(v["id"]);
+  if (id === null) {
     return null;
   }
-  if (typeof v["box_now"] !== "number" || !(v["box_now"] as number > 0)) {
+  const seq = integerField(v["seq"], 1);
+  if (seq === null) {
     return null;
   }
-  if (!Number.isInteger(v["epoch"]) || (v["epoch"] as number) < 0) {
+  const boxNow = numberField(v["box_now"], 0);
+  if (boxNow === null) {
     return null;
   }
-  if (v["version"] !== undefined && typeof v["version"] !== "string") {
+  const epoch = integerField(v["epoch"], 0);
+  if (epoch === null) {
     return null;
   }
-  if (v["taps_24h"] !== undefined && !Number.isInteger(v["taps_24h"])) {
+  const version = optionalStringField(v["version"]);
+  if (version === null) {
     return null;
   }
+  const taps24h = optionalIntegerField(v["taps_24h"]);
+  if (taps24h === null) {
+    return null;
+  }
+  return { id, seq, boxNow, epoch, version, taps24h };
+}
+
+// The fields the body carries, once each has passed its rule.
+interface HeartbeatFields {
+  id: string;
+  seq: number;
+  boxNow: number;
+  epoch: number;
+  version?: string;
+  taps24h?: number;
+}
+
+// The body, from the fields that passed their rules.
+function heartbeatBody(fields: HeartbeatFields): HeartbeatBody {
   const body: HeartbeatBody = {
-    id: v["id"] as string,
-    seq: v["seq"] as number,
-    box_now: v["box_now"] as number,
-    epoch: v["epoch"] as number,
+    id: fields.id,
+    seq: fields.seq,
+    box_now: fields.boxNow,
+    epoch: fields.epoch,
   };
-  if (typeof v["version"] === "string") {
-    body.version = v["version"];
+  if (fields.version !== undefined) {
+    body.version = fields.version;
   }
-  if (Number.isInteger(v["taps_24h"])) {
-    body.taps_24h = v["taps_24h"] as number;
+  if (fields.taps24h !== undefined) {
+    body.taps_24h = fields.taps24h;
   }
   return body;
 }
@@ -253,51 +284,88 @@ export async function handleHeartbeat(
   // reset (stale_seq with a low incoming seq). Same never-throw contract.
   onReenroll?: (id: string) => Promise<void> | void,
 ): Promise<Response> {
+  const body = await readHeartbeatBody(request);
+  if (!body) {
+    return Response.json({ error: "bad_request" }, { status: 400 });
+  }
+  const row = await authenticatedRow(request, store, body, onMismatch);
+  if (!row) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  const verdict = checkReplay(row, body.seq, body.box_now);
+  if (verdict !== "ok") {
+    return replayAnswer(verdict, body.seq, row.id, onReenroll);
+  }
+  const seen = nowSec();
+  store.putBox({ ...row, last_seq: body.seq, last_ts: body.box_now, last_seen: seen, epoch: body.epoch });
+  return Response.json({
+    id: row.id,
+    enrolled: row.enrolled === 1,
+    last_seen: seen,
+    tainted: taintOf(store, body),
+  });
+}
+
+// The heartbeat's body, when the request carries one.
+async function readHeartbeatBody(request: Request): Promise<HeartbeatBody | null> {
   let raw: unknown;
   try {
     raw = await request.json();
   } catch {
-    return Response.json({ error: "bad_request" }, { status: 400 });
+    return null;
   }
-  const body = parseHeartbeatBody(raw);
-  if (!body) {
-    return Response.json({ error: "bad_request" }, { status: 400 });
-  }
+  return parseHeartbeatBody(raw);
+}
+
+// The box row, when the box proved who it is. Null when the token does
+// not match — or when the box is not known, which stays silent: a
+// stranger's id is scanner noise, not a clone.
+async function authenticatedRow(
+  request: Request,
+  store: HeartbeatStore,
+  body: HeartbeatBody,
+  onMismatch?: (id: string) => Promise<void> | void,
+): Promise<BoxRow | null> {
   const candidate = store.getBox(body.id);
   const token = extractBearer(request);
   if (!candidate || !token || !(await tokenMatches(token, candidate.heartbeat_token_hash))) {
     if (candidate) {
       await onMismatch?.(candidate.id);
     }
-    return Response.json({ error: "unauthorized" }, { status: 401 });
+    return null;
   }
   // Re-read after the async verify so the check-and-write below runs as one
   // synchronous block (no interleaving between check and write).
-  const row = store.getBox(body.id);
-  if (!row) {
-    return Response.json({ error: "unauthorized" }, { status: 401 });
+  return store.getBox(body.id) ?? null;
+}
+
+// The answer for a heartbeat that may not be replayed.
+//
+// A stale seq at or below the threshold is a probable seq reset, but the
+// token is valid so this is the real box, not a replay attacker: say so
+// explicitly and ping the owner. Never accept (the seq really is stale)
+// — re-enrollment rebinds.
+async function replayAnswer(
+  verdict: ReplayVerdict,
+  seq: number,
+  boxId: string,
+  onReenroll?: (id: string) => Promise<void> | void,
+): Promise<Response> {
+  if (verdict === "stale_seq" && seq <= REENROLL_SEQ_THRESHOLD) {
+    await onReenroll?.(boxId);
+    return Response.json({ error: verdict, code: "re_enroll_required" }, { status: 409 });
   }
-  const verdict = checkReplay(row, body.seq, body.box_now);
-  if (verdict !== "ok") {
-    if (verdict === "stale_seq" && body.seq <= REENROLL_SEQ_THRESHOLD) {
-      // Probable DB loss, but the token is valid so this is the real box,
-      // not a replay attacker: say so explicitly and ping the owner. Never
-      // accept (the seq really is stale) — re-enrollment rebinds.
-      await onReenroll?.(row.id);
-      return Response.json({ error: verdict, code: "re_enroll_required" }, { status: 409 });
-    }
-    return Response.json({ error: verdict }, { status: 409 });
-  }
-  const seen = nowSec();
-  store.putBox({ ...row, last_seq: body.seq, last_ts: body.box_now, last_seen: seen, epoch: body.epoch });
-  // Taint signal (Task 5 revoke): the tombstone epoch is the greatest stale
-  // epoch (see TombstoneRow in mint.ts), so the box is tainted while its
-  // reported epoch has not rotated past it. A healed epoch clears the
-  // tombstone here — heartbeat is the only path that observes new epochs.
+  return Response.json({ error: verdict }, { status: 409 });
+}
+
+// The taint signal (Task 5 revoke): the tombstone epoch is the greatest
+// stale epoch (see TombstoneRow in mint.ts), so the box is tainted while
+// its reported epoch has not rotated past it. A healed epoch clears the
+// tombstone here — heartbeat is the only path that observes new epochs.
+function taintOf(store: HeartbeatStore, body: HeartbeatBody): boolean {
   const tombstone = store.getTombstone?.(body.id);
-  const tainted = tombstone !== undefined && tombstone !== null && body.epoch <= tombstone.epoch;
   if (tombstone && body.epoch > tombstone.epoch) {
     store.deleteTombstone?.(body.id);
   }
-  return Response.json({ id: row.id, enrolled: row.enrolled === 1, last_seen: seen, tainted });
+  return tombstone !== undefined && tombstone !== null && body.epoch <= tombstone.epoch;
 }

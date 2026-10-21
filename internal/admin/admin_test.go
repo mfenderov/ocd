@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -45,5 +46,40 @@ func TestRevokeAbortsWhenStartFails(t *testing.T) {
 	}
 	if err := admin.Revoke(st, exec); err == nil {
 		t.Fatal("want error when start fails")
+	}
+}
+
+// The status names the service and the devices: the operator reads it
+// to see what this box serves.
+func TestStatusNamesTheServiceAndTheDevices(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	st.AddDevice("mac", "darwin")
+	exec := func(_ context.Context, _ string, _ ...string) (string, error) {
+		return "http://127.0.0.1:49374\n", nil
+	}
+
+	got := admin.Status(context.Background(), st, exec)
+
+	for _, want := range []string{"service=http://127.0.0.1:49374", "devices=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the status must hold %q, got %q", want, got)
+		}
+	}
+}
+
+// A service that does not answer leaves the status saying so: the
+// operator must not read a stale line as a live one.
+func TestStatusReportsAServiceThatIsDown(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	exec := func(_ context.Context, _ string, _ ...string) (string, error) {
+		return "", errors.New("connection refused")
+	}
+
+	got := admin.Status(context.Background(), st, exec)
+
+	if !strings.Contains(got, "service=DOWN") {
+		t.Fatalf("the status must say the service is down, got %q", got)
 	}
 }

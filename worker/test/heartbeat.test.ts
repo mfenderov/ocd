@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { BoxRow } from "../src/boxes";
 import {
   fetchBox,
   fetchUrlPinned,
@@ -11,7 +12,6 @@ import {
   REENROLL_SEQ_THRESHOLD,
   shouldPingMismatch,
 } from "../src/heartbeat";
-import type { BoxRow } from "../src/state";
 import { inState } from "./helpers";
 
 const TOKEN = "hb-test-secret-1";

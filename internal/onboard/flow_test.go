@@ -13,6 +13,47 @@ import (
 	"github.com/mfenderov/ocd/internal/onboard"
 )
 
+// The database path is one rule, shared with the CLI: its error names
+// the failure and not the onboarding, because the operator may be
+// running `ocd serve`, not `ocd onboard`.
+func TestDefaultDBPathDoesNotNameTheOnboarding(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("OCD_DB", "")
+
+	_, err := onboard.DefaultDBPath()
+	if err == nil {
+		t.Fatal("want the failure to be reported")
+	}
+	if strings.Contains(err.Error(), "onboard:") {
+		t.Fatalf("the shared rule must not name the onboarding, got %v", err)
+	}
+}
+
+// The rule itself: OCD_DB wins, else the database in the home
+// directory.
+func TestDefaultDBPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OCD_DB", "")
+
+	path, err := onboard.DefaultDBPath()
+	if err != nil {
+		t.Fatalf("db path: %v", err)
+	}
+	if want := filepath.Join(home, ".ocd", "ocd.db"); path != want {
+		t.Fatalf("want the database in the home directory, got %q", path)
+	}
+
+	t.Setenv("OCD_DB", filepath.Join(home, "named.db"))
+	path, err = onboard.DefaultDBPath()
+	if err != nil {
+		t.Fatalf("db path: %v", err)
+	}
+	if want := filepath.Join(home, "named.db"); path != want {
+		t.Fatalf("want the named database, got %q", path)
+	}
+}
+
 // restartCall is what the onboarding asked the machine to do.
 type restartCall struct {
 	tunnelID         string

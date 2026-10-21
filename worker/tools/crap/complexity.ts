@@ -38,7 +38,8 @@ const BRANCHING_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
  * The decision points that make a function hard to follow. The rules
  * mirror gocrap (the Go tool this one is a twin of), with the two
  * constructs Go does not have — the ternary and the catch — counted
- * here so the two codebases are measured on the same scale.
+ * here so the two codebases are measured on the same scale. The
+ * `default` of a switch is not a decision, the way gocyclo reads it.
  */
 function isDecisionPoint(node: ts.Node): boolean {
   if (BRANCHING_KINDS.has(node.kind)) {
@@ -65,7 +66,9 @@ function isShortCircuit(node: ts.BinaryExpression): boolean {
 
 /**
  * The complexity of one function body: one, plus every decision point
- * inside it. A nested function is counted on its own, never here.
+ * inside it. A nested function is counted on its own, never here: a
+ * function's complexity belongs to the function, and the coverage that
+ * goes with it belongs to the function too. The README says why.
  */
 export function complexityOf(node: ts.Node): number {
   let complexity = 1;

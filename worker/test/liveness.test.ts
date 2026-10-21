@@ -1,10 +1,11 @@
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { BoxPublic, BoxRow } from "../src/boxes";
 import { boxState } from "../src/botbuttons";
 import { BOX_API, BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
 import { sealAdminToken } from "../src/enroll";
 import { sweepLiveness, type LivenessStore } from "../src/liveness";
-import type { BoxPublic, BoxRow, FleetState } from "../src/state";
+import type { FleetState } from "../src/state";
 import type { LinkRow } from "../src/events";
 import { handleMintToken } from "../src/tokens";
 import type { TelegramClient } from "../src/telegram";

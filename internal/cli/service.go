@@ -17,7 +17,13 @@ func serviceCmd() *cobra.Command {
 		Use:   "service",
 		Short: "Manage the login service that runs ocd serve",
 	}
-	install := &cobra.Command{
+	cmd.AddCommand(serviceInstallCmd(), serviceUninstallCmd(), serviceStatusCmd())
+	return cmd
+}
+
+// serviceInstallCmd installs (or refreshes) the login service.
+func serviceInstallCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "install",
 		Short: "Install (or refresh) the login service",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,15 +32,15 @@ func serviceCmd() *cobra.Command {
 			if err := ensureTunnelManaged(); err != nil {
 				return err
 			}
-			path, err := onboard.InstallLoginService()
-			if err != nil {
-				return err
-			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "service installed: "+path)
-			return nil
+			_, err := installLoginService(cmd.OutOrStdout())
+			return err
 		},
 	}
-	uninstall := &cobra.Command{
+}
+
+// serviceUninstallCmd stops and removes the login service.
+func serviceUninstallCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "uninstall",
 		Short: "Stop and remove the login service",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -45,7 +51,11 @@ func serviceCmd() *cobra.Command {
 			return nil
 		},
 	}
-	status := &cobra.Command{
+}
+
+// serviceStatusCmd shows the state of the login service.
+func serviceStatusCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "status",
 		Short: "Show the login service state",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -57,24 +67,38 @@ func serviceCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(install, uninstall, status)
-	return cmd
 }
 
 // ensureTunnelManaged turns on daemon-managed tunnels when this box has a
 // cloudflared config. Explicit env wins; the flag is only added when the
 // box would otherwise run a tunnel nobody supervises.
 func ensureTunnelManaged() error {
-	credDir, err := onboard.DefaultCredDir()
+	hasConfig, err := boxHasTunnelConfig()
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(credDir, "config.yml")); err != nil {
+	if !hasConfig {
 		return nil
 	}
 	if os.Getenv("OCD_MANAGE_TUNNEL") == "1" {
 		return nil
 	}
+	return writeManageTunnel()
+}
+
+// boxHasTunnelConfig says whether this box has a cloudflared config.
+func boxHasTunnelConfig() (bool, error) {
+	credDir, err := onboard.DefaultCredDir()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(filepath.Join(credDir, "config.yml"))
+	return err == nil, nil
+}
+
+// writeManageTunnel turns on the daemon-managed tunnel in the env file,
+// unless the env file already says so.
+func writeManageTunnel() error {
 	envPath, err := onboard.DefaultEnvPath()
 	if err != nil {
 		return err

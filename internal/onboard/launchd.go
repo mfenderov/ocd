@@ -71,13 +71,9 @@ func WriteLaunchdPlist(path, exe, home string) error {
 // BootstrapLaunchd loads the service for this login session (uid from $UID
 // or `id -u`). Requires macOS launchctl.
 func BootstrapLaunchd(path string) error {
-	uid := os.Getenv("UID")
-	if uid == "" {
-		out, err := exec.Command("id", "-u").Output()
-		if err != nil {
-			return fmt.Errorf("onboard: uid: %w", err)
-		}
-		uid = string(out[:len(out)-1])
+	uid, err := loginUID()
+	if err != nil {
+		return err
 	}
 	if _, err := strconv.Atoi(uid); err != nil {
 		return fmt.Errorf("onboard: bad uid %q", uid)
@@ -89,11 +85,47 @@ func BootstrapLaunchd(path string) error {
 	return nil
 }
 
+// idCommand runs `id -u`. A variable so a test can stand in for the
+// machine: no test runs `id`.
+var idCommand = func() ([]byte, error) {
+	return exec.Command("id", "-u").Output()
+}
+
+// loginUID is the uid of this login session: $UID, else `id -u`. The
+// uid is not checked here: only the caller that addresses a session
+// with it needs it to be a number.
+func loginUID() (string, error) {
+	uid := os.Getenv("UID")
+	if uid == "" {
+		out, err := idCommand()
+		if err != nil {
+			return "", fmt.Errorf("onboard: uid: %w", err)
+		}
+		// Trimmed, not sliced: `id -u` that prints nothing must not
+		// take the process down.
+		uid = strings.TrimSpace(string(out))
+	}
+	return uid, nil
+}
+
 // InstallLoginService writes the plist and bootstraps it for this login
 // session. macOS only; callers gate on runtime.GOOS. Re-running refreshes
 // the plist: an already-loaded copy is booted out first so the new
 // content takes effect.
 func InstallLoginService() (string, error) {
+	path, err := installLoginPlist()
+	if err != nil {
+		return "", err
+	}
+	if err := BootstrapLaunchd(path); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+// installLoginPlist writes the plist of the login service, replacing the
+// one an older build wrote.
+func installLoginPlist() (string, error) {
 	exe, err := ServiceExecutable()
 	if err != nil {
 		return "", err
@@ -109,9 +141,6 @@ func InstallLoginService() (string, error) {
 	_ = UnloadLoginService()
 	if err := WriteLaunchdPlist(path, exe, home); err != nil {
 		return "", err
-	}
-	if err := BootstrapLaunchd(path); err != nil {
-		return path, err
 	}
 	return path, nil
 }
@@ -130,13 +159,9 @@ func UnloadLoginService() error {
 	if err != nil {
 		return err
 	}
-	uid := os.Getenv("UID")
-	if uid == "" {
-		out, err := exec.Command("id", "-u").Output()
-		if err != nil {
-			return fmt.Errorf("onboard: uid: %w", err)
-		}
-		uid = string(out[:len(out)-1])
+	uid, err := loginUID()
+	if err != nil {
+		return err
 	}
 	_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+LaunchdLabel).Run()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -155,22 +180,37 @@ func ServiceStatus() (string, error) {
 	if _, err := os.Stat(path); err != nil {
 		return "not installed", nil
 	}
-	uid := os.Getenv("UID")
-	if uid == "" {
-		out, err := exec.Command("id", "-u").Output()
-		if err != nil {
-			return "installed", nil
-		}
-		uid = string(out[:len(out)-1])
+	uid, ok := serviceUID()
+	if !ok {
+		return "installed", nil
 	}
 	out, err := exec.Command("launchctl", "print", "gui/"+uid+"/"+LaunchdLabel).CombinedOutput()
 	if err != nil {
 		return "installed (not loaded)", nil
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return launchdState(string(out)), nil
+}
+
+// serviceUID is the uid of this login session, when it can be read:
+// $UID, else `id -u`. The second value says whether it was readable: an
+// empty uid is not readable, so the service is reported as installed and
+// its state unknown.
+func serviceUID() (string, bool) {
+	// The same rule as the login session's uid, so the two can never
+	// drift apart: $UID first, then `id -u` behind the idCommand seam.
+	uid, err := loginUID()
+	if err != nil || uid == "" {
+		return "", false
+	}
+	return uid, true
+}
+
+// launchdState is the state launchctl reports for the service.
+func launchdState(out string) string {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, "state =") {
-			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "state =")), nil
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "state ="))
 		}
 	}
-	return "installed", nil
+	return "installed"
 }

@@ -16,32 +16,36 @@ import (
 	"github.com/mfenderov/ocd/internal/store"
 )
 
-func dbPath() string {
-	if p := os.Getenv("OCD_DB"); p != "" {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ocd", "ocd.db")
-}
-
 func openStore() (*store.Store, error) {
-	p := dbPath()
+	// One rule for the database path: the onboarding has it, and it
+	// fails loudly when the home directory cannot be read — a relative
+	// path here once pointed the daemon at an empty database.
+	p, err := onboard.DefaultDBPath()
+	if err != nil {
+		return nil, err
+	}
 	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	return store.Open(p)
 }
 
+// realExec runs the real `opencode pair` to mint a link.
 func realExec() (string, error) {
-	url := os.Getenv("OCD_PAIR_URL")
-	if url == "" {
-		url = "https://oc.buyallmemes.com"
-	}
-	out, err := exec.Command("opencode", "pair", "--url", url).Output()
+	out, err := exec.Command("opencode", "pair", "--url", pairURL()).Output()
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
 }
 
+// pairURL is the OpenCode origin the link points at.
+func pairURL() string {
+	if url := os.Getenv("OCD_PAIR_URL"); url != "" {
+		return url
+	}
+	return "https://oc.buyallmemes.com"
+}
+
+// Root builds the ocd command tree.
 func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "ocd",
@@ -63,26 +67,39 @@ func Root() *cobra.Command {
 			return err
 		},
 	}
+	root.AddCommand(
+		serveCmd(),
+		mintCmd(),
+		devicesCmd(),
+		statusCmd(),
+		revokeCmd(),
+		fleet.NewCommand(),
+		onboardCmd(),
+		serviceCmd(),
+		repairCmd(),
+	)
+	return root
+}
 
-	serve := &cobra.Command{
+// serveCmd runs the box daemon.
+func serveCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "serve",
 		Short: "Run the box daemon (/pair, box API, heartbeat, sweeps)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return RunServe(cmd.OutOrStdout())
 		},
 	}
+}
 
+// mintCmd mints a pair link.
+func mintCmd() *cobra.Command {
 	var device string
-	mintCmd := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mint",
 		Short: "Mint a pair link",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, err := openStore()
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-			link, err := mint.Mint(st, realExec, device, "cli")
+			link, err := mintLink(device)
 			if err != nil {
 				return err
 			}
@@ -90,14 +107,34 @@ func Root() *cobra.Command {
 			return nil
 		},
 	}
-	mintCmd.Flags().StringVar(&device, "device", "", "device name")
-	_ = mintCmd.MarkFlagRequired("device")
+	cmd.Flags().StringVar(&device, "device", "", "device name")
+	_ = cmd.MarkFlagRequired("device")
+	return cmd
+}
 
+// mintLink mints a pair link for the named device.
+func mintLink(device string) (string, error) {
+	st, err := openStore()
+	if err != nil {
+		return "", err
+	}
+	defer st.Close()
+	return mint.Mint(st, realExec, device, "cli")
+}
+
+// devicesCmd manages the devices the daemon serves.
+func devicesCmd() *cobra.Command {
 	devices := &cobra.Command{
 		Use:   "devices",
 		Short: "Manage devices",
 	}
-	devList := &cobra.Command{
+	devices.AddCommand(devicesListCmd(), devicesAddCmd())
+	return devices
+}
+
+// devicesListCmd lists the devices the daemon serves.
+func devicesListCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "list",
 		Short: "List devices",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -113,7 +150,11 @@ func Root() *cobra.Command {
 			return nil
 		},
 	}
-	devAdd := &cobra.Command{
+}
+
+// devicesAddCmd adds a device the daemon serves.
+func devicesAddCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "add <name> <platform>",
 		Args:  cobra.ExactArgs(2),
 		Short: "Add a device",
@@ -126,9 +167,12 @@ func Root() *cobra.Command {
 			return st.AddDevice(args[0], args[1])
 		},
 	}
-	devices.AddCommand(devList, devAdd)
+}
 
-	status := &cobra.Command{
+// statusCmd shows the status of the daemon and of the service it talks
+// to.
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -137,9 +181,6 @@ func Root() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			out, err := exec.Command("opencode", "service", "status").Output()
-			_ = out
-			_ = err
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(cmd.Context(), st, func(ctx context.Context, name string, args ...string) (string, error) {
 				o, e := exec.CommandContext(ctx, name, args...).Output()
 				return string(o), e
@@ -147,28 +188,40 @@ func Root() *cobra.Command {
 			return nil
 		},
 	}
+}
 
+// revokeCmd rotates the password and kills every session.
+func revokeCmd() *cobra.Command {
 	var revokeYes bool
-	revoke := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "revoke",
 		Short: "Rotate password, kill all sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !revokeYes {
-				return fmt.Errorf("confirm with --yes (logs you out everywhere)")
-			}
-			st, err := openStore()
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-			return admin.Revoke(st, func(name string, args ...string) (string, error) {
-				o, e := exec.Command(name, args...).Output()
-				return string(o), e
-			})
+			return revokeSessions(revokeYes)
 		},
 	}
-	revoke.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
+	cmd.Flags().BoolVar(&revokeYes, "yes", false, "confirm")
+	return cmd
+}
 
-	root.AddCommand(serve, mintCmd, devices, status, revoke, fleet.NewCommand(), onboardCmd(), serviceCmd(), repairCmd())
-	return root
+// revokeSessions rotates the server password and kills every session.
+// The operator has to confirm: it logs them out everywhere.
+func revokeSessions(confirmed bool) error {
+	if !confirmed {
+		return fmt.Errorf("confirm with --yes (logs you out everywhere)")
+	}
+	return revokeAll()
+}
+
+// revokeAll rotates the server password and expires every device.
+func revokeAll() error {
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return admin.Revoke(st, func(name string, args ...string) (string, error) {
+		o, e := exec.Command(name, args...).Output()
+		return string(o), e
+	})
 }

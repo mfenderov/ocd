@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { parseArgs, type Options } from "./args.ts";
 import { functionsInFile, type FunctionInfo } from "./complexity.ts";
 import { coverageFor, parseCoverage, type CoverageReport } from "./coverage.ts";
+import { isExcluded } from "./glob.ts";
 import { entryFor, formatReport, type CrapEntry } from "./score.ts";
 
 /** The source files to measure: every TypeScript file under the source directory. */
@@ -24,7 +25,7 @@ function sourceFiles(root: string, src: string, exclude: string[]): string[] {
     .filter((name) => name.endsWith(".ts"))
     .filter((name) => !name.endsWith(".test.ts"))
     .filter((name) => !name.endsWith(".d.ts"))
-    .filter((name) => !exclude.some((glob) => name.includes(glob)))
+    .filter((name) => !isExcluded(name, exclude))
     .map((name) => join(dir, name));
 }
 
@@ -47,10 +48,37 @@ export function scoreAll(functions: FunctionInfo[], report: CoverageReport): Cra
 
 /** Run the tool. Returns the exit code. */
 export function main(argv: string[]): number {
-  const options = parseArgs(argv);
-  const entries = scoreAll(functionsInSources(options), readReport(options.coverage));
+  const options = parseOptions(argv);
+  if (options === null) {
+    return 2;
+  }
+  const entries = scoreSources(options);
+  if (entries === null) {
+    return 1;
+  }
   console.log(formatReport(entries, options.max, options.verbose));
   return exitCode(entries, options.max);
+}
+
+/** The options, or null when the command line cannot be run. */
+function parseOptions(argv: string[]): Options | null {
+  try {
+    return parseArgs(argv);
+  } catch (err) {
+    console.error(`error: ${describe(err)}`);
+    console.error("usage: crap -c <coverage.json> [-max N] [-v] [--exclude GLOB]");
+    return null;
+  }
+}
+
+/** The scores of the sources, or null when they cannot be read. */
+function scoreSources(options: Options): CrapEntry[] | null {
+  try {
+    return scoreAll(functionsInSources(options), readReport(options.coverage));
+  } catch (err) {
+    console.error(`error: ${describe(err)}`);
+    return null;
+  }
 }
 
 /** The functions of the sources the options point at. */
@@ -64,14 +92,25 @@ function readReport(path: string): CoverageReport {
   return parseCoverage(readFileSync(path, "utf8"));
 }
 
-/** The exit code: 1 when a function is over the threshold. */
+/**
+ * The exit code: 1 when a function is over the bar, 0 otherwise. A bar
+ * of zero is no bar — the gate is off, the way gocrap reads it.
+ */
 function exitCode(entries: CrapEntry[], max: number): number {
+  if (max <= 0) {
+    return 0;
+  }
   const above = entries.filter((e) => e.crap > max).length;
   if (above > 0) {
     console.error(`FAIL: ${above} function(s) exceed max CRAP score ${max}`);
     return 1;
   }
   return 0;
+}
+
+/** What an error says. */
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** The entry point, when this file is run and not imported. */
