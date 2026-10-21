@@ -90,31 +90,63 @@ export async function verifyAccessJwt(
   deps: AccessDeps = {},
 ): Promise<string | null> {
   try {
-    if (!config.teamDomain || !config.aud || !config.allowedEmail) {
+    const settings = completeConfig(config);
+    if (!settings) {
       return null;
     }
-    const parts = assertion.split(".");
-    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+    const parts = jwtParts(assertion);
+    if (!parts) {
       return null;
     }
     const header = parseJwtHeader(parts[0]);
     if (!header) {
       return null;
     }
-    const nowSec = deps.nowSec ?? defaultNowSec;
-    if (!validClaims(parts[1], config, nowSec())) {
+    const now = (deps.nowSec ?? defaultNowSec)();
+    if (!validClaims(parts[1], settings, now)) {
       return null;
     }
-    const key = await findJwkKey(config.teamDomain, header.kid, deps);
-    if (!key) {
-      return null;
-    }
-    return (await verifyRs256(parts[0], parts[1], parts[2], key))
-      ? validClaimsEmail(parts[1], config)
-      : null;
+    return await verifiedEmail(parts, header.kid, settings, deps);
   } catch {
     return null;
   }
+}
+
+// The settings the JWT path needs: the team, the application and the
+// allowlist. All three, or the path denies.
+function completeConfig(
+  config: AccessConfig,
+): { teamDomain: string; aud: string; allowedEmail: string } | null {
+  if (!config.teamDomain || !config.aud || !config.allowedEmail) {
+    return null;
+  }
+  return { teamDomain: config.teamDomain, aud: config.aud, allowedEmail: config.allowedEmail };
+}
+
+// The three parts of a JWT, when the assertion carries three.
+function jwtParts(assertion: string): string[] | null {
+  const parts = assertion.split(".");
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+    return null;
+  }
+  return parts;
+}
+
+// The email the assertion carries, when the signature and the claims
+// agree: the key from the team's JWKS, the signature over it, and the
+// allowlisted email.
+async function verifiedEmail(
+  parts: string[],
+  kid: string,
+  config: { teamDomain: string; aud: string; allowedEmail: string },
+  deps: AccessDeps,
+): Promise<string | null> {
+  const key = await findJwkKey(config.teamDomain, kid, deps);
+  if (!key) {
+    return null;
+  }
+  const signed = await verifyRs256(parts[0], parts[1], parts[2], key);
+  return signed ? validClaimsEmail(parts[1], config) : null;
 }
 
 function defaultNowSec(): number {
@@ -215,25 +247,47 @@ async function findJwkKey(teamDomain: string, kid: string, deps: AccessDeps): Pr
   const url = jwksUrl(teamDomain);
   const fetcher = deps.fetcher ?? fetch;
   const now = (deps.nowSec ?? defaultNowSec)();
-  const cached = jwksCache.get(url);
-  let keys = cached && now - cached.fetchedAtSec < ACCESS_JWKS_TTL_SEC ? cached.keys : await fetchJwks(url, fetcher);
+  const keys = await jwksKeys(url, fetcher, now);
   if (!keys) {
     return null;
   }
-  if (!cached || keys !== cached.keys) {
-    jwksCache.set(url, { fetchedAtSec: now, keys });
+  const match = keys.find((k) => k.kid === kid && k.kty === "RSA");
+  if (match) {
+    return match;
   }
-  let match = keys.find((k) => k.kid === kid && k.kty === "RSA");
-  if (!match) {
-    // Possible rotation since the cache fill: one refetch, then give up.
-    const fresh = await fetchJwks(url, fetcher);
-    if (!fresh) {
-      return null;
-    }
-    jwksCache.set(url, { fetchedAtSec: (deps.nowSec ?? defaultNowSec)(), keys: fresh });
-    match = fresh.find((k) => k.kid === kid && k.kty === "RSA");
+  // Possible rotation since the cache fill: one refetch, then give up.
+  return refetchedKey(url, kid, fetcher, deps);
+}
+
+// The team's keys: the cached ones while the cache is warm, the team's
+// own otherwise. A failed fetch leaves the cache as it was.
+async function jwksKeys(url: string, fetcher: typeof fetch, now: number): Promise<JwksKey[] | null> {
+  const cached = jwksCache.get(url);
+  if (cached && now - cached.fetchedAtSec < ACCESS_JWKS_TTL_SEC) {
+    return cached.keys;
   }
-  return match ?? null;
+  const keys = await fetchJwks(url, fetcher);
+  if (!keys) {
+    return null;
+  }
+  jwksCache.set(url, { fetchedAtSec: now, keys });
+  return keys;
+}
+
+// The key, from keys the team serves now: the cache may hold the keys
+// from before the team rotated them.
+async function refetchedKey(
+  url: string,
+  kid: string,
+  fetcher: typeof fetch,
+  deps: AccessDeps,
+): Promise<JwksKey | null> {
+  const fresh = await fetchJwks(url, fetcher);
+  if (!fresh) {
+    return null;
+  }
+  jwksCache.set(url, { fetchedAtSec: (deps.nowSec ?? defaultNowSec)(), keys: fresh });
+  return fresh.find((k) => k.kid === kid && k.kty === "RSA") ?? null;
 }
 
 async function verifyRs256(h: string, p: string, sigB64: string, jwk: JwksKey): Promise<boolean> {
