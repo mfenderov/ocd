@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.23.0 - 2026-10-21
+#### Features
+- (**worker**) the brain is linted, and the linter is a gate - (ee87c08) - mfenderov
+#### Bug Fixes
+- (**box**) the errors the strict linters found - (26688f5) - mfenderov
+#### Miscellaneous Chores
+- (**box**) the dead code is gone, and deadcode keeps it gone - (f7c739f) - mfenderov
+- (**lint**) the Go half is linted, and the dead code is gone - (b182510) - mfenderov
+- (**lint**) the Go half passes the strict linters - (56d9c71) - mfenderov
+- (**worker**) the dead code is gone, and knip keeps it gone - (10f3264) - mfenderov
+
+- - -
+
 ## v0.22.0 - 2026-10-21
 #### Features
 - (**worker**) crap — the CRAP score for TypeScript - (10d2b56) - mfenderov
