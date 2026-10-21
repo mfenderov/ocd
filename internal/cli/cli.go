@@ -16,16 +16,14 @@ import (
 	"github.com/mfenderov/ocd/internal/store"
 )
 
-func dbPath() string {
-	if p := os.Getenv("OCD_DB"); p != "" {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ocd", "ocd.db")
-}
-
 func openStore() (*store.Store, error) {
-	p := dbPath()
+	// One rule for the database path: the onboarding has it, and it
+	// fails loudly when the home directory cannot be read — a relative
+	// path here once pointed the daemon at an empty database.
+	p, err := onboard.DefaultDBPath()
+	if err != nil {
+		return nil, err
+	}
 	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	return store.Open(p)
 }
