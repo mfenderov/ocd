@@ -74,6 +74,13 @@ function recorder(): { texts: string[]; notify: NotifyFn } {
   return { texts, notify };
 }
 
+// The enrol response, as the box reads it.
+interface EnrolResponse {
+  status: string;
+  enrolled: boolean;
+  dns: string;
+}
+
 async function seedEnrolled(store: MemStore, id: string): Promise<BoxRow> {
   const box: BoxRow = {
     id,
@@ -140,7 +147,7 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(rec.texts[0]).not.toContain(NEW_TOKEN);
   });
 
-  it("leaves an already-bound id alone: no pending row, no ping", async () => {
+  it("leaves an already-bound id alone: no pending row, no enrolment ping", async () => {
     const store = new MemStore();
     await seedEnrolled(store, "bound-1");
     const rec = recorder();
@@ -151,7 +158,12 @@ describe("enrollment approve-on-sight (unit)", () => {
     );
     expect(result).toEqual({ status: "enrolled", id: "bound-1", rotated: false, trusted: true, dns: NO_DNS });
     expect(store.getPending("bound-1")).toBeUndefined();
-    expect(rec.texts).toHaveLength(0);
+    // The one message is the DNS report, not an enrolment ping: this
+    // brain has no DNS credential, so the enrolment ends with a DNS it
+    // could not write, and the owner must hear about it.
+    expect(rec.texts).toHaveLength(1);
+    expect(rec.texts[0]).toContain("bound-1");
+    expect(rec.texts[0]).not.toContain("/api/enroll/approve");
   });
 
   it("parks a known id presenting a new token (cloned-env case) as pending + ping", async () => {
@@ -794,10 +806,14 @@ describe("enrolled fast-path admin rotation", () => {
     expect(row?.admin_token_sealed).not.toContain("fresh-admin-rotation-1");
     expect(await unsealAdminToken(SEAL_KEY, row?.admin_token_sealed ?? "")).toBe("fresh-admin-rotation-1");
     expect(row).toMatchObject({ last_seq: 11, last_ts: 5000, enrolled: 1 });
-    expect(rec.texts).toHaveLength(1);
-    expect(rec.texts[0]).toContain("rot-1");
-    expect(rec.texts[0]).toContain(new Date(FIXED_NOW * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z");
-    expect(rec.texts[0]).not.toContain("fresh-admin-rotation-1");
+    // Two messages: the rotation, and the DNS this brain could not
+    // write (it has no credential).
+    expect(rec.texts).toHaveLength(2);
+    const rotation = rec.texts.find((t) => t.includes("Admin token rotated"));
+    expect(rotation).toBeDefined();
+    expect(rotation).toContain("rot-1");
+    expect(rotation).toContain(new Date(FIXED_NOW * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z");
+    expect(rotation).not.toContain("fresh-admin-rotation-1");
     const again = await requestEnrollment(
       store,
       { id: "rot-1", hostname: "rot-1.buyallmemes.com", enroll_token: KNOWN_TOKEN, admin_token: "fresh-admin-rotation-1" },
@@ -806,7 +822,9 @@ describe("enrolled fast-path admin rotation", () => {
       TEST_SECRETS,
     );
     expect(again).toEqual({ status: "enrolled", id: "rot-1", rotated: false, trusted: true, dns: NO_DNS });
-    expect(rec.texts).toHaveLength(1);
+    // No new rotation message; the DNS is reported again, because this
+    // is another enrolment.
+    expect(rec.texts).toHaveLength(3);
   });
 
   it("rotation overwrites a previously bound admin token", async () => {
@@ -1186,7 +1204,13 @@ describe("enrollment code claim (typed code from Telegram)", () => {
       TRUSTED,
     );
     expect(res).toEqual({ status: "enrolled", id: "code-1", rotated: false, trusted: true, dns: NO_DNS });
-    expect(rec.texts).toHaveLength(0);
+    // No second ping: the typed code was the approval, so there is no
+    // approve tap to wait for. The one message is the DNS report — this
+    // brain has no credential, so the enrolment ends with a DNS it could
+    // not write, and the owner must hear about it.
+    expect(rec.texts).toHaveLength(1);
+    expect(rec.texts[0]).toContain("code-1");
+    expect(rec.texts[0]).not.toContain("/api/enroll/approve");
     expect(store.getPending("code-1")).toBeUndefined();
     const box = store.getBox("code-1");
     expect(box?.enrolled).toBe(1);
@@ -1322,13 +1346,6 @@ describe("the enrolment writes the box's DNS", () => {
   const TOKEN = "cf-dns-token-test-9";
   const CODE = "dns-code-abc-123";
   const NOW = 1700000100;
-
-  // The enrol response, as the box reads it.
-  interface EnrolResponse {
-    status: string;
-    enrolled: boolean;
-    dns: string;
-  }
 
   // The fake Cloudflare API: the brain's DNS writer talks to it, and the
   // test asserts what the brain wrote.
@@ -1637,5 +1654,171 @@ describe("the enrolment writes the box's DNS", () => {
     // The box row is committed: a DNS that timed out never rolls the
     // enrolment back.
     expect(store.getBox("dns-9")?.enrolled).toBe(1);
+  });
+});
+
+// The enrolment is the commit point: a DNS that could not be written is
+// reported to the owner, never rolled back. Nobody else can see that
+// report — the box's console is not the owner's Telegram — so the brain
+// must send it.
+describe("the DNS failure reaches the owner", () => {
+  const ZONE = "zone-dns-owner-1";
+  const TOKEN = "cf-dns-token-owner-9";
+  const CODE = "owner-code-abc-123";
+  const NOW = 1700000100;
+
+  // A Cloudflare that answers every call with an empty zone: the brain
+  // writes the records and says "ok".
+  function workingFetcher(): typeof fetch {
+    return (async () =>
+      new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+  }
+
+  // A Cloudflare that refuses every write: the brain could not write the
+  // records and says so.
+  function refusingFetcher(): typeof fetch {
+    return (async () =>
+      new Response(JSON.stringify({ success: false, errors: [{ code: 9109 }], result: null }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+  }
+
+  const configWith = (fetcher: typeof fetch): EnrollConfig => ({
+    capSecret: CAP_TEST_KEY,
+    sealKey: SEAL_KEY,
+    trusted: true,
+    baseUrl: "https://fleet.test",
+    dns: { zoneId: ZONE, token: TOKEN, fetcher },
+  });
+
+  it("a failed DNS tells the owner once: the box is enrolled, the DNS needs them", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    const box = await seedEnrolled(store, "own-1");
+    store.putBox({ ...box, hostname: "oc-tap-own-1.buyallmemes.com", tunnel_id: "tun-own-1" });
+
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "own-1",
+        hostname: "oc-tap-own-1.buyallmemes.com",
+        enroll_token: KNOWN_TOKEN,
+      }),
+      store,
+      rec.notify,
+      () => NOW,
+      configWith(refusingFetcher()),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EnrolResponse;
+    expect(body.dns).toMatch(/^failed:/);
+
+    // Exactly one message, and it is about the DNS.
+    expect(rec.texts).toHaveLength(1);
+    const ping = rec.texts[0];
+    expect(ping).toContain("own-1");
+    expect(ping).toMatch(/DNS/);
+    // The reason is in the message, the credential is not.
+    expect(ping).toContain("403");
+    expect(ping).not.toContain(TOKEN);
+  });
+
+  it("a DNS the brain wrote tells nobody", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    const box = await seedEnrolled(store, "own-2");
+    store.putBox({ ...box, hostname: "oc-tap-own-2.buyallmemes.com", tunnel_id: "tun-own-2" });
+
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "own-2",
+        hostname: "oc-tap-own-2.buyallmemes.com",
+        enroll_token: KNOWN_TOKEN,
+      }),
+      store,
+      rec.notify,
+      () => NOW,
+      configWith(workingFetcher()),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EnrolResponse;
+    expect(body.dns).toBe("ok");
+    expect(rec.texts).toHaveLength(0);
+  });
+
+  it("the claim path tells the owner once too", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    // The brain issues the code; the box claims it with its tunnel id.
+    await requestEnrollment(
+      store,
+      { id: "own-3", hostname: "oc-tap-own-3.buyallmemes.com", enroll_token: CODE },
+      async () => {},
+      () => NOW,
+      configWith(refusingFetcher()),
+    );
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "own-3",
+        hostname: "oc-tap-own-3.buyallmemes.com",
+        enroll_token: CODE,
+        tunnel_id: "tun-own-3",
+      }),
+      store,
+      rec.notify,
+      () => NOW + 60,
+      configWith(refusingFetcher()),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()) as EnrolResponse).toMatchObject({ status: "enrolled" });
+    expect(rec.texts).toHaveLength(1);
+    expect(rec.texts[0]).toContain("own-3");
+    expect(rec.texts[0]).toMatch(/DNS/);
+  });
+
+  it("the approve tap tells the owner once too", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "own-4", hostname: "oc-tap-own-4.buyallmemes.com", enroll_token: CODE, tunnel_id: "tun-own-4" },
+      async () => {},
+      () => NOW,
+      configWith(refusingFetcher()),
+    );
+    const link = await linkFor("approve", "own-4", NOW + 900);
+    const res = await handleEnrollApprove(getRequest(link), store, configWith(refusingFetcher()), () => NOW, rec.notify);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as EnrolResponse).toMatchObject({ status: "approved" });
+    expect(rec.texts).toHaveLength(1);
+    expect(rec.texts[0]).toContain("own-4");
+    expect(rec.texts[0]).toMatch(/DNS/);
+  });
+
+  it("a skipped DNS is not a failure: nobody is told", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    const box = await seedEnrolled(store, "own-5");
+    // No tunnel id: the brain has nothing to point at, so it skips.
+    store.putBox({ ...box, hostname: "oc-tap-own-5.buyallmemes.com", tunnel_id: "" });
+
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "own-5",
+        hostname: "oc-tap-own-5.buyallmemes.com",
+        enroll_token: KNOWN_TOKEN,
+      }),
+      store,
+      rec.notify,
+      () => NOW,
+      configWith(refusingFetcher()),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EnrolResponse;
+    expect(body.dns).toMatch(/^skipped:/);
+    expect(rec.texts).toHaveLength(0);
   });
 });

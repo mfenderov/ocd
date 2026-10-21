@@ -146,12 +146,19 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
+	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
 	if err != nil {
 		return err
 	}
-	if status == "enrolled" {
-		say("enrolled")
+	if outcome.Status == "enrolled" {
+		// The brain writes the box's DNS right after the enrolment
+		// commits. When it could not, the owner is looking at this
+		// terminal: say so, in the plan's words.
+		if line := dnsOutcome(outcome.DNS); line != "" {
+			say(line)
+		} else {
+			say("enrolled")
+		}
 		say("writing " + cfg.EnvPath)
 		return writeEnv(cfg, envVals)
 	}
@@ -179,4 +186,20 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 // token the worker does not know (the "auth mismatch" clone warning).
 func writeEnv(cfg Config, envVals map[string]string) error {
 	return WriteEnvFile(cfg.EnvPath, envVals)
+}
+
+// dnsOutcome is the line the owner reads when the brain did not write
+// the box's DNS records. Empty when it did: the owner is at the
+// terminal pasting the command, so this is where a failure belongs — and
+// a success is not news.
+//
+// The brain's own status is carried as it stands ("failed: …",
+// "skipped: …"): the difference between a breakage and nothing to do
+// matters to whoever reads this.
+func dnsOutcome(dns string) string {
+	dns = strings.TrimSpace(dns)
+	if dns == "" || dns == "ok" {
+		return ""
+	}
+	return "enrolled, but the DNS needs you: " + dns
 }

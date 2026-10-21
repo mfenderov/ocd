@@ -36,12 +36,12 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	status, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
+	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
 	if err != nil {
 		t.Fatalf("EnrollBox: %v", err)
 	}
-	if status != "pending" {
-		t.Fatalf("want pending, got %q", status)
+	if outcome.Status != "pending" {
+		t.Fatalf("want pending, got %q", outcome.Status)
 	}
 	if !hit || method != http.MethodPost {
 		t.Fatalf("want one POST, hit=%v method=%q", hit, method)
@@ -53,6 +53,31 @@ func TestEnrollPostsIdentityAndReturnsStatus(t *testing.T) {
 		if body[k] != want {
 			t.Fatalf("want body[%s]=%q, got %v", k, want, body[k])
 		}
+	}
+}
+
+// The brain reports what it did about the box's DNS after the enrolment
+// committed. The box must carry that out of the response: it is the only
+// thing the owner sees at the terminal, and the brain's Telegram report
+// does not reach the box.
+func TestEnrollCarriesTheDNSOutcome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"box-9","trusted":true,"dns":"failed: the brain has no DNS credential"}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	outcome, err := boxagent.EnrollBox(ctx, srv.Client(), srv.URL, "box-9", "box-9.example.com", "enroll-secret", "admin-secret", boxagent.EnrollOptions{})
+	if err != nil {
+		t.Fatalf("EnrollBox: %v", err)
+	}
+	if outcome.Status != "enrolled" || !outcome.Trusted {
+		t.Fatalf("want an enrolled, trusted outcome, got %+v", outcome)
+	}
+	if outcome.DNS != "failed: the brain has no DNS credential" {
+		t.Fatalf("want the DNS outcome carried out of the response, got %q", outcome.DNS)
 	}
 }
 

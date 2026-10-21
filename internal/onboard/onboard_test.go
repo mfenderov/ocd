@@ -162,6 +162,62 @@ func TestDoOnboardPendingThenApproved(t *testing.T) {
 	}
 }
 
+// The brain reports what it did about the box's DNS after the enrolment
+// committed. The owner is at the terminal pasting the command, so this
+// is where a DNS that could not be written belongs: the brain's own
+// report goes to Telegram, not to the box.
+func TestDoOnboardPrintsTheDNSFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"failed: the brain has no DNS credential"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	joined := strings.Join(steps, "\n")
+	if !strings.Contains(joined, "failed: the brain has no DNS credential") {
+		t.Fatalf("the onboard must name the DNS failure, got:\n%s", joined)
+	}
+}
+
+// A DNS the brain wrote is not news: the onboard says nothing about it.
+func TestDoOnboardSaysNothingWhenTheDNSCameOutOk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"ok"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	// Nothing about the DNS is said when the brain wrote the records:
+	// the owner has no business reading about it.
+	for _, step := range steps {
+		if strings.HasPrefix(step, "writing ") {
+			// The path carries the test name; it says nothing about DNS.
+			continue
+		}
+		if strings.Contains(strings.ToUpper(step), "DNS") {
+			t.Fatalf("a DNS that came out ok must stay quiet, got %q", step)
+		}
+	}
+}
+
 func TestDoOnboardRejectsBadBoxID(t *testing.T) {
 	cfg := onboard.Config{BoxID: "Bad Box!"}
 	if err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {

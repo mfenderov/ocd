@@ -355,6 +355,22 @@ export function rotationPingText(id: string, now: number): string {
   return `🔑 <b>Admin token rotated</b> · <code>${escapeHtml(id)}</code> · ${when}`;
 }
 
+// The owner must hear about a DNS that could not be written: the box is
+// enrolled (the enrolment is the commit point) but its records are
+// missing, and only the owner can fix that.
+//
+// The reason never carries the credential — the DNS writer's errors name
+// the status and the API's code, never the token — and it comes from a
+// remote API, so it is escaped like every other value that reaches the
+// owner's chat.
+export function dnsFailureText(boxId: string, dns: string): string {
+  const reason = dns.startsWith("failed:") ? dns.slice("failed:".length).trim() : dns.trim();
+  return (
+    `🌐 <b>DNS needs you</b> · <code>${escapeHtml(boxId)}</code> enrolled, ` +
+    `but the brain could not write its DNS records: ${escapeHtml(reason)}`
+  );
+}
+
 // Owner ping, sent through the Telegram client — the one place that knows
 // the Bot API's shape. Bot token + owner chat id come from Worker env only
 // (see telegramNotifier). The contract is unchanged: the ping never throws,
@@ -501,7 +517,7 @@ export async function requestEnrollment(
       if (tunnelId !== known.tunnel_id) {
         store.putBox({ ...known, tunnel_id: tunnelId });
       }
-      return enrolledResult(config, store, body.id, false);
+      return enrolledResult(config, store, body.id, false, notify);
     }
     if (!config.sealKey) {
       throw new Error("enroll: seal key not configured");
@@ -513,7 +529,7 @@ export async function requestEnrollment(
       current = null; // unreadable binding counts as different: rotation heals it
     }
     if (current === body.admin_token) {
-      return enrolledResult(config, store, body.id, false);
+      return enrolledResult(config, store, body.id, false, notify);
     }
     const now = nowSec();
     store.putBox({
@@ -524,7 +540,7 @@ export async function requestEnrollment(
     // A rotation nobody hears about is a silent credential change: ping the
     // owner channel exactly like enrollment pings (id + time, never tokens).
     await notify(rotationPingText(body.id, now));
-    return enrolledResult(config, store, body.id, true);
+    return enrolledResult(config, store, body.id, true, notify);
   }
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
@@ -567,7 +583,7 @@ export async function requestEnrollment(
         tokenHash: pending.heartbeat_token_hash,
         hostname: pending.hostname,
       });
-      return enrolledResult(config, store, body.id, rotated);
+      return enrolledResult(config, store, body.id, rotated, notify);
     }
   }
   let sealed = "";
@@ -625,18 +641,19 @@ async function enrolledResult(
   store: EnrollStore,
   id: string,
   rotated: boolean,
+  notify: NotifyFn,
 ): Promise<EnrollResult> {
   return {
     status: "enrolled",
     id,
     rotated,
     trusted: true,
-    dns: await ensureDnsFor(config, store, id),
+    dns: await ensureDnsFor(config, store, id, notify),
   };
 }
 
 // The DNS the brain owns for one box, ensured right after the enrolment
-// committed it.
+// committed it, and the owner told when it failed.
 //
 // The enrolment is the commit point: the box row is already written and
 // nothing here rolls it back. Two ways to not write:
@@ -645,9 +662,33 @@ async function enrolledResult(
 //   - the brain cannot write (no credential, or the API refused) — the
 //     status is a failure that names the reason.
 //
+// A failure is told to the owner: the box's console is not the owner's
+// Telegram, and a box with no DNS resolves nothing while looking
+// perfectly healthy. A skip is not a failure — there was nothing to do —
+// and "ok" is not news. So exactly one message, and only for a failure.
+//
+// This is the one place every enrolment path goes through — the fast
+// path, the claim path and the approve tap all end here — so no path
+// can forget the report.
+async function ensureDnsFor(
+  config: EnrollConfig,
+  store: EnrollStore,
+  boxId: string,
+  notify: NotifyFn,
+): Promise<string> {
+  const dns = await writeBoxDns(config, store, boxId);
+  if (dns.startsWith("failed:")) {
+    await notify(dnsFailureText(boxId, dns));
+  }
+  return dns;
+}
+
+// The DNS the brain owns for one box, written. The status says what
+// happened: "ok", "skipped: <reason>" or "failed: <reason>".
+//
 // The box's own row is the truth: it holds the pinned tap hostname and
 // the tunnel id.
-async function ensureDnsFor(config: EnrollConfig, store: EnrollStore, boxId: string): Promise<string> {
+async function writeBoxDns(config: EnrollConfig, store: EnrollStore, boxId: string): Promise<string> {
   try {
     // Can this brain write DNS at all? A brain without the credential
     // says so on every enrolment instead of pretending it did.
@@ -914,8 +955,9 @@ export async function handleEnrollApprove(
       return Response.json({ error: "no_pending" }, { status: 404 });
     }
     // The approval is an enrolment too: the brain writes the box's DNS
-    // right after it commits the box row.
-    const dns = await ensureDnsFor(config, store, row.id);
+    // right after it commits the box row — and tells the owner when it
+    // could not.
+    const dns = await ensureDnsFor(config, store, row.id, notify);
     return Response.json({ status: "approved", id: row.id, enrolled: true, dns });
   } catch (err) {
     return forbiddenResponse(err) ?? Response.json({ error: "misconfigured" }, { status: 500 });
