@@ -30,19 +30,48 @@ const DefaultWorkerURL = "https://ocd-fleet.fenderovlol.workers.dev"
 // ValidateBoxID accepts worker-safe box ids: 1-32 chars, lowercase
 // alphanumerics and dashes, never leading or trailing with a dash.
 func ValidateBoxID(id string) error {
+	if err := checkBoxIDLength(id); err != nil {
+		return err
+	}
+	if err := checkBoxIDChars(id); err != nil {
+		return err
+	}
+	return checkBoxIDEdges(id)
+}
+
+// checkBoxIDLength refuses a box id the worker cannot hold.
+func checkBoxIDLength(id string) error {
 	if len(id) < 1 || len(id) > 32 {
 		return fmt.Errorf("onboard: box id must be 1-32 chars, got %d", len(id))
 	}
+	return nil
+}
+
+// checkBoxIDChars refuses a box id with a rune the worker cannot hold.
+func checkBoxIDChars(id string) error {
 	for _, r := range id {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+		if isBoxIDRune(r) {
 			continue
 		}
 		return fmt.Errorf("onboard: box id %q allows only a-z 0-9 -", id)
 	}
+	return nil
+}
+
+// checkBoxIDEdges refuses a box id that starts or ends with a dash.
+func checkBoxIDEdges(id string) error {
 	if strings.HasPrefix(id, "-") || strings.HasSuffix(id, "-") {
 		return fmt.Errorf("onboard: box id %q must not start or end with -", id)
 	}
 	return nil
+}
+
+// boxIDRunes are the runes a box id may hold besides digits.
+const boxIDRunes = "abcdefghijklmnopqrstuvwxyz0123456789-"
+
+// isBoxIDRune reports whether r may hold in a box id.
+func isBoxIDRune(r rune) bool {
+	return strings.ContainsRune(boxIDRunes, r)
 }
 
 // GenerateSecret mints one 32-byte random secret (base64, single line)
@@ -69,36 +98,11 @@ func DefaultEnvPath() (string, error) {
 // the file is created 0600 (parent 0700) when missing. Merging is never
 // destructive, so reruns are safe without a force flag.
 func WriteEnvFile(path string, vals map[string]string) error {
-	var lines []string
-	if raw, err := os.ReadFile(path); err == nil {
-		lines = strings.Split(string(raw), "\n")
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("onboard: read env: %w", err)
+	lines, err := envFileLines(path)
+	if err != nil {
+		return err
 	}
-	pending := map[string]string{}
-	for k, v := range vals {
-		pending[k] = v
-	}
-	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		for k := range pending {
-			if strings.HasPrefix(trimmed, k+"=") {
-				lines[i] = k + "=" + strconv.Quote(vals[k])
-				delete(pending, k)
-				break
-			}
-		}
-	}
-	if len(lines) == 0 {
-		lines = append(lines, "# OCD secrets. chmod 600. Sourced by scripts/boot.sh and serve.")
-	}
-	for _, k := range slices.Sorted(maps.Keys(pending)) {
-		lines = append(lines, k+"="+strconv.Quote(vals[k]))
-	}
-	out := strings.Join(lines, "\n")
-	if !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
+	out := renderEnvFile(mergeEnvValues(lines, vals))
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("onboard: mkdir: %w", err)
 	}
@@ -106,6 +110,72 @@ func WriteEnvFile(path string, vals map[string]string) error {
 		return fmt.Errorf("onboard: write env: %w", err)
 	}
 	return nil
+}
+
+// envFileLines are the lines the merge starts from: the file's own
+// lines, or none when the file does not exist yet.
+func envFileLines(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		return strings.Split(string(raw), "\n"), nil
+	}
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("onboard: read env: %w", err)
+}
+
+// mergeEnvValues writes the values into the lines that already hold them
+// and appends the values that had no line yet. The lines the file held
+// keep their comments, blank lines and unknown keys.
+func mergeEnvValues(lines []string, vals map[string]string) []string {
+	pending := map[string]string{}
+	for k, v := range vals {
+		pending[k] = v
+	}
+	for i, line := range lines {
+		k, ok := envKeyOf(line, pending)
+		if !ok {
+			continue
+		}
+		lines[i] = k + "=" + strconv.Quote(vals[k])
+		delete(pending, k)
+	}
+	return appendEnvLines(lines, pending, vals)
+}
+
+// envKeyOf names the key a line holds, when it holds one the merge
+// writes. A line holds at most one of them: the prefix ends in "=".
+func envKeyOf(line string, pending map[string]string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	for k := range pending {
+		if strings.HasPrefix(trimmed, k+"=") {
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// appendEnvLines appends the header of a new env file and the values
+// that had no line yet, in a stable order.
+func appendEnvLines(lines []string, pending map[string]string, vals map[string]string) []string {
+	if len(lines) == 0 {
+		lines = append(lines, "# OCD secrets. chmod 600. Sourced by scripts/boot.sh and serve.")
+	}
+	for _, k := range slices.Sorted(maps.Keys(pending)) {
+		lines = append(lines, k+"="+strconv.Quote(vals[k]))
+	}
+	return lines
+}
+
+// renderEnvFile joins the lines into the file's content: it always ends
+// in a newline.
+func renderEnvFile(lines []string) string {
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out
 }
 
 // WaitEnrolled heartbeats until the Worker replies enrolled:true (owner

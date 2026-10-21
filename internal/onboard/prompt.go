@@ -30,30 +30,56 @@ func EnrollCommand(boxID, code string) string {
 // code the caller already has is used as is; otherwise the user pastes
 // the one the bot issues.
 func ResolveEnroll(w io.Writer, givenBox, givenCode string) (boxID, code string, err error) {
-	boxID = strings.TrimSpace(givenBox)
-	if boxID == "" {
-		if !IsTTY() {
-			return "", "", fmt.Errorf("onboard: no box name — pass it as an argument: ocd onboard <name>")
-		}
-		boxID, err = AskBoxName()
-		if err != nil {
-			return "", "", err
-		}
-	} else if err := ValidateBoxID(boxID); err != nil {
+	boxID, err = resolveBoxID(givenBox)
+	if err != nil {
 		return "", "", err
 	}
-
-	code = strings.TrimSpace(givenCode)
-	if code == "" {
-		if !IsTTY() {
-			return "", "", fmt.Errorf("onboard: no enroll code — paste it, or pass it: ocd onboard <name> <code>")
-		}
-		code, err = AskEnrollCode(w, boxID)
-		if err != nil {
-			return "", "", err
-		}
+	code, err = resolveEnrollCode(w, boxID, givenCode)
+	if err != nil {
+		return "", "", err
 	}
 	return boxID, code, nil
+}
+
+// resolveBoxID is the name of this box: the caller's, or the one the
+// terminal asks for.
+func resolveBoxID(givenBox string) (string, error) {
+	boxID := strings.TrimSpace(givenBox)
+	if boxID == "" {
+		return askBoxID()
+	}
+	if err := ValidateBoxID(boxID); err != nil {
+		return "", err
+	}
+	return boxID, nil
+}
+
+// askBoxID asks the terminal for the name of this box. Without a
+// terminal there is nobody to ask.
+func askBoxID() (string, error) {
+	if !IsTTY() {
+		return "", fmt.Errorf("onboard: no box name — pass it as an argument: ocd onboard <name>")
+	}
+	return AskBoxName()
+}
+
+// resolveEnrollCode is the one-time enroll code: the caller's, or the
+// one the operator pastes.
+func resolveEnrollCode(w io.Writer, boxID, givenCode string) (string, error) {
+	code := strings.TrimSpace(givenCode)
+	if code != "" {
+		return code, nil
+	}
+	return askEnrollCode(w, boxID)
+}
+
+// askEnrollCode asks the operator for the code the bot issued. Without
+// a terminal there is nobody to paste it.
+func askEnrollCode(w io.Writer, boxID string) (string, error) {
+	if !IsTTY() {
+		return "", fmt.Errorf("onboard: no enroll code — paste it, or pass it: ocd onboard <name> <code>")
+	}
+	return AskEnrollCode(w, boxID)
 }
 
 // AskEnrollCode prints the Telegram command that issues the enroll code

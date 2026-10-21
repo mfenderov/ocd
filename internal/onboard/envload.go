@@ -69,14 +69,32 @@ func unquoteEnvValue(val string) string {
 	return val
 }
 
+// envKeyRunes are the runes an env key may hold besides digits.
+const envKeyRunes = "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// envKeyDigits are the digits an env key may hold, never the first one.
+const envKeyDigits = "0123456789"
+
+// validEnvKey reports whether a key may name an env value: letters, an
+// underscore, and digits after the first character.
 func validEnvKey(key string) bool {
+	if len(key) == 0 {
+		return false
+	}
 	for i, r := range key {
-		ok := r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9'
-		if !ok {
+		if !validEnvKeyRune(r, i) {
 			return false
 		}
 	}
-	return len(key) > 0
+	return true
+}
+
+// validEnvKeyRune reports whether r may hold at position i of an env key.
+func validEnvKeyRune(r rune, i int) bool {
+	if strings.ContainsRune(envKeyRunes, r) {
+		return true
+	}
+	return i > 0 && strings.ContainsRune(envKeyDigits, r)
 }
 
 // Identity is what a box is: its name and the URLs it serves. The URLs

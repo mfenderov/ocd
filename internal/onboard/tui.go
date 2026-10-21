@@ -105,18 +105,34 @@ func (m spinnerModel) Init() tea.Cmd { return m.spinner.Tick }
 func (m spinnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "esc" {
-			m.cancel()
-			return m, tea.Quit
-		}
+		return m.key(msg)
 	case statusMsg:
 		m.status = string(msg)
 	case doneMsg:
-		m.done = true
-		m.err = msg.err
-		m.res = msg.res
-		return m, tea.Quit
+		return m.finish(msg)
 	}
+	return m.spinnerUpdate(msg)
+}
+
+// key takes a key press: esc and ctrl+c abort the onboarding.
+func (m spinnerModel) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() != "ctrl+c" && msg.String() != "esc" {
+		return m.spinnerUpdate(msg)
+	}
+	m.cancel()
+	return m, tea.Quit
+}
+
+// finish takes the end of the onboarding.
+func (m spinnerModel) finish(msg doneMsg) (tea.Model, tea.Cmd) {
+	m.done = true
+	m.err = msg.err
+	m.res = msg.res
+	return m, tea.Quit
+}
+
+// spinnerUpdate lets the spinner tick.
+func (m spinnerModel) spinnerUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.spinner, cmd = m.spinner.Update(msg)
 	return m, cmd
@@ -132,13 +148,19 @@ func (m spinnerModel) View() string {
 // RunSpinner executes DoOnboard with live status, blocking until approval,
 // timeout, or abort. Returns the DoOnboard error, if any.
 func RunSpinner(ctx context.Context, cfg Config) (Result, error) {
+	return runSpinner(ctx, cfg, nil)
+}
+
+// runSpinner is the spinner. The program options are a seam: a test
+// drives the spinner without a terminal.
+func runSpinner(ctx context.Context, cfg Config, opts []tea.ProgramOption) (Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	p := tea.NewProgram(spinnerModel{
 		spinner: spinner.New(spinner.WithSpinner(spinner.Dot)),
 		status:  "starting…",
 		cancel:  cancel,
-	})
+	}, opts...)
 	go func() {
 		res, err := DoOnboard(ctx, cfg, func(s string) { p.Send(statusMsg(s)) })
 		p.Send(doneMsg{err: err, res: res})

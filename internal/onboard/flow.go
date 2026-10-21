@@ -87,14 +87,58 @@ func tapBase(host string) string {
 // progress (nil-safe); the caller renders them (spinner or plain prints).
 func DoOnboard(ctx context.Context, cfg Config, progress func(string)) (Result, error) {
 	var res Result
-	say := func(s string) {
+	say := notifier(progress)
+	if err := ValidateBoxID(cfg.BoxID); err != nil {
+		return res, err
+	}
+	cfg = onboardDefaults(cfg)
+	dbPath, err := onboardDBPath(cfg)
+	if err != nil {
+		return res, err
+	}
+	say("minting box secrets")
+	heartbeatToken, adminToken, err := onboardSecrets(cfg)
+	if err != nil {
+		return res, err
+	}
+	envVals := onboardEnvValues(cfg, dbPath, heartbeatToken, adminToken)
+	res.TunnelID, err = setupOnboardTunnel(ctx, cfg, envVals, say)
+	if err != nil {
+		return res, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	say("requesting enrollment")
+	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: res.TunnelID})
+	if err != nil {
+		return res, err
+	}
+	if err := awaitEnrollment(ctx, cfg, dbPath, client, heartbeatToken, outcome, say); err != nil {
+		return res, err
+	}
+	say("writing " + cfg.EnvPath)
+	if err := writeEnv(cfg, envVals); err != nil {
+		return res, err
+	}
+	// The box must run what was just written: the connector must load
+	// the new ingress rules, and the daemon the new env file. Both are
+	// the platform's own services to restart.
+	res.DaemonRunsTunnel = daemonManagesTunnel(cfg.EnvPath)
+	res.Restart = RestartBox(ctx, res.TunnelID, res.DaemonRunsTunnel)
+	return res, nil
+}
+
+// notifier is the progress reporter: nil-safe, so a caller that does not
+// want progress does not have to pass one.
+func notifier(progress func(string)) func(string) {
+	return func(s string) {
 		if progress != nil {
 			progress(s)
 		}
 	}
-	if err := ValidateBoxID(cfg.BoxID); err != nil {
-		return res, err
-	}
+}
+
+// onboardDefaults fills the blanks of the configuration.
+func onboardDefaults(cfg Config) Config {
 	if cfg.WorkerURL == "" {
 		cfg.WorkerURL = DefaultWorkerURL
 	}
@@ -104,30 +148,42 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) (Result, 
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 5 * time.Second
 	}
-	var err error
-	dbPath := cfg.DBPath
-	if dbPath == "" {
-		dbPath, err = DefaultDBPath()
-		if err != nil {
-			return res, err
-		}
+	return cfg
+}
+
+// onboardDBPath is the database the box keeps: the one the caller named,
+// else the default.
+func onboardDBPath(cfg Config) (string, error) {
+	if cfg.DBPath != "" {
+		return cfg.DBPath, nil
 	}
-	say("minting box secrets")
+	return DefaultDBPath()
+}
+
+// onboardSecrets mints the box's secrets: the heartbeat token (the code
+// the bot issued, when there is one) and the admin token.
+func onboardSecrets(cfg Config) (string, string, error) {
 	// The code the bot issued IS the box's heartbeat secret: the Worker
 	// binds the box to the token presented at enrollment, so anything
 	// else here would 401 on every heartbeat.
 	heartbeatToken := strings.TrimSpace(cfg.EnrollCode)
 	if heartbeatToken == "" {
-		heartbeatToken, err = GenerateSecret()
+		token, err := GenerateSecret()
 		if err != nil {
-			return res, err
+			return "", "", err
 		}
+		heartbeatToken = token
 	}
 	adminToken, err := GenerateSecret()
 	if err != nil {
-		return res, err
+		return "", "", err
 	}
-	envVals := map[string]string{
+	return heartbeatToken, adminToken, nil
+}
+
+// onboardEnvValues are the values the box's env file must hold.
+func onboardEnvValues(cfg Config, dbPath, heartbeatToken, adminToken string) map[string]string {
+	return map[string]string{
 		"OCD_BOX_ID": cfg.BoxID,
 		// Absolute paths: this file is read by shells AND by systemd's
 		// EnvironmentFile=, which does not expand $HOME.
@@ -145,67 +201,65 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) (Result, 
 		// without this the browser gets 401 and no link ever works.
 		"OCD_PAIR_OPEN": "1",
 	}
+}
+
+// setupOnboardTunnel provisions the box's tunnel and names the tunnel
+// the box serves.
+func setupOnboardTunnel(ctx context.Context, cfg Config, envVals map[string]string, say func(string)) (string, error) {
+	if cfg.Tunnel == nil {
+		return "", nil
+	}
 	// The tunnel id tells the brain which cloudflared tunnel this box
 	// uses, so the brain can own the box's DNS later. It stays empty
 	// when the box has no tunnel.
-	if cfg.Tunnel != nil {
-		say("setting up tunnel " + cfg.Tunnel.Name)
-		setup, err := SetupTunnel(ctx, *cfg.Tunnel, say)
-		if err != nil {
-			return res, err
-		}
-		res.TunnelID = setup.ID
-		if setup.Created {
-			// This run created the tunnel: nothing else owns it, so
-			// the daemon must run it. A run that reused the box's own
-			// tunnel leaves that decision to whatever already
-			// supervises it — and the env file keeps the key it had.
-			envVals["OCD_MANAGE_TUNNEL"] = "1"
-		}
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	say("requesting enrollment")
-	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: res.TunnelID})
+	say("setting up tunnel " + cfg.Tunnel.Name)
+	setup, err := SetupTunnel(ctx, *cfg.Tunnel, say)
 	if err != nil {
-		return res, err
+		return "", err
 	}
+	if setup.Created {
+		// This run created the tunnel: nothing else owns it, so
+		// the daemon must run it. A run that reused the box's own
+		// tunnel leaves that decision to whatever already
+		// supervises it — and the env file keeps the key it had.
+		envVals["OCD_MANAGE_TUNNEL"] = "1"
+	}
+	return setup.ID, nil
+}
+
+// awaitEnrollment waits for the owner's approval when the enrolment is
+// pending, and says what the brain did about the DNS.
+func awaitEnrollment(ctx context.Context, cfg Config, dbPath string, client *http.Client, heartbeatToken string, outcome boxagent.EnrollOutcome, say func(string)) error {
 	if outcome.Status == "enrolled" {
 		// The brain writes the box's DNS right after the enrolment
 		// commits. When it could not, the owner is looking at this
 		// terminal: say so, in the plan's words.
-		if line := dnsOutcome(outcome.DNS); line != "" {
-			say(line)
-		} else {
-			say("enrolled")
-		}
-	} else {
-		if strings.TrimSpace(cfg.EnrollCode) != "" {
-			return res, fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
-		}
-		// One line, one wait: the owner is told once that the approval
-		// is what the box is waiting for.
-		say("waiting for Telegram approval…")
-		st, err := store.Open(dbPath)
-		if err != nil {
-			return res, fmt.Errorf("onboard: open store: %w", err)
-		}
-		defer st.Close()
-		waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		defer cancel()
-		if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
-			return res, err
-		}
+		sayEnrollment(say, outcome.DNS)
+		return nil
 	}
-	say("writing " + cfg.EnvPath)
-	if err := writeEnv(cfg, envVals); err != nil {
-		return res, err
+	if strings.TrimSpace(cfg.EnrollCode) != "" {
+		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
 	}
-	// The box must run what was just written: the connector must load
-	// the new ingress rules, and the daemon the new env file. Both are
-	// the platform's own services to restart.
-	res.DaemonRunsTunnel = daemonManagesTunnel(cfg.EnvPath)
-	res.Restart = RestartBox(ctx, res.TunnelID, res.DaemonRunsTunnel)
-	return res, nil
+	// One line, one wait: the owner is told once that the approval
+	// is what the box is waiting for.
+	say("waiting for Telegram approval…")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("onboard: open store: %w", err)
+	}
+	defer st.Close()
+	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	return WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval)
+}
+
+// sayEnrollment says what the brain did about the box's DNS.
+func sayEnrollment(say func(string), dns string) {
+	if line := dnsOutcome(dns); line != "" {
+		say(line)
+		return
+	}
+	say("enrolled")
 }
 
 // daemonManagesTunnel says whether the daemon runs the connector: the
