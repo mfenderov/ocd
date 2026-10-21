@@ -165,13 +165,14 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	if strings.TrimSpace(cfg.EnrollCode) != "" {
 		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
 	}
+	// One line, one wait: the owner is told once that the approval is
+	// what the box is waiting for.
 	say("waiting for Telegram approval…")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("onboard: open store: %w", err)
 	}
 	defer st.Close()
-	say("waiting for Telegram approval…")
 	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
@@ -188,18 +189,23 @@ func writeEnv(cfg Config, envVals map[string]string) error {
 	return WriteEnvFile(cfg.EnvPath, envVals)
 }
 
-// dnsOutcome is the line the owner reads when the brain did not write
-// the box's DNS records. Empty when it did: the owner is at the
-// terminal pasting the command, so this is where a failure belongs — and
-// a success is not news.
+// dnsOutcome is the line the owner reads about the DNS the brain wrote
+// (or did not). Empty when it did: the owner is at the terminal pasting
+// the command, so this is where a failure belongs — and a success is
+// not news.
 //
 // The brain's own status is carried as it stands ("failed: …",
-// "skipped: …"): the difference between a breakage and nothing to do
-// matters to whoever reads this.
+// "skipped: …"), and the wording says what the status means: a failure
+// is a breakage and only the owner can fix it, a skip is "there was
+// nothing to do" — the brain wrote no DNS, and the owner is not the one
+// needed.
 func dnsOutcome(dns string) string {
 	dns = strings.TrimSpace(dns)
 	if dns == "" || dns == "ok" {
 		return ""
+	}
+	if strings.HasPrefix(dns, "skipped:") {
+		return "enrolled, but the brain wrote no DNS: " + dns
 	}
 	return "enrolled, but the DNS needs you: " + dns
 }

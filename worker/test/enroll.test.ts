@@ -5,6 +5,7 @@ import {
   approveEnrollment,
   capBinding,
   denyEnrollment,
+  dnsFailureText,
   handleEnrollApprove,
   handleEnrollDeny,
   handleEnrollRequest,
@@ -376,6 +377,15 @@ describe("ping bodies are short HTML, never raw URLs", () => {
     const text = rotationPingText("pretty-1", 1700000000);
     expect(text).toContain("pretty-1");
     expect(text).not.toContain("sig=");
+  });
+
+  it("the DNS failure escapes the reason: it can carry the box's hostname", () => {
+    const text = dnsFailureText("pretty-1", 'failed: the box\'s hostname "a<b&c" names no domain');
+    expect(text).toContain("&lt;");
+    expect(text).toContain("&amp;");
+    // The raw markup is gone: Telegram parses these messages as HTML, and
+    // one unescaped "<" makes it refuse the whole message.
+    expect(text).not.toContain("a<b&c");
   });
 });
 
@@ -1820,5 +1830,33 @@ describe("the DNS failure reaches the owner", () => {
     const body = (await res.json()) as EnrolResponse;
     expect(body.dns).toMatch(/^skipped:/);
     expect(rec.texts).toHaveLength(0);
+  });
+
+  it("a notifier that throws does not fail the enrolment", async () => {
+    const store = new MemStore();
+    const box = await seedEnrolled(store, "own-6");
+    store.putBox({ ...box, hostname: "oc-tap-own-6.buyallmemes.com", tunnel_id: "tun-own-6" });
+
+    const res = await handleEnrollRequest(
+      jsonRequest("/enroll", {
+        id: "own-6",
+        hostname: "oc-tap-own-6.buyallmemes.com",
+        enroll_token: KNOWN_TOKEN,
+      }),
+      store,
+      async () => {
+        throw new Error("the notifier is broken");
+      },
+      () => NOW,
+      configWith(refusingFetcher()),
+    );
+    // The enrolment is committed: the answer says so and the box row is
+    // there. A notifier that throws must not turn a box that is enrolled
+    // into a 500 — the box would report a failure for an enrolment that
+    // succeeded, and would not write its env file.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as EnrolResponse;
+    expect(body.dns).toMatch(/^failed:/);
+    expect(store.getBox("own-6")?.enrolled).toBe(1);
   });
 });

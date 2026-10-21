@@ -21,9 +21,9 @@
 #     scripts/brain-webhook.sh
 #
 # Exits non-zero when an input is missing or when Telegram refuses the
-# webhook. A webhook that was not registered is a silent outage: the next
-# step of the cutover would look like it worked while the bot is still on
-# the old box.
+# webhook. A webhook that was not registered is a silent outage: Telegram
+# keeps delivering to whatever it had, and the brain never hears the
+# owner.
 set -euo pipefail
 
 : "${BRAIN_URL:?BRAIN_URL is required: the public origin of the brain}"

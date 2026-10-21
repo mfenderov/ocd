@@ -218,6 +218,41 @@ func TestDoOnboardSaysNothingWhenTheDNSCameOutOk(t *testing.T) {
 	}
 }
 
+// A skip is "there was nothing to do": the brain had no tunnel to point
+// at. The brain says nothing about it to the owner, so the box must not
+// claim the opposite — the owner is not needed for a skip, and the line
+// must say what happened instead.
+func TestDoOnboardSaysTheBrainWroteNoDNSForASkip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"skipped: no tunnel id recorded for mac — re-enrol to bind one"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	joined := strings.Join(steps, "\n")
+	// The brain wrote no DNS, and the line says so.
+	if !strings.Contains(joined, "the brain wrote no DNS") {
+		t.Fatalf("a skip must say the brain wrote no DNS, got:\n%s", joined)
+	}
+	// A skip is not a breakage: the owner is not the one needed here.
+	if strings.Contains(joined, "the DNS needs you") {
+		t.Fatalf("a skip must not claim the owner is needed, got:\n%s", joined)
+	}
+	// The brain's own reason rides along.
+	if !strings.Contains(joined, "no tunnel id recorded for mac") {
+		t.Fatalf("the skip must carry the brain's reason, got:\n%s", joined)
+	}
+}
+
 func TestDoOnboardRejectsBadBoxID(t *testing.T) {
 	cfg := onboard.Config{BoxID: "Bad Box!"}
 	if err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {

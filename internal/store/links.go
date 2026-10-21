@@ -260,10 +260,13 @@ func (s *Store) WatermarkAnchor() (AuditAnchor, bool, error) {
 	return anchor, true, nil
 }
 
-// AuditRowMatches reports whether the row with the given rowid still
+// auditRowMatches reports whether the row with the given rowid still
 // carries the given content. False when the row is gone: the trail lost
 // it, or it was reset and a different row took its place.
-func (s *Store) AuditRowMatches(rowid int64, anchor AuditAnchor) (bool, error) {
+//
+// It is unexported on purpose: the store's callers ask the question
+// through AuditWatermarkStale, which is the answer they want.
+func (s *Store) auditRowMatches(rowid int64, anchor AuditAnchor) (bool, error) {
 	at, action, found, err := s.auditRowContent(rowid)
 	if err != nil || !found {
 		return false, err
@@ -289,8 +292,12 @@ func (s *Store) auditRowContent(rowid int64) (int64, string, bool, error) {
 // LastAuditRowID returns the rowid of the newest row in the audit
 // trail, 0 when the trail is empty.
 //
-// A watermark past it is stale: the trail was reset and its rowids
-// started over, so the watermark points past every row that follows.
+// It is what the fallback check asks (see AuditWatermarkStale): for a
+// database with no anchor, a watermark past the trail's newest row is
+// stale, because the trail lost the row the watermark names — the old
+// rows were pruned, or the trail was reset and its rowids started over.
+// A database with an anchor does not come here: the anchor names the
+// row itself, which is the stronger question.
 func (s *Store) LastAuditRowID() (int64, error) {
 	var v int64
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM audit`).Scan(&v); err != nil {
@@ -309,10 +316,19 @@ func (s *Store) LastAuditRowID() (int64, error) {
 // watermark is stale when the row is gone or is not the row the brain
 // saw.
 //
+// The anchor names the row at the watermark's own position. It says
+// nothing about the rows before it: a trail that was refilled with rows
+// that happen to reproduce the anchor's (at, action) at the watermark's
+// rowid keeps those earlier rows unpushed. That needs the same second
+// and the same action at exactly that rowid, so the hole is narrow —
+// but it is there.
+//
 // A watermark with no anchor (a trail reported before the anchor
 // existed) falls back to the numeric check: a watermark past the trail's
 // last rowid is stale. That is the check that was there before, so an
-// old database neither repairs itself nor loses a row.
+// old database is no worse off than it was: it keeps the old check
+// until its next successful push writes the anchor, and from then on
+// the anchor decides.
 func (s *Store) AuditWatermarkStale() (bool, error) {
 	rowid, err := s.AuditWatermark()
 	if err != nil {
@@ -336,7 +352,7 @@ func (s *Store) AuditWatermarkStale() (bool, error) {
 		}
 		return rowid > last, nil
 	}
-	same, err := s.AuditRowMatches(rowid, anchor)
+	same, err := s.auditRowMatches(rowid, anchor)
 	if err != nil {
 		return false, err
 	}
@@ -351,7 +367,8 @@ func (s *Store) AuditWatermarkStale() (bool, error) {
 //
 // The row's own content is stored next to it: the anchor that says "the
 // row this watermark points at is still the row the brain has" (see
-// AuditWatermarkStale). Both move in one statement, or not at all.
+// AuditWatermarkStale, and the hole that check leaves). Both move in
+// one statement, or not at all.
 //
 // The sweep writes it only after a successful push: a failed push leaves
 // the watermark where it was, so the next sweep offers the same rows

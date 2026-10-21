@@ -154,12 +154,13 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 // auditPushFrom returns the rowid the audit push continues after.
 //
 // The watermark is the rowid of the last audit row the brain has. It is
-// stale when the row it points at is gone, or is not the row the brain
-// saw: the trail was reset and refilled, its rowids started over, and
-// the rows in between would be lost for good. The watermark is repaired
-// then — it goes back to the start of the trail — and the trail's rows
-// are offered again. The brain's dedup collapses the rows it already
-// has.
+// stale when the row it points at is gone — the trail was pruned, or it
+// was reset and its rowids started over — or is not the row the brain
+// saw: a trail that was reset and refilled hands the same rowid to a
+// different row, and the rows in between would be lost for good. The
+// watermark is repaired then — it goes back to the start of the trail —
+// and the trail's rows are offered again. The brain's dedup collapses
+// the rows it already has.
 func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
 	watermark, err := st.AuditWatermark()
 	if err != nil {
@@ -172,7 +173,11 @@ func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
 	if !stale {
 		return watermark, nil
 	}
-	_, _ = fmt.Fprintln(w, "audit trail was reset: the watermark is repaired")
+	// The trail lost the row the watermark names, whatever the cause: the
+	// old rows were pruned, or the trail was reset. The line says that,
+	// and not "reset" — a prune is not a reset, and the operator reads
+	// this line.
+	_, _ = fmt.Fprintln(w, "audit trail lost the brain's last row: the watermark is repaired")
 	if err := st.RepairAuditWatermark(); err != nil {
 		return 0, err
 	}

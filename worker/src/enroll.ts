@@ -678,9 +678,27 @@ async function ensureDnsFor(
 ): Promise<string> {
   const dns = await writeBoxDns(config, store, boxId);
   if (dns.startsWith("failed:")) {
-    await notify(dnsFailureText(boxId, dns));
+    await reportDnsFailure(boxId, dns, notify);
   }
   return dns;
+}
+
+// The owner is told about the DNS that could not be written, and the
+// report can never fail the enrolment.
+//
+// The enrolment is already committed: the box row is written and nothing
+// here rolls it back. A notifier that throws would escape into the
+// enrolment's own handler and turn a box that is enrolled into a 500 —
+// the box would report a failure for an enrolment that succeeded, and
+// would not write its env file. So the report is guarded: it fails
+// alone, and the reason goes to the log.
+async function reportDnsFailure(boxId: string, dns: string, notify: NotifyFn): Promise<void> {
+  try {
+    await notify(dnsFailureText(boxId, dns));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`enroll: the DNS failure was not reported (${reason})`);
+  }
 }
 
 // The DNS the brain owns for one box, written. The status says what
