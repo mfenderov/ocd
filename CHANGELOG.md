@@ -2,6 +2,20 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.21.0 - 2026-10-21
+#### Features
+- (**box**) the tunnel config serves the old names and the new ones - (6ed8c87) - mfenderov
+- the home box serves the names every box follows - (da44862) - mfenderov
+#### Bug Fixes
+- (**box**) the tunnel and the daemon come back with what the onboarding wrote - (1f6fb9b) - mfenderov
+- (**box**) the box's own tunnel is the one it serves - (18ca3d9) - mfenderov
+- (**box**) the repair prefers the box's own name - (77a763c) - mfenderov
+- (**box**) the merge never drops what it cannot reproduce - (6a7394f) - mfenderov
+#### Miscellaneous Chores
+- (**box**) the tunnel runs by its id, and the docs name the new hosts - (7d13606) - mfenderov
+
+- - -
+
 ## v0.20.0 - 2026-10-21
 #### Features
 - (**box**) the sweep pushes audit rows, newest-watermark first - (c0b516d) - mfenderov
