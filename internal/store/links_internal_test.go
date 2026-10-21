@@ -173,6 +173,43 @@ func TestDeleteLinkTokensOnlyTheBrains(t *testing.T) {
 	}
 }
 
+// The watermark is a rowid of the trail, and the trail never gives its
+// rowids back: the prune keeps the newest row (it was written a moment
+// ago), so the trail is never empty and the rowids never repeat. The
+// watermark therefore always points at a rowid the trail still knows, and
+// a stale watermark — one past the trail's last row — cannot happen.
+func TestPruneKeepsTheNewestRow(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// An old trail: rows written 100 days ago.
+	for i := 0; i < 3; i++ {
+		if _, err := st.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now')-100*86400,'web:1.2.3.4','tapped','mac','1.2.3.4','ok','')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A fresh write, then the prune that write triggers.
+	fresh := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.prune()
+
+	rows, err := st.RecentAuditSince(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want the newest row kept by the prune, got %d rows", len(rows))
+	}
+	if rows[0].RowID != fresh {
+		t.Fatalf("want the newest row %d kept, got %d", fresh, rows[0].RowID)
+	}
+	if rows[0].RowID <= 3 {
+		t.Fatalf("want the rowids to move on, got %d", rows[0].RowID)
+	}
+}
+
 func countLinkTokens(t *testing.T, st *Store, tok string) int {
 	t.Helper()
 	var n int
