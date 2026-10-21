@@ -21,6 +21,14 @@ jobs:
         with:
           version: v2.15.0
           args: ./cmd/... ./internal/...
+      # The CRAP bar: no function may combine many paths with little
+      # testing. CRAP is never below the complexity, so this is mostly a
+      # statement about how big a function may be.
+      - name: the CRAP bar
+        run: |
+          go install github.com/mfenderov/gocrap@latest
+          go test -coverprofile=coverage.out ./...
+          gocrap -c coverage.out -max 10 -exclude "*_test.go"
 
   worker:
     runs-on: ubuntu-latest
@@ -35,8 +43,32 @@ jobs:
           cache: npm
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
-      - run: npx tsc --noEmit
+      - run: npm run typecheck
       - run: npm test
+      # The brain's own CRAP bar, with the TypeScript twin of gocrap.
+      - name: the CRAP bar
+        run: |
+          npm run coverage
+          npm run crap -- -c coverage/coverage-final.json -max 10
+
+  tools:
+    name: the tools (the CRAP tool measures itself)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - run: npm run test:tools
+      # The tool that applies the bar is held to the bar.
+      - name: the tool measures itself
+        run: npm run crap:self
 
   secrets:
     runs-on: ubuntu-latest
@@ -48,7 +80,7 @@ jobs:
 
   bump:
     name: bump version and trigger release
-    needs: [go, worker, secrets]
+    needs: [go, worker, tools, secrets]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
