@@ -17,7 +17,7 @@ flowchart TB
 
   subgraph MAC["💻 Mac box"]
     MD["ocd serve :49400<br/>◾ /pair · /_oc/*<br/>◾ no bot — the brain owns Telegram"]
-    ME["opencode :31047"]
+    ME["opencode :49374<br/>the editor UI"]
   end
 
   subgraph CF["☁️ Cloudflare"]
@@ -73,7 +73,7 @@ sequenceDiagram
   participant O as OpenCode (editor)
 
   Y->>B: /link  (or /flink mac)
-  B->>W: mint a link for that box
+  B->>W: mint a link for that box (in-process: the bot and the brain are one process)
   W->>X: POST /_oc/mint  (admin token, sealed)
   X-->>W: tap token
   W-->>B: https://oc-tap-<box>/pair?t=…
@@ -283,6 +283,28 @@ it writes "✅ logged in" on the owner's own message. A code the box
 minted on its own (its own `/login` links) is not kept by the brain: it
 ignores events about links it never handed out.
 
+**The two audit readers, and what each one says**
+
+- The **console** (`GET /api/audit` on the Worker) fans out to the live
+  boxes and computes `tainted` at read time: every row of a revoked box
+  reads as tainted.
+- The **brain** (`/faudit`) answers from its own `audit_log` and marks
+  `tainted` at ingest time: only the rows that were pushed while the
+  box's revoke was pending.
+
+So the same event reads "revoke pending" in one tool and not in the
+other. The brain's rule is the intended one, and the console's answer
+shape is a contract the Go client depends on — so the divergence stays
+and is written down here instead of being papered over.
+
+The other difference: the console's fan-out used to leave a per-box
+error marker for a box it could not read, so a gap in the history was
+visibly a gap. The brain's reader has no such marker, so **a lost batch
+and "nothing happened" look the same**. That is the price of a history
+that survives an offline box, and it is why the box's push keeps a
+fingerprint of the row its watermark points at: a trail that was reset
+is repaired and offered again instead of silently swallowing rows.
+
 ## 5. Hostnames and ports
 
 | Host | Points at | Purpose |
@@ -291,19 +313,32 @@ ignores events about links it never handed out.
 | `oc-<box>.buyallmemes.com` | opencode `:49374` | the editor UI (the session) |
 | `ocd-fleet.fenderovlol.workers.dev` | Worker | fleet API (`/api/*`) |
 
-**The brain owns the DNS.** After a successful enrolment it creates (or
-moves) the box's two CNAMEs — `oc-<box>` and `oc-tap-<box>` — pointing
-at the tunnel id the box reported, `proxied: true`. The write is
-idempotent: a box that re-enrols with a new tunnel id gets its records
-moved, not duplicated. The box's own `ocd onboard` routes the same names
-at tunnel-setup time (`cloudflared tunnel route dns`); the brain's write
-is the owner of record.
+**The brain owns the DNS — for the boxes it enrols.** After a successful
+enrolment it creates (or moves) the box's two CNAMEs — `oc-<box>` and
+`oc-tap-<box>` — pointing at the tunnel id the box reported, `proxied:
+true`. The write is idempotent: a box that re-enrols with a new tunnel
+id gets its records moved, not duplicated. The box's own `ocd onboard`
+routes the same names at tunnel-setup time (`cloudflared tunnel route
+dns`).
 
-The primary box does not follow the `oc-<box>` convention: its real
-names are `oc.buyallmemes.com` and `oc-tap.buyallmemes.com`. On the box
-itself the tunnel config (`~/.cloudflared/config.yml`) is the source of
-truth for the hostnames it serves — `ocd repair` reads hostnames from
-there and only fixes ports. The records themselves belong to the brain.
+Two limits worth knowing, because the brain is not the writer of record
+for every box yet:
+
+- It writes DNS only inside the enrolment, and only for a box that named
+  its tunnel. A box that enrolled before the brain knew about tunnels
+  carries no tunnel id, so the brain skips it and says so (`skipped: no
+  tunnel id recorded for <box> — re-enrol to bind one`). The records
+  `cloudflared` wrote are the ones in the zone.
+- The UI name it derives is `oc-<box>` — the box's own convention. The
+  primary box does not follow that convention: its real names are
+  `oc.buyallmemes.com` and `oc-tap.buyallmemes.com`. On the box itself
+  the tunnel config (`~/.cloudflared/config.yml`) is the source of truth
+  for the hostnames it serves — `ocd repair` reads hostnames from there
+  and only fixes ports. The primary box keeps the records it was given
+  until it re-enrols; the naming migration (the tunnel becomes `oc-home`
+  and serves the old and the new names together) is a later phase, and
+  until then the brain's `oc-home` name would point at a name the
+  primary box's tunnel does not serve.
 
 ## 6. Who holds which secret
 
@@ -318,7 +353,7 @@ there and only fixes ports. The records themselves belong to the brain.
 | owner chat id | Worker env `TELEGRAM_OWNER_CHAT_ID` | the only chat the bot talks to |
 | Cloudflare DNS token | Worker secret `CLOUDFLARE_DNS_TOKEN` | the brain writing the zone's DNS (edit on `buyallmemes.com` only) |
 | Cloudflare zone id | `worker/wrangler.toml` `[vars]` | which zone the brain writes |
-| tap code | generated by the box, shown in Telegram | one session, one use, 15 min |
+| tap code | generated by the box, shown in Telegram | one session, one use, 10 min |
 
 ## 7. Related documents
 

@@ -16,7 +16,7 @@ if [ -f "$HOME/.ocd/env" ]; then
   # shellcheck disable=SC1091
   set -a; . "$HOME/.ocd/env"; set +a || log WARN "env file failed to source, continuing with defaults"
 else
-  log WARN "no ~/.ocd/env, the daemon starts with defaults (heartbeat off)"
+  log WARN "no ~/.ocd/env, the daemon starts with defaults (default database, admin off, heartbeat off)"
 fi
 
 log BOOT "=== boot start ==="
@@ -44,8 +44,10 @@ fi
 
 # Stage 3: dispenser daemon. The binary is the only thing it needs: the
 # DB path defaults to ~/.ocd/ocd.db, and the brain is optional — without
-# OCD_WORKER_URL the daemon still serves /pair (and /_oc/* when the
-# admin token is set) and logs "heartbeat off".
+# OCD_WORKER_URL the daemon still serves /pair and /healthz (and /_oc/*
+# when the admin token is set) and logs "heartbeat off". The tap
+# endpoint is not open for the world: /pair needs OCD_PAIR_OPEN=1 or a
+# Cloudflare Access JWT, or the browser gets 401 and no link ever works.
 if [ ! -x "$HOME/.local/bin/ocd" ]; then
   log FAIL "daemon skipped: ~/.local/bin/ocd missing"
 elif pgrep -f "ocd serve" >/dev/null 2>&1; then

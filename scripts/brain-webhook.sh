@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # The cutover: hand Telegram to the brain.
 #
-# Telegram keeps ONE webhook per bot and the last writer wins. The home box
-# registers its own webhook on every `ocd serve` start, so the brain has to
-# take the webhook over once, deliberately, after the box has stopped
-# competing. Nothing does it for us: not the release workflow, not the
-# alarm. This script is that one step.
+# Telegram keeps ONE webhook per bot and the last writer wins. The Go bot
+# that used to live on the home box is gone, so nothing competes with the
+# brain any more — the brain has to take the webhook over once, by hand,
+# and nothing does it for us: not the release workflow, not the alarm.
+# This script is that one step.
 #
 # Inputs, from the environment:
 #   BRAIN_URL                the public origin of the brain, e.g. https://brain.example.com
-#   TELEGRAM_BOT_TOKEN       the bot token (the one still in ~/.ocd/env)
+#   TELEGRAM_BOT_TOKEN       the bot token — a Worker secret now, not a key in ~/.ocd/env
 #   TELEGRAM_WEBHOOK_SECRET  the webhook secret of the brain. Telegram sends
 #                            it back as X-Telegram-Bot-Api-Secret-Token on
 #                            every update, and the brain checks it there.
@@ -72,7 +72,7 @@ ok_pattern='^\{"ok"[[:space:]]*:[[:space:]]*true'
 if [ "$status" != "200" ] || ! [[ "$body" =~ $ok_pattern ]]; then
   echo "brain-webhook: Telegram refused the webhook (HTTP $status)" >&2
   echo "brain-webhook: $body" >&2
-  echo "brain-webhook: the brain did not take Telegram. The bot is still on the old box." >&2
+  echo "brain-webhook: the brain did not take Telegram. The bot is not answering." >&2
   exit 1
 fi
 

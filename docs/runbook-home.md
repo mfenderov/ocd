@@ -44,8 +44,20 @@ here.
 - `/link` in the bot DM → buttons per box → tap one → you're in that
   machine's editor. `/login` = this box only.
 - `/fleet`, `/flink <box>`, `/frevoke <box> YES`, `/fnuke YES`, `/faudit`.
-- `/fnuke YES` revokes every box: every session dies and every box
-  re-enrols (then `/login` fresh).
+- `/fnuke YES` revokes every box: every session dies, and each box is
+  tombstoned until it comes back with a higher epoch. Until then the
+  mint relay answers 409 `tainted` and the bot says "⚠️ Link failed".
+  The answer names the outcome per box: `revoked` (it was online — it
+  rotated its own epoch during the revoke, so its next heartbeat heals
+  it) or `tombstoned` (it was offline, so it never got the revoke: it
+  keeps its old epoch and stays unable to mint until it is back and a
+  revoke reaches it again).
+- `/revoke YES` is gone. It was the Go bot's *local* kill — this box's
+  sessions only, nothing fleet-wide. `/fnuke YES` is the fleet-wide
+  equivalent, and it means something else: it tombstones every box, not
+  just this one. The brain answers an unknown command with silence, so
+  an owner's muscle-memory `/revoke YES` gets no reply at all — use
+  `/frevoke <box> YES` for one box.
 
 ## It broke: in order
 
