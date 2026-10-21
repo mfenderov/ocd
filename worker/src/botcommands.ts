@@ -523,9 +523,11 @@ function enrollCodeText(box: string, command: string): string {
 
 // The status, the Go bot's /status answer. The box reports one line, so
 // the brain relays that line instead of splitting it into fields it
-// would have to parse.
+// would have to parse. The line is trimmed here: the box's status ends
+// in a newline, and a newline inside the <code> block ends the block —
+// the closing tag would land in the owner's chat as plain text.
 function statusText(status: string): string {
-  return `📊 <b>Status</b>\n• <code>${escapeHtml(status)}</code>`;
+  return `📊 <b>Status</b>\n• <code>${escapeHtml(status.trim())}</code>`;
 }
 
 // The message of a failure, whatever shape it came in.

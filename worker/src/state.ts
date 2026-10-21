@@ -45,6 +45,9 @@ export interface BoxRow {
   heartbeat_token_hash: string;
   admin_token_hash: string;
   admin_token_sealed: string;
+  // tunnel_id is the box's cloudflared tunnel id, empty when the box has
+  // no tunnel. Phase 2 creates the box's DNS records from it.
+  tunnel_id: string;
   epoch: number;
   last_seq: number;
   last_ts: number;
@@ -89,6 +92,9 @@ CREATE TABLE IF NOT EXISTS boxes(
   heartbeat_token_hash TEXT NOT NULL,
   admin_token_hash TEXT NOT NULL,
   admin_token_sealed TEXT NOT NULL DEFAULT '',
+  -- The box's cloudflared tunnel id, empty when the box has no tunnel.
+  -- Phase 2 writes the box's DNS records from it.
+  tunnel_id TEXT NOT NULL DEFAULT '',
   epoch INTEGER NOT NULL DEFAULT 0,
   last_seq INTEGER NOT NULL DEFAULT 0,
   last_ts INTEGER NOT NULL DEFAULT 0,
@@ -104,6 +110,9 @@ CREATE TABLE IF NOT EXISTS pending(
   hostname TEXT NOT NULL,
   heartbeat_token_hash TEXT NOT NULL,
   admin_token_sealed TEXT NOT NULL DEFAULT '',
+  -- The tunnel id the box named. The claim path builds the box row out
+  -- of the pending row, so the id must live here too.
+  tunnel_id TEXT NOT NULL DEFAULT '',
   first_seen INTEGER NOT NULL DEFAULT 0,
   trusted INTEGER NOT NULL DEFAULT 0
 );
@@ -154,11 +163,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS audit_log_key ON audit_log(box_id, at, action,
 `;
 
 const COLUMNS =
-  "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, epoch, last_seq, last_ts, last_seen, enrolled";
+  "id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, tunnel_id, epoch, last_seq, last_ts, last_seen, enrolled";
 
 const PUBLIC_COLUMNS = "id, hostname, epoch, last_seq, last_ts, last_seen, enrolled";
 
-const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen, trusted";
+const PENDING_COLUMNS = "id, hostname, heartbeat_token_hash, admin_token_sealed, tunnel_id, first_seen, trusted";
 
 // Subset of Worker env the DO reads. workerd passes env as the second
 // constructor arg; missing values degrade to loud 500s / dropped pings,
@@ -314,7 +323,7 @@ export class FleetState implements DurableObject {
     const res = await handleMintLink(boxId, null, this, { sealKey: this.sealKey });
     const body = await res.text();
     if (res.status !== 200) {
-      throw new Error(`mint failed (${res.status}): ${body.slice(0, 200)}`);
+      throw new Error(relayFailure("mint failed", res.status, body));
     }
     const url = body.trim();
     if (!url) {
@@ -365,7 +374,7 @@ export class FleetState implements DurableObject {
     });
     const body = await res.text();
     if (res.status !== 200) {
-      throw new Error(`enroll failed (${res.status}): ${body.slice(0, 200)}`);
+      throw new Error(relayFailure("enroll failed", res.status, body));
     }
     return { code, command: `ocd onboard ${boxId} ${code}` };
   }
@@ -458,6 +467,9 @@ export class FleetState implements DurableObject {
     if (!boxCols.some((c) => c.name === "suspected_offline")) {
       this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0");
     }
+    if (!boxCols.some((c) => c.name === "tunnel_id")) {
+      this.state.storage.sql.exec("ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
+    }
     const pendingCols = this.state.storage.sql.exec("PRAGMA table_info(pending)").toArray() as Array<{
       name: string;
     }>;
@@ -466,6 +478,9 @@ export class FleetState implements DurableObject {
     }
     if (!pendingCols.some((c) => c.name === "trusted")) {
       this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!pendingCols.some((c) => c.name === "tunnel_id")) {
+      this.state.storage.sql.exec("ALTER TABLE pending ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''");
     }
     // CLI tokens (Task 1): PRAGMA-gated like the column migrations above —
     // a missing table reads as zero columns, so fresh and existing DBs
@@ -518,12 +533,13 @@ export class FleetState implements DurableObject {
     // rewrites the box's own fields and must leave the mark alone: only
     // the sweep clears it.
     this.state.storage.sql.exec(
-      "INSERT INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, epoch, last_seq, last_ts, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET hostname = excluded.hostname, heartbeat_token_hash = excluded.heartbeat_token_hash, admin_token_hash = excluded.admin_token_hash, admin_token_sealed = excluded.admin_token_sealed, epoch = excluded.epoch, last_seq = excluded.last_seq, last_ts = excluded.last_ts, last_seen = excluded.last_seen, enrolled = excluded.enrolled",
+      "INSERT INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, tunnel_id, epoch, last_seq, last_ts, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET hostname = excluded.hostname, heartbeat_token_hash = excluded.heartbeat_token_hash, admin_token_hash = excluded.admin_token_hash, admin_token_sealed = excluded.admin_token_sealed, tunnel_id = excluded.tunnel_id, epoch = excluded.epoch, last_seq = excluded.last_seq, last_ts = excluded.last_ts, last_seen = excluded.last_seen, enrolled = excluded.enrolled",
       box.id,
       box.hostname,
       box.heartbeat_token_hash,
       box.admin_token_hash,
       box.admin_token_sealed,
+      box.tunnel_id,
       box.epoch,
       box.last_seq,
       box.last_ts,
@@ -573,11 +589,12 @@ export class FleetState implements DurableObject {
   putPending(row: PendingRow): void {
     this.ensureSchema();
     this.state.storage.sql.exec(
-      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, admin_token_sealed, first_seen, trusted) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO pending (id, hostname, heartbeat_token_hash, admin_token_sealed, tunnel_id, first_seen, trusted) VALUES (?, ?, ?, ?, ?, ?, ?)",
       row.id,
       row.hostname,
       row.heartbeat_token_hash,
       row.admin_token_sealed,
+      row.tunnel_id,
       row.first_seen,
       row.trusted,
     );
@@ -861,16 +878,28 @@ export class FleetState implements DurableObject {
     }
   }
 
-  // The alarm's work.
+  // The alarm's work. Every step gets its own boundary: a step that
+  // throws must not skip the steps behind it — a broken owed-edit sweep
+  // must not cost the fleet its liveness tick.
   private async runAlarmWork(deps: AlarmDeps): Promise<void> {
     // The prune first: it is the cheapest work and the one that must
     // not be skipped. The tables grow without it, and a later step that
     // throws must not keep them from shrinking.
-    this.pruneOldRows(deps.nowSec(), PRUNE_AFTER_SEC);
+    await this.alarmStep("the prune", () => this.pruneOldRows(deps.nowSec(), PRUNE_AFTER_SEC));
     // The owed edits: a link whose message still says "tap me" is the
     // most visible thing the brain owes the owner.
-    await sweepOwedEdits(this, { telegram: deps.telegram });
-    await this.runLivenessSweep(deps);
+    await this.alarmStep("the owed edits", () => sweepOwedEdits(this, { telegram: deps.telegram }));
+    await this.alarmStep("the liveness sweep", () => this.runLivenessSweep(deps));
+  }
+
+  // One step of the alarm, in its own boundary: a step that throws is
+  // logged, and the tick goes on to the next step.
+  private async alarmStep(name: string, work: () => void | Promise<void>): Promise<void> {
+    try {
+      await work();
+    } catch (err) {
+      console.error(`alarm: ${name} failed (${err instanceof Error ? err.message : String(err)})`);
+    }
   }
 
   // The liveness sweep: the brain probes the boxes that went quiet.
@@ -1088,4 +1117,29 @@ function generateSecret(): string {
 // The brain's clock: Unix seconds, like the DO's other timestamps.
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+// The failed relay, as the owner may read it: the status and a short
+// reason. The body of a failed relay is the brain's own answer —
+// {"error":"tainted"} — and raw JSON in the owner's chat is noise (and
+// an internals leak). The reason code is what the owner can act on.
+function relayFailure(prefix: string, status: number, body: string): string {
+  const reason = relayReason(body);
+  return `${prefix} (${status})${reason ? `: ${reason}` : ""}`;
+}
+
+// The reason out of a failed relay's body: the brain's own error code
+// ("tainted", "misconfigured"). Anything else is left out — a body that
+// is not the brain's own answer carries nothing the owner may read.
+function relayReason(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return "";
+    }
+    const code = (parsed as Record<string, unknown>)["error"];
+    return typeof code === "string" && /^[a-z0-9_-]{1,32}$/.test(code) ? code : "";
+  } catch {
+    return "";
+  }
 }

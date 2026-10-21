@@ -10,6 +10,7 @@ const BOX: BoxRow = {
   heartbeat_token_hash: "hb-hash",
   admin_token_hash: "admin-hash",
   admin_token_sealed: "sealed-blob",
+  tunnel_id: "",
   epoch: 1,
   last_seq: 7,
   last_ts: 0,
@@ -90,6 +91,29 @@ describe("fleet DO (real SQLite backend)", () => {
     expect(rows).toEqual([PUBLIC_BOX]);
     const full = await inState(stub, async (instance) => instance.listBoxes());
     expect(full).toEqual([{ ...BOX }]);
+  });
+
+  it("keeps the tunnel id on the box row and on the pending row", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tunnel"));
+    // The columns live in the DO's own SQLite: a row that names a tunnel
+    // must come back with it.
+    const rows = await inState(stub, async (instance) => {
+      instance.putBox({ ...BOX, id: "tun-box", tunnel_id: "tunnel-abc" });
+      instance.putPending({
+        id: "tun-pending",
+        hostname: "oc-tap-tun-pending.buyallmemes.com",
+        heartbeat_token_hash: "hb-hash",
+        admin_token_sealed: "",
+        tunnel_id: "tunnel-pending-id",
+        first_seen: 1700000000,
+        trusted: 0,
+      });
+      return {
+        box: instance.getBox("tun-box")?.tunnel_id,
+        pending: instance.getPending("tun-pending")?.tunnel_id,
+      };
+    });
+    expect(rows).toEqual({ box: "tunnel-abc", pending: "tunnel-pending-id" });
   });
 
   it("GET /api/backends marks a server-side tombstoned box tombstoned:true", async () => {

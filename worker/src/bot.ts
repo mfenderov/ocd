@@ -19,8 +19,10 @@ const SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 //      brain records the update ids it handled, so a retried /link
 //      cannot mint two links.
 //
-// The router sends nothing itself: the brain owns every reply, and the
-// command layer makes it.
+// The router answers one thing itself: a tap it drops. Telegram spins
+// the button until the answer comes, so a tap the brain cannot act on —
+// and a retried update the dedup drops — still gets its callback
+// answered. Every other reply comes from the command layer.
 
 export interface BotUpdate {
   update_id: number;
@@ -50,8 +52,8 @@ export interface BotCommand {
 
 export interface BotDeps {
   // The brain's Telegram client: the brain owns every reply, and the
-  // command layer answers with this client. The router itself sends
-  // nothing — the gate and the dedup are its whole job.
+  // command layer answers with this client. The router uses it for one
+  // thing only — answering a tap it drops.
   telegram: TelegramClient;
   store: BotStore;
   ownerChatId: number;
@@ -147,8 +149,11 @@ export async function handleTelegramUpdate(update: BotUpdate, deps: BotDeps): Pr
   }
   // The dedup: Telegram retries a webhook it thinks failed. An update
   // that was handled already must not run the command again — a retried
-  // /link would mint two links.
+  // /link would mint two links. The tap is still answered: Telegram
+  // spins the button until the answer comes, and a silent drop leaves
+  // the owner tapping again — and the second tap mints a second link.
   if (!deps.store.seenUpdate(update.update_id)) {
+    await answerDroppedTap(update, deps);
     return;
   }
   deps.store.markUpdateSeen(update.update_id, nowSec());

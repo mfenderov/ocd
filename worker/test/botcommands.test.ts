@@ -84,6 +84,10 @@ interface HarnessOptions {
   listBoxesFails?: Error;
   // The mint that fails: a tap must still be answered.
   mintFails?: Error;
+  // The URL the mint hands out.
+  mintUrl?: string;
+  // The status line the box answers with.
+  status?: string;
 }
 
 function harness(options: HarnessOptions = {}): {
@@ -114,7 +118,7 @@ function harness(options: HarnessOptions = {}): {
       if (options.mintFails) {
         throw options.mintFails;
       }
-      return "https://tap.example/?t=tok-1";
+      return options.mintUrl ?? "https://tap.example/?t=tok-1";
     },
     audit: async (boxId, limit) => {
       calls.audit.push({ boxId, limit });
@@ -134,7 +138,7 @@ function harness(options: HarnessOptions = {}): {
     },
     boxStatus: async (boxId) => {
       calls.boxStatus.push(boxId);
-      return "service=http://127.0.0.1:49374 remote=? devices=2 mints24h=5";
+      return options.status ?? "service=http://127.0.0.1:49374 remote=? devices=2 mints24h=5";
     },
     recordLink: (link) => {
       calls.recorded.push(link);
@@ -281,6 +285,16 @@ describe("/flink", () => {
     expect(calls.mintLink).toEqual([]);
     expect(telegram.sent[0].text).toContain("/flink");
   });
+
+  // The URL rides inside an href="…" attribute: a quote in it must not
+  // end that attribute.
+  it("escapes a quote in the minted URL so the href stays one attribute", async () => {
+    const { deps, telegram } = harness({ mintUrl: 'https://tap.example/?t=tok"1' });
+
+    await runCommand({ name: "/flink", args: ["mac"], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toContain('href="https://tap.example/?t=tok&quot;1"');
+  });
 });
 
 describe("/login", () => {
@@ -419,6 +433,19 @@ describe("/status", () => {
 
     expect(calls.boxStatus).toEqual(["mac"]);
     expect(telegram.sent[0].text).toContain("service=http://127.0.0.1:49374");
+  });
+
+  // The box's status line ends in a newline. Inside the <code> block
+  // that newline ends the block, and the closing tag lands in the
+  // owner's chat as plain text.
+  it("trims the status line so the code block stays one block", async () => {
+    const { deps, telegram } = harness({ status: "service=up remote=? devices=2 mints24h=5\n" });
+
+    await runCommand({ name: "/status", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toBe(
+      "📊 <b>Status</b>\n• <code>service=up remote=? devices=2 mints24h=5</code>",
+    );
   });
 });
 
@@ -561,6 +588,7 @@ describe("the Durable Object's dispatch", () => {
         heartbeat_token_hash: "hb-hash",
         admin_token_hash: "admin-hash",
         admin_token_sealed: "",
+        tunnel_id: "",
         epoch: 1,
         last_seq: 1,
         last_ts: 0,
@@ -573,6 +601,39 @@ describe("the Durable Object's dispatch", () => {
 
     expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].text).toContain("home");
+  });
+
+  // The owner's chat is not the brain's log: a failed relay shows the
+  // status and the reason, never the Worker's raw JSON.
+  it("never shows the Worker's raw JSON to the owner", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-relay"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      instance.putBox({
+        id: "home",
+        hostname: "oc-tap-home.buyallmemes.com",
+        heartbeat_token_hash: "hb-hash",
+        admin_token_hash: "admin-hash",
+        admin_token_sealed: "",
+        tunnel_id: "",
+        epoch: 1,
+        last_seq: 1,
+        last_ts: 0,
+        last_seen: Math.floor(Date.now() / 1000) - 5,
+        enrolled: 1,
+      });
+      // A box with a pending revoke: the mint relay refuses it (409).
+      instance.putTombstone({ box_id: "home", epoch: 1 });
+
+      await instance.dispatchCommand({ name: "/flink", args: ["home"], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("mint failed (409)");
+    expect(telegram.sent[0].text).toContain("tainted");
+    // The raw JSON stays in the brain.
+    expect(telegram.sent[0].text).not.toContain('{"error"');
   });
 
   // Phase 1: the brain's own history is still empty (the boxes push their

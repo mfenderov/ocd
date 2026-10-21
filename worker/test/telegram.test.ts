@@ -191,7 +191,10 @@ describe("telegram client", () => {
     expect((cause.cause as Error).message).not.toContain("SECRET-TOKEN");
   });
 
-  it("escapeHtml escapes the three characters html parse mode cares about", () => {
+  it("escapeHtml escapes the characters html parse mode cares about", () => {
     expect(escapeHtml("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
+    // The double quote too: a value that lands inside an href="…"
+    // attribute must not end that attribute.
+    expect(escapeHtml('a "quoted" url')).toBe("a &quot;quoted&quot; url");
   });
 });

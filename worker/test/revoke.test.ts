@@ -72,6 +72,7 @@ async function seedBox(store: MemStore, id: string, epoch = 1): Promise<BoxRow> 
     heartbeat_token_hash: await hashToken("hb-token"),
     admin_token_hash: await hashToken(ADMIN_PLAIN),
     admin_token_sealed: await sealAdminToken(SEAL_KEY, ADMIN_PLAIN),
+    tunnel_id: "",
     epoch,
     last_seq: 7,
     last_ts: 1000,
@@ -425,11 +426,11 @@ describe("revoke routes through the worker + DO", () => {
     expect(res.status).toBe(400);
   });
 
-  // Test env carries no seal secret (by design — Worker secrets are never
-  // committed), so the route pins the fail-loud degraded behavior: 500
+  // The brain cannot read this box's admin token (it was sealed with
+  // another key), so the route pins the fail-loud degraded behavior: 500
   // misconfigured with no tombstone and no box contact. The tombstoned path
   // is covered at unit level above.
-  it("offline box via the route fails loud without a seal key, writes nothing", async () => {
+  it("offline box via the route fails loud when the admin token cannot be read, writes nothing", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
     await inState(stub, async (instance) => {
       instance.putBox({
@@ -438,6 +439,7 @@ describe("revoke routes through the worker + DO", () => {
         heartbeat_token_hash: await hashToken("hb-token"),
         admin_token_hash: await hashToken(ADMIN_PLAIN),
         admin_token_sealed: await sealAdminToken(SEAL_KEY, ADMIN_PLAIN),
+        tunnel_id: "",
         epoch: 1,
         last_seq: 7,
         last_ts: 1000,
@@ -467,6 +469,7 @@ describe("revoke routes through the worker + DO", () => {
         heartbeat_token_hash: await hashToken("hb-route-token"),
         admin_token_hash: await hashToken(ADMIN_PLAIN),
         admin_token_sealed: "",
+        tunnel_id: "",
         epoch: 1,
         last_seq: 7,
         last_ts: 1000,

@@ -18,6 +18,7 @@ const BOX: BoxRow = {
   heartbeat_token_hash: BOX_HASH,
   admin_token_hash: "admin-hash",
   admin_token_sealed: "",
+  tunnel_id: "",
   epoch: 1,
   last_seq: 1,
   last_ts: 0,
@@ -367,10 +368,11 @@ describe("the edge", () => {
 });
 
 describe("the DO's door", () => {
-  // A brain without a Telegram token still takes the events: only the edit
-  // needs Telegram, and the edit stays owed until the alarm sweep drives
-  // it. A 500 here would make the boxes push into a dead door.
-  it("takes the events without a Telegram client", async () => {
+  // The door takes the events even when the message edit cannot land:
+  // only the edit needs Telegram, and the edit stays owed until the
+  // alarm sweep drives it. A 500 here would make the boxes push into a
+  // dead door.
+  it("takes the events even when the edit cannot land", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-events-door"));
     await inState(stub, async (instance) => {
       instance.putBox(BOX);
@@ -398,6 +400,29 @@ describe("the DO's door", () => {
       expect(row?.state).toBe("used");
       expect(row?.edited).toBe(0);
       expect(instance.auditLogRows("", 10)).toHaveLength(1);
+    });
+  });
+});
+
+describe("a brain without a Telegram client", () => {
+  // Only the edit needs Telegram: the events land anyway, and the edit
+  // stays owed until the alarm sweep drives it.
+  it("takes the events and leaves the edit owed", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-events-noclient"));
+    await inState(stub, async (instance) => {
+      instance.putBox(BOX);
+      instance.putLink(link());
+
+      const res = await handleEvents(
+        eventRequest({ id: "home", events: [{ type: "link-used", token: "tok-1", ip: "1.2.3.4" }] }, BOX_TOKEN),
+        instance,
+        { verifyBox: (id, token) => instance.verifyBoxToken(id, token) },
+      );
+
+      expect(res.status).toBe(200);
+      // The event landed; the edit is still owed.
+      expect(instance.linkRow("tok-1")?.state).toBe("used");
+      expect(instance.linkRow("tok-1")?.edited).toBe(0);
     });
   });
 });

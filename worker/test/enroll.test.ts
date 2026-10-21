@@ -77,6 +77,7 @@ async function seedEnrolled(store: MemStore, id: string): Promise<BoxRow> {
     heartbeat_token_hash: await hashToken(KNOWN_TOKEN),
     admin_token_hash: await hashToken(ADMIN_TOKEN),
     admin_token_sealed: "",
+    tunnel_id: "",
     epoch: 3,
     last_seq: 11,
     last_ts: 5000,
@@ -196,6 +197,7 @@ describe("enrollment approve-on-sight (unit)", () => {
       hostname: "seqreset-1.buyallmemes.com",
       heartbeat_token_hash: await hashToken(NEW_TOKEN),
       admin_token_sealed: "",
+      tunnel_id: "",
       first_seen: FIXED_NOW,
       trusted: 0,
     });
@@ -284,6 +286,60 @@ describe("enrollment approve-on-sight (unit)", () => {
     expect(await res.json()).toMatchObject({ error: "no_pending" });
     const deny = await issueCapabilityLink({ secret: CAP_TEST_KEY, action: "deny", id: "ghost", exp: FIXED_NOW + 900 });
     expect((await handleEnrollDeny(getRequest(deny), store, CAPS, fixedNow)).status).toBe(404);
+  });
+});
+
+describe("the box's tunnel id", () => {
+  // The box names its cloudflared tunnel when it enrols, and the brain
+  // keeps it: Phase 2 writes the box's DNS records from it.
+  it("reads the tunnel id out of the enrolment body", () => {
+    const body = { id: "tun-0", hostname: "tun-0.buyallmemes.com", enroll_token: NEW_TOKEN };
+    expect(parseEnrollBody({ ...body, tunnel_id: "tunnel-abc" })?.tunnel_id).toBe("tunnel-abc");
+    // A box with no tunnel says nothing: the field stays absent.
+    expect(parseEnrollBody(body)?.tunnel_id).toBeUndefined();
+    expect(parseEnrollBody({ ...body, tunnel_id: "" })?.tunnel_id).toBeUndefined();
+  });
+
+  it("parks the tunnel id on the pending row and carries it to the box row", async () => {
+    const store = new MemStore();
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "tun-1", hostname: "tun-1.buyallmemes.com", enroll_token: NEW_TOKEN, tunnel_id: "tunnel-abc" },
+      rec.notify,
+      () => 1700000100,
+      { capSecret: "test-cap-secret", sealKey: "test-seal-key" },
+    );
+    expect(store.getPending("tun-1")?.tunnel_id).toBe("tunnel-abc");
+
+    const row = await approveEnrollment(store, "tun-1");
+    expect(row?.tunnel_id).toBe("tunnel-abc");
+    expect(store.getBox("tun-1")?.tunnel_id).toBe("tunnel-abc");
+  });
+
+  it("stores the new tunnel id when a known box enrols again", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "tun-2");
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "tun-2", hostname: "tun-2.buyallmemes.com", enroll_token: KNOWN_TOKEN, tunnel_id: "tunnel-new" },
+      rec.notify,
+    );
+    expect(store.getBox("tun-2")?.tunnel_id).toBe("tunnel-new");
+  });
+
+  it("keeps the tunnel id the box row knows when the body says nothing", async () => {
+    const store = new MemStore();
+    await seedEnrolled(store, "tun-3");
+    store.putBox({ ...store.getBox("tun-3")!, tunnel_id: "tunnel-old" });
+    const rec = recorder();
+    await requestEnrollment(
+      store,
+      { id: "tun-3", hostname: "tun-3.buyallmemes.com", enroll_token: KNOWN_TOKEN },
+      rec.notify,
+    );
+    expect(store.getBox("tun-3")?.tunnel_id).toBe("tunnel-old");
   });
 });
 

@@ -15,6 +15,10 @@ export interface EnrollBody {
   hostname: string;
   enroll_token: string;
   admin_token?: string;
+  // tunnel_id is the box's cloudflared tunnel id, absent when the box has
+  // no tunnel. The brain stores it on the pending row and on the box row:
+  // Phase 2 creates the box's DNS records from it.
+  tunnel_id?: string;
   // quiet suppresses the approve/ --deny Telegram ping on a fresh pending
   // row. Used by /enrollcode: the code message IS the approval channel,
   // so a second message would only confuse. Claim and rotation paths
@@ -27,6 +31,10 @@ export interface PendingRow {
   hostname: string;
   heartbeat_token_hash: string;
   admin_token_sealed: string;
+  // tunnel_id is the box's cloudflared tunnel id, empty when the box has
+  // no tunnel. The claim path builds the box row out of this row, so the
+  // id must ride along.
+  tunnel_id: string;
   first_seen: number;
   // trusted = 1 when the request that created this pending row carried a
   // CLI token with the "enroll" scope, i.e. the owner asked for it in
@@ -73,6 +81,11 @@ export type NotifyFn = (text: string) => Promise<void>;
 // dot-boundary exact: "notbuyallmemes.com" and "x.buyallmemes.com.evil.com"
 // do not match.
 export const DEFAULT_HOST_SUFFIXES = ["buyallmemes.com"];
+
+// How long a tunnel id may be. A cloudflared tunnel id is a UUID, so this
+// is generous; the cap keeps an unauthenticated enrolment from parking a
+// huge string in the pending row.
+export const TUNNEL_ID_MAX_LEN = 128;
 
 export function parseHostSuffixes(raw?: string): string[] {
   if (raw === undefined) {
@@ -133,9 +146,22 @@ export function parseEnrollBody(value: unknown, suffixes: string[] = DEFAULT_HOS
   if (v["admin_token"] !== undefined && (typeof v["admin_token"] !== "string" || v["admin_token"].length === 0)) {
     return null;
   }
+  if (v["tunnel_id"] !== undefined && typeof v["tunnel_id"] !== "string") {
+    return null;
+  }
   const body: EnrollBody = { id: v["id"], hostname: v["hostname"], enroll_token: v["enroll_token"] };
   if (typeof v["admin_token"] === "string") {
     body.admin_token = v["admin_token"];
+  }
+  // The tunnel id: a cloudflared tunnel id, empty when the box has none.
+  // An empty value means "no tunnel" — the same the box's own body says
+  // by leaving the field out.
+  const tunnelId = typeof v["tunnel_id"] === "string" ? v["tunnel_id"].trim() : "";
+  if (tunnelId.length > TUNNEL_ID_MAX_LEN) {
+    return null;
+  }
+  if (tunnelId !== "") {
+    body.tunnel_id = tunnelId;
   }
   if (v["quiet"] === true) {
     body.quiet = true;
@@ -429,9 +455,17 @@ export async function requestEnrollment(
   }
   const known = store.getBox(body.id);
   if (known && (await tokenMatches(body.enroll_token, known.heartbeat_token_hash))) {
+    // The tunnel id can change: a box that re-created its tunnel enrols
+    // again with the new id. The row must carry the current one, or the
+    // brain would later write DNS for a tunnel that no longer exists.
+    // A body that says nothing about the tunnel keeps what the row has.
+    const tunnelId = body.tunnel_id ?? known.tunnel_id;
     // Bound-token fast path. A supplied admin_token is a rotation, never a
     // drop: seal + store it, or fail loud when sealing is unconfigured.
     if (body.admin_token === undefined) {
+      if (tunnelId !== known.tunnel_id) {
+        store.putBox({ ...known, tunnel_id: tunnelId });
+      }
       return { status: "enrolled", id: body.id, rotated: false, trusted: true };
     }
     if (!config.sealKey) {
@@ -447,7 +481,11 @@ export async function requestEnrollment(
       return { status: "enrolled", id: body.id, rotated: false, trusted: true };
     }
     const now = nowSec();
-    store.putBox({ ...known, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+    store.putBox({
+      ...known,
+      admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token),
+      tunnel_id: tunnelId,
+    });
     // A rotation nobody hears about is a silent credential change: ping the
     // owner channel exactly like enrollment pings (id + time, never tokens).
     await notify(rotationPingText(body.id, now));
@@ -500,6 +538,7 @@ export async function requestEnrollment(
     hostname: body.hostname,
     heartbeat_token_hash: tokenHash,
     admin_token_sealed: sealed,
+    tunnel_id: body.tunnel_id ?? "",
     first_seen: now,
     trusted: config.trusted ? 1 : 0,
   });
@@ -570,6 +609,9 @@ export async function approveEnrollment(
         ...(pending.trusted === 1 ? { hostname: pending.hostname } : {}),
         heartbeat_token_hash: pending.heartbeat_token_hash,
         admin_token_sealed: sealed,
+        // The tunnel id rides from the pending row. A pending row that
+        // names no tunnel does not erase the one the box row knows.
+        tunnel_id: pending.tunnel_id || known.tunnel_id,
         // Re-approval rebinds trust: restart the seq counter so a box that
         // lost its DB (seq reset to 1) is accepted again. Safe because
         // approval itself is the owner-trusted event and the token still
@@ -584,6 +626,7 @@ export async function approveEnrollment(
         heartbeat_token_hash: pending.heartbeat_token_hash,
         admin_token_hash: "",
         admin_token_sealed: sealed,
+        tunnel_id: pending.tunnel_id,
         epoch: 0,
         last_seq: 0,
         last_ts: 0,

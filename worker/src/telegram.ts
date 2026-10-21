@@ -83,10 +83,16 @@ function redactToken(err: unknown, token: string, depth = 0): unknown {
   return err;
 }
 
-// escapeHtml escapes the three characters Telegram's HTML parse mode
-// reads as markup — the same three the Go bot's esc helper handles.
+// escapeHtml escapes the characters Telegram's HTML parse mode reads as
+// markup: the three the Go bot's esc helper handles, and the double
+// quote — a value that lands inside an href="…" attribute must not end
+// that attribute.
 export function escapeHtml(raw: string): string {
-  return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 export function createTelegramClient(token: string, fetcher: typeof fetch = fetch): TelegramClient {

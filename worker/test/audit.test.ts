@@ -63,6 +63,7 @@ async function seedBox(store: MemStore, id: string, overrides: Partial<BoxRow> =
     heartbeat_token_hash: await hashToken("hb-token"),
     admin_token_hash: await hashToken(ADMIN_PLAIN),
     admin_token_sealed: await sealAdminToken(SEAL_KEY, ADMIN_PLAIN),
+    tunnel_id: "",
     epoch: 1,
     last_seq: 7,
     last_ts: 1000,
@@ -354,7 +355,10 @@ describe("audit routes through the worker + DO", () => {
     expect(await res.json()).toMatchObject({ error: "unknown_box" });
   });
 
-  it("known box without a seal key yields a misconfigured marker row with 200", async () => {
+  // The brain cannot read this box's admin token (it was sealed with
+  // another key), so the relay fails loud per box: a misconfigured marker
+  // row, and no fetch.
+  it("known box whose admin token cannot be read yields a misconfigured marker row with 200", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
     await inState(stub, async (instance) => {
       instance.putBox({
@@ -363,6 +367,7 @@ describe("audit routes through the worker + DO", () => {
         heartbeat_token_hash: await hashToken("hb-token"),
         admin_token_hash: await hashToken(ADMIN_PLAIN),
         admin_token_sealed: await sealAdminToken(SEAL_KEY, ADMIN_PLAIN),
+        tunnel_id: "",
         epoch: 1,
         last_seq: 7,
         last_ts: 1000,

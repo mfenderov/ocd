@@ -239,6 +239,7 @@ const SILENT_BOX: BoxRow = {
   heartbeat_token_hash: "hb-hash",
   admin_token_hash: "admin-hash",
   admin_token_sealed: "sealed-blob",
+  tunnel_id: "",
   epoch: 1,
   last_seq: 1,
   last_ts: 0,
@@ -388,6 +389,81 @@ describe("the alarm", () => {
     });
   });
 
+  // Every step of the alarm gets its own boundary: a step that throws
+  // must not skip the steps behind it. A broken owed-edit sweep must
+  // not cost the fleet its liveness tick.
+  it("a broken owed-edit sweep does not skip the liveness sweep", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-alarm-boundary"));
+    const telegram = new RecordingTelegram();
+    const probes: string[] = [];
+
+    await stub.fetch(new Request("https://do/backends"));
+    await inState(stub, async (instance: FleetState) => {
+      instance.putBox(SILENT_BOX);
+      // The owed-edit sweep breaks: the links cannot be read.
+      instance.owedLinks = () => {
+        throw new Error("the links table is gone");
+      };
+      instance.alarmDeps = {
+        telegram,
+        ownerChatId: OWNER_CHAT,
+        probePresence: async (boxId: string) => {
+          probes.push(boxId);
+          return false;
+        },
+        nowSec: () => NOW,
+      };
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    // The liveness sweep still ran: the box was probed and the owner told.
+    expect(probes).toEqual(["home"]);
+    expect(telegram.messages).toHaveLength(1);
+  });
+
+  // The Durable Object's own probe: a box the brain cannot ask is not a
+  // box the brain may call dead. Every other alarm test injects its own
+  // probe, so nothing would catch a probe that stopped throwing.
+  it("the DO's own probe leaves a box it cannot ask unjudged, and sends no notice", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-probe-seam"));
+    const sent: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      // A Telegram answer that lands: a notice that went out would mark
+      // the box, so the mark below is a second witness.
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      // The brain's first request arms the alarm.
+      await stub.fetch(new Request("https://do/backends"));
+      await inState(stub, async (instance: FleetState) => {
+        // A box with no sealed admin token: the brain cannot ask it.
+        instance.putBox({ ...SILENT_BOX, id: "noseal", admin_token_sealed: "" });
+        // The DO's own probe throws before any network call.
+        await expect(instance.alarmDeps.probePresence("noseal")).rejects.toThrow(/misconfigured/);
+      });
+
+      // The alarm runs the DO's own probe: alarmDeps is left alone.
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+      // Nothing was asked and nothing was sent: the probe never reached
+      // for the box, and the owner was not told it is dead.
+      expect(sent).toEqual([]);
+      await inState(stub, async (instance: FleetState) => {
+        // The box stays unjudged: no mark, so the owner hears about it
+        // once the brain can really ask.
+        expect(instance.isSuspectedOffline("noseal")).toBe(false);
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   // A brain that cannot talk to the owner says so: silence would hide
   // a misconfigured brain.
   it("says so when the brain cannot talk to the owner", async () => {
@@ -433,6 +509,7 @@ const RELAY_BOX: BoxRow = {
   heartbeat_token_hash: "hb-hash",
   admin_token_hash: "admin-hash",
   admin_token_sealed: SEALED_ADMIN,
+  tunnel_id: "",
   epoch: 1,
   last_seq: 1,
   last_ts: 0,

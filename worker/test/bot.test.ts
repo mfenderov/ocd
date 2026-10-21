@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   handleTelegramUpdate,
@@ -12,8 +12,9 @@ import app, { type Env as EdgeEnv } from "../src/index";
 import type { TelegramClient } from "../src/telegram";
 import { inState } from "./helpers";
 
-// The router never talks to Telegram itself — the command layer owns the
-// replies. The client is here because the brain owns every message.
+// The router answers one thing itself: a tap it drops. The command
+// layer owns every other reply. The client is here because the brain
+// owns every message.
 const TELEGRAM: TelegramClient = {
   sendMessage: async () => ({ message_id: 1 }),
   editMessageText: async () => true,
@@ -233,6 +234,27 @@ describe("the dedup", () => {
     expect(commands).toHaveLength(1);
   });
 
+  // A retried tap is dropped by the dedup, but the button still spins
+  // until it is answered: the owner would tap again, and the second tap
+  // mints a second link.
+  it("answers a retried tap even though the command does not run again", async () => {
+    const store = new MemoryStore();
+    const { commands, dispatch } = recordingDispatch();
+    const { telegram, answered } = recordingTelegram();
+    const update = {
+      update_id: 30,
+      callback_query: { id: "cb-retry", data: "link:mac", message: { chat: { id: 7 }, message_id: 42 } },
+    };
+
+    await handleTelegramUpdate(update, { telegram, store, ownerChatId: 7, dispatch });
+    await handleTelegramUpdate(update, { telegram, store, ownerChatId: 7, dispatch });
+
+    // The retry is dropped by the dedup, but its tap is answered: the
+    // command ran once, and the button got its answer.
+    expect(answered).toEqual(["cb-retry"]);
+    expect(commands).toHaveLength(1);
+  });
+
   it("remembers the updates the brain handled", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tg-dedup"));
     await inState(stub, async (instance) => {
@@ -409,11 +431,11 @@ describe("the edge", () => {
 });
 
 describe("the DO's door", () => {
-  it("fails loud when the brain is not configured", async () => {
+  // The brain is configured in the test env (the Telegram settings live
+  // in vitest.config.ts), so the door checks the secret header first: a
+  // request without it is refused before any update runs.
+  it("answers 401 when the webhook secret is missing", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tg-door"));
-    // The test env carries no Telegram settings, so the route must say
-    // so (500) instead of dropping every update silently. When the test
-    // env gains the TELEGRAM_* bindings this answer becomes a 401.
     const res = await stub.fetch(
       new Request("https://do/tg", {
         method: "POST",
@@ -422,7 +444,49 @@ describe("the DO's door", () => {
       }),
     );
 
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "misconfigured" });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "unauthorized" });
+  });
+
+  // The production chain: edge → DO → secret check → config → dispatch.
+  // The update carries no command, so the brain answers nothing and the
+  // test never reaches the real Bot API.
+  it("answers 200 for an update that carries no command, and records it as seen", async () => {
+    const sent: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      // A Telegram answer that lands: a reply that went out is a call
+      // this test must see.
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const res = await SELF.fetch("https://fleet.local/tg/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "test-webhook-secret",
+        },
+        body: JSON.stringify({
+          update_id: 4242,
+          message: { text: "good morning", chat: { id: 7, type: "private" } },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      // No reply was sent: the update carried no command.
+      expect(sent).toEqual([]);
+
+      const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+      await inState(stub, async (instance) => {
+        // The update is recorded as seen: a retry would not run it again.
+        expect(instance.seenUpdate(4242)).toBe(false);
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });
