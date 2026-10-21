@@ -116,6 +116,13 @@ func TestSetupTunnelRefusesToClobberAnUnknownConfig(t *testing.T) {
 	if _, err := onboard.SetupTunnel(context.Background(), plan, func(string) {}); err == nil {
 		t.Fatal("must not overwrite a file that is not a tunnel config")
 	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "existing" {
+		t.Fatalf("the file must be left alone, got:\n%s", raw)
+	}
 }
 
 // plantConfig writes a tunnel config for a test.
@@ -123,6 +130,217 @@ func plantConfig(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// recordingCloudflared installs a fake cloudflared that answers canned
+// outputs and appends every invocation to a file, so a test can see
+// which calls were made. It returns the path of that file.
+func recordingCloudflared(t *testing.T, handlers map[string]string, fail map[string]bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + calls + "'\nkey=\"$1 $2\"\n" +
+		"case \"$key\" in\n"
+	for k, out := range handlers {
+		script += "  \"" + k + "\") printf '%s' '" + out + "';;\n"
+	}
+	script += "esac\n"
+	for k := range fail {
+		script += `if [ "$key" = "` + k + `" ]; then exit 1; fi` + "\n"
+	}
+	script += "exit 0\n"
+	p := filepath.Join(dir, "cloudflared")
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	return calls
+}
+
+// cloudflaredCalls returns the invocations the fake recorded.
+func cloudflaredCalls(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	var calls []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line != "" {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// callsContain reports whether one of the recorded calls says all of it.
+func callsContain(calls []string, parts ...string) bool {
+	for _, call := range calls {
+		says := true
+		for _, p := range parts {
+			if !strings.Contains(call, p) {
+				says = false
+				break
+			}
+		}
+		if says {
+			return true
+		}
+	}
+	return false
+}
+
+// assertNoTunnelCreated fails when the fake was asked to create a tunnel.
+func assertNoTunnelCreated(t *testing.T, calls []string) {
+	t.Helper()
+	for _, call := range calls {
+		if strings.HasPrefix(call, "tunnel create") {
+			t.Fatalf("the box must not get a second tunnel, saw %q", call)
+		}
+	}
+}
+
+// logMentions reports whether one of the progress lines says all of it.
+func logMentions(log []string, parts ...string) bool {
+	for _, line := range log {
+		says := true
+		for _, p := range parts {
+			if !strings.Contains(line, p) {
+				says = false
+				break
+			}
+		}
+		if says {
+			return true
+		}
+	}
+	return false
+}
+
+// A box's own config names the tunnel the box serves. That id wins over
+// the plan's name: the name is a label, the id is the identity. The box
+// must not get a second tunnel — the old names' DNS still points at the
+// one it runs.
+func TestSetupTunnelReusesTheTunnelItsOwnConfigNames(t *testing.T) {
+	const own = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	const planned = "99999999-8888-7777-6666-555555555555"
+	callsFile := recordingCloudflared(t, map[string]string{
+		"tunnel list":  `[{"id":"` + own + `","name":"oc-wsl"},{"id":"` + planned + `","name":"oc-home"}]`,
+		"tunnel route": `Added CNAME`,
+	}, map[string]bool{"tunnel create": true})
+	dir := t.TempDir()
+	plantCert(t, dir)
+	plantConfig(t, filepath.Join(dir, "config.yml"),
+		"tunnel: "+own+"\n"+
+			"credentials-file: "+filepath.Join(dir, own+".json")+"\n"+
+			"ingress:\n"+
+			"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49500\n"+
+			"  - service: http_status:404\n")
+
+	var log []string
+	plan := onboard.TunnelPlan{
+		Name: "oc-home", TapHost: conventionalTap, UIHost: conventionalUI,
+		CredDir: dir, Port: 49400, UIPort: 49374,
+	}
+	id, err := onboard.SetupTunnel(context.Background(), plan, func(s string) { log = append(log, s) })
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if id != own {
+		t.Fatalf("the box's own tunnel must win over the plan's name, got %q", id)
+	}
+	assertNoTunnelCreated(t, cloudflaredCalls(t, callsFile))
+	if !logMentions(log, own, "oc-home") {
+		t.Fatalf("the log must say which tunnel the box serves, got %v", log)
+	}
+}
+
+// A box with no config of its own creates the tunnel the plan names: the
+// fresh box's path, unchanged.
+func TestSetupTunnelCreatesTheTunnelForABoxWithNoConfig(t *testing.T) {
+	const created = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	callsFile := recordingCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "Created tunnel oc-fresh with id " + created,
+		"tunnel route":  `Added CNAME`,
+	}, nil)
+	dir := t.TempDir()
+	plantCert(t, dir)
+
+	plan := onboard.TunnelPlan{Name: "oc-fresh", TapHost: "oc-tap-fresh.example.com", CredDir: dir, Port: 49400}
+	id, err := onboard.SetupTunnel(context.Background(), plan, nil)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if id != created {
+		t.Fatalf("want the created tunnel id, got %q", id)
+	}
+	calls := cloudflaredCalls(t, callsFile)
+	if !callsContain(calls, "tunnel create oc-fresh") {
+		t.Fatalf("the tunnel must be created, saw %v", calls)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), created) {
+		t.Fatalf("the config must serve the created tunnel, got:\n%s", raw)
+	}
+}
+
+// A box that has a config of its own never gets a second tunnel: a
+// config that names no tunnel is refused, not replaced.
+func TestSetupTunnelRefusesAConfigThatNamesNoTunnel(t *testing.T) {
+	callsFile := recordingCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "Created tunnel oc-x with id 99999999-0000-0000-0000-000000000000",
+	}, nil)
+	dir := t.TempDir()
+	plantCert(t, dir)
+	plantConfig(t, filepath.Join(dir, "config.yml"), "not a tunnel config\n")
+
+	plan := onboard.TunnelPlan{Name: "oc-x", TapHost: "oc-tap-x.example.com", CredDir: dir, Port: 49400}
+	if _, err := onboard.SetupTunnel(context.Background(), plan, nil); err == nil {
+		t.Fatal("a config that names no tunnel must not be replaced by a new tunnel")
+	}
+	assertNoTunnelCreated(t, cloudflaredCalls(t, callsFile))
+}
+
+// The DNS records may be missing even when the config is already the
+// desired set: the brain writes them too, and a box set up before the
+// brain owned the DNS has none. The route runs anyway — it overwrites.
+func TestSetupTunnelRoutesTheDNSWhenTheConfigIsReused(t *testing.T) {
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	callsFile := recordingCloudflared(t, map[string]string{
+		"tunnel list":  `[{"id":"` + id + `","name":"oc-wsl"}]`,
+		"tunnel route": `Added CNAME`,
+	}, map[string]bool{"tunnel create": true})
+	dir := t.TempDir()
+	plantCert(t, dir)
+	plantConfig(t, filepath.Join(dir, "config.yml"),
+		"tunnel: "+id+"\n"+
+			"credentials-file: "+filepath.Join(dir, id+".json")+"\n"+
+			"ingress:\n"+
+			"  - hostname: "+conventionalTap+"\n    service: http://127.0.0.1:49400\n"+
+			"  - hostname: "+conventionalUI+"\n    service: http://127.0.0.1:49374\n"+
+			"  - service: http_status:404\n")
+
+	plan := onboard.TunnelPlan{
+		Name: "oc-home", TapHost: conventionalTap, UIHost: conventionalUI,
+		CredDir: dir, Port: 49400, UIPort: 49374,
+	}
+	if _, err := onboard.SetupTunnel(context.Background(), plan, nil); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	calls := cloudflaredCalls(t, callsFile)
+	for _, host := range []string{conventionalTap, conventionalUI} {
+		if !callsContain(calls, "tunnel route dns", id, host) {
+			t.Fatalf("the DNS for %s must be routed, saw %v", host, calls)
+		}
 	}
 }
 

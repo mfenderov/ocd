@@ -271,13 +271,19 @@ func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, 
 	return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, configCredentials(string(raw), credFile), desired))
 }
 
+// notATunnelConfig names a file that cannot say which tunnel this box
+// serves. The merge and the setup refuse it with the same words.
+func notATunnelConfig(path string) error {
+	return fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate, or re-run with --skip-tunnel", path)
+}
+
 // mergeableConfig reads the rules of a config the merge may rewrite: the
 // file must serve the tunnel the caller named, and it must hold nothing
 // the writer cannot reproduce.
 func mergeableConfig(path, raw, tunnelID string) ([]ingressRule, error) {
 	fileTunnel := configTunnelID(raw)
 	if fileTunnel == "" {
-		return nil, fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate, or re-run with --skip-tunnel", path)
+		return nil, notATunnelConfig(path)
 	}
 	if fileTunnel != tunnelID {
 		return nil, fmt.Errorf("onboard: %s serves tunnel %s, not %s — move it aside to regenerate, or re-run with --skip-tunnel", path, fileTunnel, tunnelID)
@@ -347,8 +353,17 @@ func HasCert(dir string) bool {
 	return err == nil
 }
 
-// SetupTunnel creates (or reuses) the tunnel, routes DNS for tap (+UI),
-// and writes config.yml. Progress mirrors DoOnboard: nil-safe.
+// SetupTunnel resolves the tunnel this box serves, writes config.yml and
+// routes the DNS for the tap (+UI) host. Progress mirrors DoOnboard:
+// nil-safe.
+//
+// The box's own config names the tunnel the box serves, and that id is
+// the box's — whatever the plan calls the tunnel. The name is a label,
+// the id is the identity, so a box never ends up with a second tunnel.
+//
+// The DNS is routed every time: the records may be missing (the brain
+// writes them too), and the route overwrites, so running it again
+// changes nothing.
 func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (string, error) {
 	say := func(s string) {
 		if progress != nil {
@@ -374,41 +389,104 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 	if !HasCert(plan.CredDir) && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
 		return "", fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
 	}
-	say("listing tunnels")
-	existing, err := ListTunnels(ctx)
+	cfgPath := filepath.Join(plan.CredDir, "config.yml")
+	id, err := resolveTunnelID(ctx, plan, cfgPath, say)
 	if err != nil {
 		return "", err
 	}
-	id := existing[plan.Name]
-	if id == "" {
-		say("creating tunnel " + plan.Name)
-		id, err = CreateTunnel(ctx, plan.APIToken, plan.Name)
-		if err != nil {
-			return "", err
-		}
-	} else {
-		say("reusing tunnel " + plan.Name)
-	}
-	cfgPath := filepath.Join(plan.CredDir, "config.yml")
 	credFile := filepath.Join(plan.CredDir, id+".json")
 	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port, plan.UIPort)
 	if err != nil {
 		return "", err
 	}
 	if reused {
-		say("reusing tunnel config")
-		return id, nil
+		say("reusing tunnel config " + cfgPath)
+	} else {
+		say("writing " + cfgPath)
 	}
-	say("writing " + cfgPath)
-	say("routing DNS " + plan.TapHost)
-	if err := RouteDNS(ctx, plan.APIToken, id, plan.TapHost); err != nil {
+	if err := routeBoxDNS(ctx, plan, id, say); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(plan.UIHost) != "" {
-		say("routing DNS " + strings.TrimSpace(plan.UIHost))
-		if err := RouteDNS(ctx, plan.APIToken, id, strings.TrimSpace(plan.UIHost)); err != nil {
-			return "", err
+	return id, nil
+}
+
+// resolveTunnelID resolves the tunnel id this box serves.
+//
+// The box's own config names it, and that id wins whatever the plan calls
+// the tunnel: the name is a label, the id is the identity. So a box whose
+// config names a tunnel never creates a second one — the old names' DNS
+// keeps pointing at the tunnel the box actually runs.
+//
+// Only a box with no config of its own looks the plan's name up, and
+// creates the tunnel when the name is unknown.
+func resolveTunnelID(ctx context.Context, plan TunnelPlan, cfgPath string, say func(string)) (string, error) {
+	own, err := ownTunnelID(cfgPath)
+	if err != nil {
+		return "", err
+	}
+	if own != "" {
+		say(tunnelChoice(own, plan.Name))
+		return own, nil
+	}
+	say("listing tunnels")
+	existing, err := ListTunnels(ctx)
+	if err != nil {
+		return "", err
+	}
+	if id := existing[plan.Name]; id != "" {
+		say("reusing tunnel " + plan.Name)
+		return id, nil
+	}
+	say("creating tunnel " + plan.Name)
+	return CreateTunnel(ctx, plan.APIToken, plan.Name)
+}
+
+// ownTunnelID returns the tunnel id the box's own config names.
+//
+// Empty when the box has no config of its own — that box may create a
+// tunnel. A config that exists but names no tunnel is refused: the box
+// has a config, and creating a tunnel behind it would leave the box with
+// two.
+func ownTunnelID(cfgPath string) (string, error) {
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
 		}
+		// A config we cannot read is a config we cannot learn the box's
+		// tunnel from, and writing over it would lose it.
+		return "", fmt.Errorf("onboard: read tunnel config: %w — re-run with --skip-tunnel to reuse the existing config", err)
+	}
+	id := configTunnelID(string(raw))
+	if id == "" {
+		return "", notATunnelConfig(cfgPath)
 	}
 	return id, nil
+}
+
+// tunnelChoice says which tunnel the box serves and why: its own config
+// names it, whatever the plan calls the tunnel.
+func tunnelChoice(id, planName string) string {
+	if planName == "" {
+		return "reusing the box's own tunnel " + id
+	}
+	return "reusing the box's own tunnel " + id + " (the plan calls it " + planName + ")"
+}
+
+// routeBoxDNS points the box's hosts at its tunnel.
+//
+// The records may be missing — the brain writes them too, and a box set
+// up before the brain owned the DNS has none. The route overwrites, so
+// running it again changes nothing.
+func routeBoxDNS(ctx context.Context, plan TunnelPlan, tunnelID string, say func(string)) error {
+	say("routing DNS " + plan.TapHost)
+	if err := RouteDNS(ctx, plan.APIToken, tunnelID, plan.TapHost); err != nil {
+		return err
+	}
+	uiHost := strings.TrimSpace(plan.UIHost)
+	if uiHost == "" {
+		return nil
+	}
+	say("routing DNS " + uiHost)
+	return RouteDNS(ctx, plan.APIToken, tunnelID, uiHost)
 }
