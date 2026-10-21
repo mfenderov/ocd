@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -98,26 +100,23 @@ func boxHasTunnelConfig() (bool, error) {
 
 // writeManageTunnel turns on the daemon-managed tunnel in the env file,
 // unless the env file already says so.
+//
+// A missing env file is not a failure: the write creates it, and a box
+// that has a tunnel config but no env file yet needs the flag just as
+// much as one that has it. An env file that cannot be read is a
+// failure: the flag would not be written, and the tunnel would run
+// unsupervised while the install said it was supervised.
 func writeManageTunnel() error {
 	envPath, err := onboard.DefaultEnvPath()
 	if err != nil {
 		return err
 	}
-	vals, ok := envValues(envPath)
-	if !ok {
-		return nil
+	vals, err := onboard.LoadEnvFile(envPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	if vals["OCD_MANAGE_TUNNEL"] == "1" {
 		return nil
 	}
 	return onboard.WriteEnvFile(envPath, map[string]string{"OCD_MANAGE_TUNNEL": "1"})
-}
-
-// envValues reads the env file, and reports whether it could be read.
-func envValues(envPath string) (map[string]string, bool) {
-	vals, err := onboard.LoadEnvFile(envPath)
-	if err != nil {
-		return nil, false
-	}
-	return vals, true
 }

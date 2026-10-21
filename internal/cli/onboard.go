@@ -147,24 +147,16 @@ func tunnelPlan(ctx context.Context, w io.Writer, opts onboard.Options,
 		Port:     onboard.DaemonPort,
 		UIPort:   uiPort,
 	}
-	credDir, ok := cloudflaredCredDir()
-	if !ok {
-		return tunnel, nil
+	credDir, err := onboard.DefaultCredDir()
+	if err != nil {
+		// Without the credentials directory there is no login to ensure,
+		// and a tunnel nobody can log in to is not a plan.
+		return nil, err
 	}
 	if err := onboard.EnsureCloudflaredLogin(ctx, credDir, opts.CFToken, onboard.IsTTY(), w); err != nil {
 		return nil, err
 	}
 	return tunnel, nil
-}
-
-// cloudflaredCredDir is the cloudflared credentials directory, and
-// whether it could be read: without it there is no login to ensure.
-func cloudflaredCredDir() (string, bool) {
-	credDir, err := onboard.DefaultCredDir()
-	if err != nil {
-		return "", false
-	}
-	return credDir, true
 }
 
 // runEnrollment runs the enrollment: the spinner on a terminal, plain

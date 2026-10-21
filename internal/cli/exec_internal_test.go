@@ -116,6 +116,15 @@ func TestWaitForWaitsOutTheBackoff(t *testing.T) {
 // file, and returns the path of that env file.
 func boxWithTunnel(t *testing.T) string {
 	t.Helper()
+	envPath := plantTunnelConfig(t)
+	plantEnvFile(t, envPath)
+	return envPath
+}
+
+// plantTunnelConfig plants the cloudflared config of a box and returns
+// the path of the env file that box would have.
+func plantTunnelConfig(t *testing.T) string {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	credDir := filepath.Join(home, ".cloudflared")
@@ -125,14 +134,18 @@ func boxWithTunnel(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(credDir, "config.yml"), []byte("tunnel: x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	envPath := filepath.Join(home, ".ocd", "env")
-	if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
+	return filepath.Join(home, ".ocd", "env")
+}
+
+// plantEnvFile writes the env file of a box.
+func plantEnvFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(envPath, []byte("OCD_BOX_ID=\"home\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("OCD_BOX_ID=\"home\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return envPath
 }
 
 // A box with a tunnel config must have the connector supervised by the
@@ -182,5 +195,24 @@ func TestEnsureTunnelManagedKeepsAnExplicitOptIn(t *testing.T) {
 	}
 	if vals["OCD_MANAGE_TUNNEL"] != "" {
 		t.Fatalf("the env file must be left alone, got %q", vals["OCD_MANAGE_TUNNEL"])
+	}
+}
+
+// A box with a tunnel config but no env file yet must still get the
+// supervision flag: the daemon must run the connector, and the install
+// must not report success while the tunnel runs unsupervised.
+func TestEnsureTunnelManagedWritesTheFlagIntoANewEnvFile(t *testing.T) {
+	t.Setenv("OCD_MANAGE_TUNNEL", "")
+	envPath := plantTunnelConfig(t)
+
+	if err := ensureTunnelManaged(); err != nil {
+		t.Fatalf("supervise: %v", err)
+	}
+	vals, err := onboard.LoadEnvFile(envPath)
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if vals["OCD_MANAGE_TUNNEL"] != "1" {
+		t.Fatalf("the daemon must run the connector, got %q", vals["OCD_MANAGE_TUNNEL"])
 	}
 }
