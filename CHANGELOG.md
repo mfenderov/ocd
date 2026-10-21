@@ -2,6 +2,36 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.20.0 - 2026-10-21
+#### Features
+- (**box**) the sweep pushes audit rows, newest-watermark first - (c0b516d) - mfenderov
+- (**worker**) /faudit answers from the brain's own history - (c6d41d1) - mfenderov
+- (**worker**) every enrolment leaves with its DNS ensured - (9485b8f) - mfenderov
+- (**worker**) the brain writes the two CNAMEs a box needs - (a8a23e2) - mfenderov
+- the brain owns the DNS, the history and the bot - (159c85c) - mfenderov
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>the Go bot is gone; the brain owns Telegram - (0780d92) - mfenderov
+#### Bug Fixes
+- (**box**) the box's DNS write must not abort on an existing record - (8c7d553) - mfenderov
+- (**box**) the audit watermark is anchored to its row, not its rowid - (636c346) - mfenderov
+- (**box**) the watermark only moves forward, and a reset trail does not silence the push - (e7116c7) - mfenderov
+- (**box,worker**) the review's small findings, before the merge - (e2ab695) - mfenderov
+- (**box,worker**) the DNS failure reaches the owner - (bc539e7) - mfenderov
+- (**worker**) one seq-reset ping per box, not one per heartbeat - (f59fb6e) - mfenderov
+- (**worker**) the claim carries the box's tunnel, and the DNS call has a deadline - (1f11a6f) - mfenderov
+- (**worker**) the DNS writer refuses what it cannot read - (7f1059e) - mfenderov
+#### Documentation
+- (**box**) the prune comment must match the repair that exists - (7f46614) - mfenderov
+- the brain owns the DNS it enrols, and the runbook tells the truth - (4252756) - mfenderov
+- the brain owns the bot, the DNS and the history - (bb7d604) - mfenderov
+#### Tests
+- (**box**) the prune keeps the newest row, so a watermark never goes stale - (570eb7c) - mfenderov
+- (**worker**) the history keeps the taint the box pushed with - (7b337bf) - mfenderov
+#### Miscellaneous Chores
+- (**box**) the Go bot's dead bookkeeping is gone - (d220564) - mfenderov
+- (**worker**) the brain's zone id for the DNS it owns - (6a6578b) - mfenderov
+
+- - -
+
 ## v0.19.0 - 2026-10-21
 #### Features
 - (**box**) tell the brain which tunnel this box uses - (7176636) - mfenderov
