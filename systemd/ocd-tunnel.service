@@ -6,7 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=PATH=/home/mfenderov/.opencode/bin:/home/mfenderov/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/mfenderov/.local/bin/cloudflared tunnel --config /home/mfenderov/.cloudflared/config.yml run oc-wsl
+# The tunnel's id, not its name: renaming the tunnel in Cloudflare can
+# then never stop this unit. The id is what ~/.cloudflared/config.yml
+# names, so the two always point at the same tunnel.
+ExecStart=/home/mfenderov/.local/bin/cloudflared tunnel --config /home/mfenderov/.cloudflared/config.yml run 7ed965a2-9828-46f6-851e-24cf1b9fedf6
 Restart=always
 RestartSec=5
 

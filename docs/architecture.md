@@ -24,7 +24,7 @@ flowchart TB
     TGAPI["Telegram API"]
     W["ocd-fleet Worker — the brain<br/>◾ the bot<br/>◾ the fleet state · the DNS · the history<br/>ocd-fleet.fenderovlol.workers.dev"]
     DO[("Durable Object<br/>FleetState · SQLite")]
-    TUN["tunnels<br/>oc-wsl · oc-mac"]
+    TUN["tunnels<br/>oc-home · oc-mac"]
     DNS["public hostnames<br/>oc-tap-… → daemon<br/>oc-… → opencode"]
   end
 
@@ -330,15 +330,14 @@ for every box yet:
   tunnel id recorded for <box> — re-enrol to bind one`). The records
   `cloudflared` wrote are the ones in the zone.
 - The UI name it derives is `oc-<box>` — the box's own convention. The
-  primary box does not follow that convention: its real names are
-  `oc.buyallmemes.com` and `oc-tap.buyallmemes.com`. On the box itself
-  the tunnel config (`~/.cloudflared/config.yml`) is the source of truth
-  for the hostnames it serves — `ocd repair` reads hostnames from there
-  and only fixes ports. The primary box keeps the records it was given
-  until it re-enrols; the naming migration (the tunnel becomes `oc-home`
-  and serves the old and the new names together) is a later phase, and
-  until then the brain's `oc-home` name would point at a name the
-  primary box's tunnel does not serve.
+  primary box follows that convention now: its names are
+  `oc-home.buyallmemes.com` and `oc-tap-home.buyallmemes.com`, and the
+  tunnel behind them is the one named `oc-home`. On the box itself the
+  tunnel config (`~/.cloudflared/config.yml`) is the source of truth for
+  the hostnames it serves — `ocd repair` reads hostnames from there and
+  only fixes ports. The primary box's old names (`oc.buyallmemes.com`
+  and `oc-tap.buyallmemes.com`) still answer: they stay in the tunnel
+  config and in DNS until the Mac is on, and they are dropped after that.
 
 ## 6. Who holds which secret
 

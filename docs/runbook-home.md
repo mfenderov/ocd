@@ -1,11 +1,11 @@
-# Home Box Runbook (oc.buyallmemes.com)
+# Home Box Runbook (oc-home.buyallmemes.com)
 
-Live stack: `opencode service` (49374) + `cloudflared` tunnel `oc-wsl` +
-`ocd serve` (49400). The daemon serves `/pair`, the `/_oc/*` box API
-(behind the admin token) and `/healthz`, and it talks to the brain in
-two directions: a heartbeat to `POST /api/heartbeat`, and one event
-batch every 30 seconds to `POST /api/events` — the links that died and
-the audit rows that happened.
+Live stack: `opencode service` (49374) + `cloudflared` tunnel
+`7ed965a2-9828-46f6-851e-24cf1b9fedf6` + `ocd serve` (49400). The daemon
+serves `/pair`, the `/_oc/*` box API (behind the admin token) and
+`/healthz`, and it talks to the brain in two directions: a heartbeat to
+`POST /api/heartbeat`, and one event batch every 30 seconds to
+`POST /api/events` — the links that died and the audit rows that happened.
 
 The Telegram bot (`@ocd_bambot`) is **not** on this box. It lives in the
 brain — the Cloudflare Worker — and Telegram pushes its updates to
@@ -19,6 +19,12 @@ Windows Task Scheduler task (`ocd-boot` → `scripts/boot.sh`) is the
 fallback for a fresh Windows profile; `boot.sh` is idempotent and skips
 whatever systemd already runs.
 
+The tunnel unit runs the tunnel's **id**, not its name: renaming the
+tunnel in the Cloudflare dashboard cannot stop the box. The id lives in
+two places — `systemd/ocd-tunnel.service` (`ExecStart`) and
+`scripts/boot.sh` (`TUNNEL_ID`) — and they must be changed together if
+the tunnel is ever recreated, because a new tunnel gets a new id.
+
 ```sh
 systemctl --user status ocd-serve ocd-tunnel
 systemctl --user restart ocd-serve        # after a binary upgrade
@@ -30,7 +36,14 @@ DB path from `OCD_DB`, which must be an **absolute** path: systemd's
 pointed the daemon at an empty database (fresh seq → every heartbeat
 rejected as a replay).
 
-## Hostnames (this box does NOT follow the naming convention)
+## Hostnames
+
+This box follows the naming convention like every other box.
+
+- editor UI: `https://oc-home.buyallmemes.com` → 127.0.0.1:49374 (opencode)
+- tap links: `https://oc-tap-home.buyallmemes.com/pair` → 127.0.0.1:49400 (daemon)
+
+The old names still answer, and are dropped only after the Mac is on:
 
 - editor UI: `https://oc.buyallmemes.com` → 127.0.0.1:49374 (opencode)
 - tap links: `https://oc-tap.buyallmemes.com/pair` → 127.0.0.1:49400 (daemon)
@@ -63,7 +76,7 @@ here.
 
 1. `systemctl --user status ocd-serve ocd-tunnel` — a failed unit names
    the cause in `journalctl --user -u <unit>`.
-2. `curl -s https://oc.buyallmemes.com/` — 200 means tunnel+backend are
+2. `curl -s https://oc-home.buyallmemes.com/` — 200 means tunnel+backend are
    fine, the problem is the brain side (Telegram/Worker). 502 means the
    origin is down. 1033 means the tunnel has no connector.
 3. Manual recovery: `bash ~/dev/ocd/scripts/boot.sh` (idempotent,
@@ -85,7 +98,9 @@ here.
    --user daemon-reload && systemctl --user enable --now ocd-tunnel
    ocd-serve`), reboot, expect 🟢.
 4. Still dark: fresh `cloudflared tunnel login` + recreate the tunnel and
-   DNS routes, then `ocd repair`.
+   DNS routes, then `ocd repair`. A recreated tunnel has a new id — put
+   it in `systemd/ocd-tunnel.service` and in `scripts/boot.sh`
+   (`TUNNEL_ID`) too, or the box runs a tunnel that is no longer there.
 
 ## Off-disk copies (owner's job, monthly)
 
