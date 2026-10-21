@@ -264,14 +264,14 @@ func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
 	}
 }
 
-// The Go bot's own links are the Go bot's business. The sweep must not
-// report them and must not delete them: the Go bot's own sweeper still
-// has to edit that Telegram message to "expired".
-func TestSweepLeavesTheGoBotsLinksAlone(t *testing.T) {
-	st, tok := deadLinkStore(t, "telegram")
+// The sweep tells the brain about the brain's links. A link the brain
+// does not own is not the brain's to hear about: the sweep neither
+// reports it nor deletes it.
+func TestSweepLeavesLinksTheBrainDoesNotOwnAlone(t *testing.T) {
+	st, tok := deadLinkStore(t, "other")
 	defer st.Close()
-	// The Go bot records the chat and message ids on its own links, so
-	// its sweeper finds them (internal/tg/tg.go).
+	// The link carries a chat and a message id, so the store's pending
+	// edit list can show it. That list is how the test sees the row.
 	if err := st.SetLinkMessage(tok, 123, 456); err != nil {
 		t.Fatal(err)
 	}
@@ -299,16 +299,16 @@ func TestSweepLeavesTheGoBotsLinksAlone(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if count != 0 {
-		t.Fatalf("want the Go bot's link never reported, got %d events: %v", count, got)
+		t.Fatalf("want the link never reported, got %d events: %v", count, got)
 	}
-	// The row must survive: the Go bot's sweeper finds it through
-	// PendingEdits and edits the Telegram message to "expired".
+	// The row must survive: the sweep is not the brain's link business
+	// unless the link is the brain's.
 	pending := st.PendingEdits()
 	if len(pending) != 1 || pending[0].Token != tok {
-		t.Fatalf("want the Go bot's link left for its own sweeper, got %v", pending)
+		t.Fatalf("want the link left alone, got %v", pending)
 	}
 	if pending[0].Note != "expired" {
-		t.Fatalf("want the Go bot's expired-link edit to still be pending, got %q", pending[0].Note)
+		t.Fatalf("want the expired edit still pending, got %q", pending[0].Note)
 	}
 }
 
@@ -530,7 +530,7 @@ func auditTrail(t *testing.T) (*store.Store, string) {
 
 // deadLinkStore returns a store holding one link that was never tapped
 // and is past its TTL: a dead link. The via says who owns it: the brain
-// ("admin") or the Go bot ("telegram").
+// ("admin") or anyone else.
 func deadLinkStore(t *testing.T, via string) (*store.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")

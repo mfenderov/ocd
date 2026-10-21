@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -14,10 +12,8 @@ import (
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
 	"github.com/mfenderov/ocd/internal/boxagent"
-	"github.com/mfenderov/ocd/internal/hook"
 	"github.com/mfenderov/ocd/internal/pair"
 	"github.com/mfenderov/ocd/internal/store"
-	"github.com/mfenderov/ocd/internal/tg"
 )
 
 // heartbeatInterval paces box→Worker heartbeats (spec default).
@@ -281,17 +277,10 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 	}()
 }
 
+// RunServe runs the box daemon: the /pair page, the box API behind
+// /_oc, the heartbeat to the Worker and the sweeps that tell the brain
+// what happened here. Telegram is the brain's business, not the box's.
 func RunServe(w io.Writer) error {
-	tgOn := true
-	switch tok, owner := os.Getenv("OCD_TG_TOKEN"), os.Getenv("OCD_OWNER_ID"); {
-	case tok == "" && owner == "":
-		// Secondary boxes (fleet heartbeat + admin only): the single bot
-		// stays on the primary box, polling twice would fight over updates.
-		tgOn = false
-		_, _ = fmt.Fprintln(w, "telegram off (OCD_TG_TOKEN and OCD_OWNER_ID unset)")
-	case tok == "" || owner == "":
-		return fmt.Errorf("ocd: half-configured telegram (need both OCD_TG_TOKEN and OCD_OWNER_ID, or neither)")
-	}
 	st, err := openStore()
 	if err != nil {
 		return err
@@ -309,18 +298,6 @@ func RunServe(w io.Writer) error {
 
 	ctx := context.Background()
 
-	hookPath, hookSecret := "", ""
-	poll := true
-	if tgOn {
-		hookPath, hookSecret = setupWebhook(ctx, w, st)
-		poll = hookPath == ""
-		go func() {
-			if err := tg.Start(ctx, st, poll); err != nil {
-				_, _ = fmt.Fprintln(w, "telegram:", err)
-			}
-		}()
-	}
-
 	mux := http.NewServeMux()
 	mux.Handle("/pair", pair.Handler(st, execPair))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -334,21 +311,6 @@ func RunServe(w io.Writer) error {
 		go runTunnel(ctx, w)
 	}
 
-	if !tgOn {
-		_, _ = fmt.Fprintln(w, "mode: telegram off")
-	} else if poll {
-		_, _ = fmt.Fprintln(w, "mode: polling")
-	} else {
-		mux.Handle("/webhook/"+hookPath, hook.Handler(st, hookSecret, st.SeenUpdate,
-			func(chatID, fromID int64, chatType, text string) {
-				tg.Dispatch(ctx, st, chatID, fromID, chatType, text)
-			},
-			func(fromID, chatID int64, chatType, data string) {
-				tg.DispatchCallback(ctx, st, fromID, chatID, chatType, data)
-			}))
-		_, _ = fmt.Fprintln(w, "mode: webhook (polling off)")
-	}
-
 	addr := serveAddr()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -356,53 +318,4 @@ func RunServe(w io.Writer) error {
 	}
 	_, _ = fmt.Fprintln(w, "ocd serve on http://"+ln.Addr().String())
 	return http.Serve(ln, mux)
-}
-
-func newSecret() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-func newPath() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-// setupWebhook registers a rotating-UUID push path with Telegram.
-// Empty public base or any failure means polling carries on alone.
-func setupWebhook(ctx context.Context, w io.Writer, st *store.Store) (string, string) {
-	base := os.Getenv("OCD_WEBHOOK_BASE")
-	if base == "" {
-		_, _ = fmt.Fprintln(w, "webhook off (OCD_WEBHOOK_BASE unset), polling only")
-		return "", ""
-	}
-	secret, err := newSecret()
-	if err != nil {
-		_, _ = fmt.Fprintln(w, "webhook off (no entropy):", err)
-		return "", ""
-	}
-	path, err := newPath()
-	if err != nil {
-		_, _ = fmt.Fprintln(w, "webhook off (no entropy):", err)
-		return "", ""
-	}
-	url := base + "/webhook/" + path
-	if err := tg.SetWebhook(ctx, url, secret); err != nil {
-		_, _ = fmt.Fprintln(w, "webhook off (setWebhook failed, polling continues):", err)
-		st.Audit("tg:owner", "webhook_failed", "", "", err.Error())
-		return "", ""
-	}
-	st.Audit("tg:owner", "webhook_on", "", "", url)
-	_, _ = fmt.Fprintln(w, "webhook on:", url)
-	go func() {
-		<-ctx.Done()
-		_ = tg.DeleteWebhook(ctx)
-	}()
-	return path, secret
 }

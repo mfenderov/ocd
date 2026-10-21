@@ -251,15 +251,15 @@ func TestLoadEnvFile(t *testing.T) {
 func TestLoadEnvFileStripsSingleQuotes(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "env")
-	if err := os.WriteFile(p, []byte("OCD_TG_TOKEN='123:abc'\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("OCD_HEARTBEAT_TOKEN='hb-secret'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	vals, err := onboard.LoadEnvFile(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if vals["OCD_TG_TOKEN"] != "123:abc" {
-		t.Fatalf("single quotes must be stripped, got %q", vals["OCD_TG_TOKEN"])
+	if vals["OCD_HEARTBEAT_TOKEN"] != "hb-secret" {
+		t.Fatalf("single quotes must be stripped, got %q", vals["OCD_HEARTBEAT_TOKEN"])
 	}
 }
 

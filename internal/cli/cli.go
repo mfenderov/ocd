@@ -66,7 +66,7 @@ func Root() *cobra.Command {
 
 	serve := &cobra.Command{
 		Use:   "serve",
-		Short: "Run daemon (Telegram polling + /pair HTTP)",
+		Short: "Run the box daemon (/pair, box API, heartbeat, sweeps)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return RunServe(cmd.OutOrStdout())
 		},

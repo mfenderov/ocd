@@ -44,13 +44,13 @@ func TestRootHasMintDevicesStatus(t *testing.T) {
 	}
 }
 
-func TestServeRunsWithoutTelegram(t *testing.T) {
-	t.Setenv("OCD_TG_TOKEN", "")
-	t.Setenv("OCD_OWNER_ID", "")
+// The box is a box, not a bot: the daemon serves the pair page, the box
+// API and the sweeps, and nothing else. Telegram belongs to the brain, so
+// the daemon's log never mentions it.
+func TestServeLogsNoTelegram(t *testing.T) {
 	addr := freeAddr(t)
 	t.Setenv("OCD_SERVE_ADDR", addr)
 	t.Setenv("OCD_DB", filepath.Join(t.TempDir(), "serve.db"))
-	t.Setenv("OCD_WEBHOOK_BASE", "")
 	t.Setenv("OCD_WORKER_URL", "")
 	t.Setenv("OCD_HEARTBEAT_TOKEN", "")
 	t.Setenv("OCD_ENROLL_TOKEN", "")
@@ -62,18 +62,8 @@ func TestServeRunsWithoutTelegram(t *testing.T) {
 	go func() { done <- cli.RunServe(out) }()
 
 	waitHealthy(t, addr, done, out)
-	got := out.String()
-	if !strings.Contains(got, "telegram off") {
-		t.Fatalf("want 'telegram off' log line when tokens unset, got %q", got)
-	}
-}
-
-func TestServeRefusesHalfConfiguredTelegram(t *testing.T) {
-	t.Setenv("OCD_TG_TOKEN", "test-dummy-token")
-	t.Setenv("OCD_OWNER_ID", "")
-	var sb strings.Builder
-	if err := cli.RunServe(&sb); err == nil {
-		t.Fatal("want refusal on token-without-owner")
+	if got := out.String(); strings.Contains(strings.ToLower(got), "telegram") {
+		t.Fatalf("want no telegram in the daemon log, got %q", got)
 	}
 }
 
@@ -100,10 +90,7 @@ func TestServeWithoutWorkerURLStillHealthy(t *testing.T) {
 	addr := freeAddr(t)
 
 	t.Setenv("OCD_SERVE_ADDR", addr)
-	t.Setenv("OCD_TG_TOKEN", "test-dummy-token")
-	t.Setenv("OCD_OWNER_ID", "12345")
 	t.Setenv("OCD_DB", filepath.Join(t.TempDir(), "serve.db"))
-	t.Setenv("OCD_WEBHOOK_BASE", "")
 	t.Setenv("OCD_WORKER_URL", "")
 	t.Setenv("OCD_HEARTBEAT_TOKEN", "")
 	t.Setenv("OCD_ENROLL_TOKEN", "")
@@ -181,10 +168,7 @@ func TestServeWithWorkerURLBeatsAndServesAdmin(t *testing.T) {
 	defer worker.Close()
 
 	t.Setenv("OCD_SERVE_ADDR", addr)
-	t.Setenv("OCD_TG_TOKEN", "test-dummy-token")
-	t.Setenv("OCD_OWNER_ID", "12345")
 	t.Setenv("OCD_DB", filepath.Join(t.TempDir(), "serve.db"))
-	t.Setenv("OCD_WEBHOOK_BASE", "")
 	t.Setenv("OCD_WORKER_URL", worker.URL)
 	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
 	t.Setenv("OCD_ENROLL_TOKEN", "")
