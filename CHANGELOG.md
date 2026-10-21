@@ -2,6 +2,37 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.19.0 - 2026-10-21
+#### Features
+- (**box**) tell the brain which tunnel this box uses - (7176636) - mfenderov
+- (**box**) report the OpenCode status and the links that died - (1b4cc0d) - mfenderov
+- (**box**) push link events to the brain without blocking the tap - (dc0ebaf) - mfenderov
+- (**worker**) the brain notices a silent box, once, and probes it directly - (7d9abd7) - mfenderov
+- (**worker**) the brain owns the links and edits the messages it handed out - (d9700bd) - mfenderov
+- (**worker**) the fleet board and the link menu, with working buttons - (b4e5204) - mfenderov
+- (**worker**) the brain answers the fleet commands - (5378511) - mfenderov
+- (**worker**) the brain answers Telegram, owner chat only, once per update - (d78611a) - mfenderov
+- (**worker**) a Telegram client for the brain - (0de33e2) - mfenderov
+- the cutover script that hands Telegram to the brain - (8efcc12) - mfenderov
+#### Bug Fixes
+- (**box**) the sweep touches only the brain's own links - (4d26ca0) - mfenderov
+- (**box**) report each dead link to the brain exactly once - (28345d1) - mfenderov
+- (**worker**) the brain keeps the tunnel id, and a tap is always answered - (d03d7ea) - mfenderov
+- (**worker**) a retired box is not offline, and a broken probe never calls one dead - (8465231) - mfenderov
+- (**worker**) the brain takes the events even without Telegram, and asks the bearer first - (16ed710) - mfenderov
+- (**worker**) one payload parser, one clock, and a tap that never spins - (abca0ea) - mfenderov
+- (**worker**) a chat edit answers with the edited Message, not with true - (c012f57) - mfenderov
+- (**worker**) the enrollment ping shares the Telegram client, and the client leaks no token - (84a5a79) - mfenderov
+- the enroll comment says what is true about the tunnel id - (4a36390) - mfenderov
+- the status relay's exec dies with its deadline, so no goroutine leaks - (c1af6c7) - mfenderov
+- the brain's pre-flight is not a session, so a login spends one slot - (22e5c6f) - mfenderov
+- the cutover script hides the secret, demands https, and reads ok first - (911d448) - mfenderov
+- the webhook must ask for callback queries, and the env loader must read single quotes - (2cdf648) - mfenderov
+#### Tests
+- (**tg**) pin the webhook to the callback queries the buttons need - (5446bb3) - mfenderov
+
+- - -
+
 ## v0.18.3 - 2026-10-20
 #### Bug Fixes
 - a terminal check that means terminal - (b9b8bea) - mfenderov
