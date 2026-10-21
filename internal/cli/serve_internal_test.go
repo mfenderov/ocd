@@ -99,7 +99,7 @@ func TestMountAdminStatusDoesNotWaitForAHungOpencode(t *testing.T) {
 // The box owns the link TTL, so the box tells the brain which links died.
 // The brain decides what to say about them.
 func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
-	st, tok := deadLinkStore(t, "admin")
+	st, tok, _ := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	var (
@@ -164,7 +164,7 @@ func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
 // A dead link is reported exactly once. The sweep keeps running, but the
 // token is gone after the first report, so the brain hears about it once.
 func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
-	st, tok := deadLinkStore(t, "admin")
+	st, tok, _ := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	var (
@@ -223,7 +223,7 @@ func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
 // A dead link is reported once. Once the brain has it, the row goes, so
 // no sweep reports the same dead link again and again.
 func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
-	st, _ := deadLinkStore(t, "admin")
+	st, _, _ := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func TestSweepDeletesDeadLinksAfterASuccessfulPush(t *testing.T) {
 // A brain outage must not lose the report: the token stays, so the next
 // sweep tries again.
 func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
-	st, tok := deadLinkStore(t, "admin")
+	st, tok, _ := deadLinkStore(t, "admin")
 	defer st.Close()
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,13 +268,8 @@ func TestSweepKeepsDeadLinksAfterAFailedPush(t *testing.T) {
 // does not own is not the brain's to hear about: the sweep neither
 // reports it nor deletes it.
 func TestSweepLeavesLinksTheBrainDoesNotOwnAlone(t *testing.T) {
-	st, tok := deadLinkStore(t, "other")
+	st, tok, dbPath := deadLinkStore(t, "other")
 	defer st.Close()
-	// The link carries a chat and a message id, so the store's pending
-	// edit list can show it. That list is how the test sees the row.
-	if err := st.SetLinkMessage(tok, 123, 456); err != nil {
-		t.Fatal(err)
-	}
 
 	var (
 		mu    sync.Mutex
@@ -303,12 +298,8 @@ func TestSweepLeavesLinksTheBrainDoesNotOwnAlone(t *testing.T) {
 	}
 	// The row must survive: the sweep is not the brain's link business
 	// unless the link is the brain's.
-	pending := st.PendingEdits()
-	if len(pending) != 1 || pending[0].Token != tok {
-		t.Fatalf("want the link left alone, got %v", pending)
-	}
-	if pending[0].Note != "expired" {
-		t.Fatalf("want the expired edit still pending, got %q", pending[0].Note)
+	if n := linkTokenRows(t, dbPath, tok); n != 1 {
+		t.Fatalf("want the link left alone, got %d rows", n)
 	}
 }
 
@@ -530,8 +521,10 @@ func auditTrail(t *testing.T) (*store.Store, string) {
 
 // deadLinkStore returns a store holding one link that was never tapped
 // and is past its TTL: a dead link. The via says who owns it: the brain
-// ("admin") or anyone else.
-func deadLinkStore(t *testing.T, via string) (*store.Store, string) {
+// ("admin") or anyone else. The path of the database file comes with it:
+// a link past its TTL has no live reader (every one of them stops at the
+// TTL), so the row itself is the only evidence that it survived.
+func deadLinkStore(t *testing.T, via string) (*store.Store, string, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
 	st, err := store.Open(dbPath)
@@ -559,7 +552,24 @@ func deadLinkStore(t *testing.T, via string) (*store.Store, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st, tok
+	return st, tok, dbPath
+}
+
+// linkTokenRows counts the link token rows of one token. The store has no
+// reader for a link that is past its TTL, so the row itself is the
+// evidence that the sweep left it alone.
+func linkTokenRows(t *testing.T, dbPath, tok string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM link_tokens WHERE token=?`, tok).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // brainConfig is the box's connection to a brain at the given origin.
