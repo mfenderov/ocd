@@ -72,7 +72,15 @@ export interface DnsConfig {
   zoneId: string;
   token: string;
   fetcher?: typeof fetch;
+  // deadlineMs bounds one DNS step (the listing and the writes share
+  // it). Unset = DNS_DEADLINE_MS.
+  deadlineMs?: number;
 }
+
+// The DNS call gets 5s, like the audit's outbound call. The box waits
+// 15s for its enrolment answer, so a slow API must fail long before
+// that — and the owner's approve tap must not hang either.
+export const DNS_DEADLINE_MS = 5_000;
 
 export interface EnrollStore {
   getBox(id: string): BoxRow | undefined;
@@ -535,11 +543,22 @@ export async function requestEnrollment(
       pending.hostname === body.hostname &&
       (await tokenMatches(body.enroll_token, pending.heartbeat_token_hash))
     ) {
+      // The box's claim is the truth about its tunnel: the brain issued
+      // the code before the box had one (the /enrollcode flow), so the
+      // pending row names no tunnel until the box claims. The claim's
+      // tunnel id rides into the box row the approval below writes; a
+      // claim that names none keeps the pending row's own.
+      const claimedTunnelId = body.tunnel_id ?? "";
+      const pendingTunnelId = claimedTunnelId !== "" ? claimedTunnelId : pending.tunnel_id;
+      let pendingSealed = pending.admin_token_sealed;
       if (body.admin_token !== undefined) {
         if (!config.sealKey) {
           throw new Error("enroll: seal key not configured");
         }
-        store.putPending({ ...pending, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+        pendingSealed = await sealAdminToken(config.sealKey, body.admin_token);
+      }
+      if (pendingTunnelId !== pending.tunnel_id || pendingSealed !== pending.admin_token_sealed) {
+        store.putPending({ ...pending, tunnel_id: pendingTunnelId, admin_token_sealed: pendingSealed });
       }
       const knownNow = store.getBox(body.id);
       const sealedNow = store.getPending(body.id)?.admin_token_sealed ?? "";
@@ -640,7 +659,7 @@ async function ensureDnsFor(config: EnrollConfig, store: EnrollStore, boxId: str
       return "failed: the brain has no DNS credential";
     }
     const box = store.getBox(boxId);
-    const tunnelId = box?.tunnel_id.trim() ?? "";
+    const tunnelId = (box?.tunnel_id ?? "").trim();
     // No tunnel id means no target: a record that points nowhere is
     // worse than no record at all, so the brain skips the write and
     // names the box that needs a re-enrol.
@@ -652,8 +671,12 @@ async function ensureDnsFor(config: EnrollConfig, store: EnrollStore, boxId: str
     if (!uiHost) {
       return `failed: the box's hostname "${tapHost}" names no domain to derive a UI host from`;
     }
+    // The step gets a deadline: one signal for the listing and the
+    // writes, so a hung API is a reported failure instead of a hung
+    // request.
+    const fetcher = withDeadline(dns.fetcher ?? fetch, dns.deadlineMs ?? DNS_DEADLINE_MS);
     const outcome = await ensureBoxDns(
-      { fetcher: dns.fetcher, zoneId: dns.zoneId, token: dns.token },
+      { fetcher, zoneId: dns.zoneId, token: dns.token },
       { tapHost, uiHost, target: `${tunnelId}.cfargotunnel.com` },
     );
     return outcome.ok ? "ok" : `skipped: ${outcome.reason}`;
@@ -677,6 +700,24 @@ async function ensureDnsFor(config: EnrollConfig, store: EnrollStore, boxId: str
 function uiHostFor(boxId: string, tapHost: string): string {
   const dot = tapHost.indexOf(".");
   return dot > 0 ? `oc-${boxId}${tapHost.slice(dot)}` : "";
+}
+
+// The fetcher with a deadline. The seam stays where it was: dns.ts
+// takes a fetcher, and the caller decides how long it may take. One
+// signal for the whole step (the listing and the writes share it), and
+// an aborted call says so in the operator's words.
+function withDeadline(fetcher: typeof fetch, deadlineMs: number): typeof fetch {
+  const signal = AbortSignal.timeout(deadlineMs);
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    try {
+      return await fetcher(input, { ...init, signal });
+    } catch (err) {
+      if (signal.aborted) {
+        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`);
+      }
+      throw err;
+    }
+  };
 }
 
 async function noopNotify(): Promise<void> {}
