@@ -1,7 +1,7 @@
-import { fetchAudits, handleAudit, type AuditRow as BoxAuditRow } from "./audit";
+import { handleAudit } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
-import { runCommand, type AuditRow, type LinkRecord } from "./botcommands";
+import { runCommand, type LinkRecord } from "./botcommands";
 import { BOX_API, relayFailureStatus, relayToBox } from "./boxapi";
 import {
   handleEnrollApprove,
@@ -290,8 +290,8 @@ export class FleetState implements DurableObject {
 
   // The brain's command seam: the Telegram router hands a command here
   // and the command layer answers it. The dependencies are the DO's own
-  // relays — the command layer never touches the state itself, so it
-  // stays a pure function of what it is given.
+  // relays and reads — the command layer never touches the state itself,
+  // so it stays a pure function of what it is given.
   //
   // The client rides in as an argument: the brain owns every message, and
   // the route that owns the token hands the client over.
@@ -300,7 +300,9 @@ export class FleetState implements DurableObject {
       telegram,
       listBoxes: () => this.listBackends(),
       mintLink: (boxId) => this.mintLink(boxId),
-      audit: (boxId, limit) => this.auditRows(boxId, limit),
+      // The history: the brain's own table. The boxes pushed these rows,
+      // so a box that is offline — or gone for good — keeps its history.
+      audit: async (boxId, limit) => this.auditLogRows(boxId, limit),
       revoke: (boxId) => this.revokeBox(boxId),
       revokeAll: () => this.revokeEveryBox(),
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
@@ -342,17 +344,6 @@ export class FleetState implements DurableObject {
       throw new Error("mint answered with no url");
     }
     return url;
-  }
-
-  // The audit: the boxes' rows, merged. The brain's own history (the
-  // audit_log table) is Phase 2's work: the boxes push their audit rows
-  // in that phase, and until then the bot reads the boxes — a working
-  // answer beats a spec-correct empty one.
-  private async auditRows(boxId: string, limit: number): Promise<AuditRow[]> {
-    const rows = await fetchAudits(this, { boxId: boxId || undefined, n: limit }, {
-      sealKey: this.sealKey,
-    });
-    return rows.map(commandAuditRow);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -1104,24 +1095,6 @@ export class FleetState implements DurableObject {
     }
     return new Response("Not Found", { status: 404 });
   }
-}
-
-// The box's audit rows as the command layer reads them: the layer wants
-// every field present, and a marker row (a box that could not be read)
-// carries no event fields.
-function commandAuditRow(row: BoxAuditRow): AuditRow {
-  return {
-    box: row.box,
-    at: row.at,
-    actor: "actor" in row ? row.actor : "",
-    action: "action" in row ? row.action : "",
-    device: "device" in row ? row.device : "",
-    ip: "ip" in row ? row.ip : "",
-    result: "result" in row ? row.result : "",
-    ua: "ua" in row ? row.ua : "",
-    tainted: row.tainted,
-    ...("error" in row ? { error: row.error } : {}),
-  };
 }
 
 // The enroll code: 32 random bytes, base64 (the Go bot's
