@@ -26,7 +26,7 @@ jobs:
       # statement about how big a function may be.
       - name: the CRAP bar
         run: |
-          go install github.com/mfenderov/gocrap@v0.5.1
+          go install github.com/mfenderov/gocrap@v0.4.2
           go test -coverprofile=coverage.out ./...
           gocrap -c coverage.out -max 10 -exclude "*_test.go"
 
