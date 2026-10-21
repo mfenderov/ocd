@@ -143,7 +143,15 @@ func (s *Store) AuditUA(actor, action, device, ip, result, ua string) int64 {
 		// kills the whole process.
 		return 0
 	}
-	go s.prune()
+	// The prune runs in the background so a write never waits for it —
+	// but it must not outlive the store: a writer that outlives its
+	// store keeps the database locked after the store is closed, and
+	// the next writer to come along finds it locked.
+	s.pruning.Add(1)
+	go func() {
+		defer s.pruning.Done()
+		s.prune()
+	}()
 	id, _ := res.LastInsertId()
 	return id
 }

@@ -92,16 +92,24 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 // The sweep runs in the background and never blocks the daemon. A box
 // with no brain configured sweeps nothing: the log line says so and no
 // goroutine starts.
-func startSweep(ctx context.Context, w io.Writer, st *store.Store, interval time.Duration) {
+//
+// The returned channel is closed when the sweep has stopped. A caller
+// that owns the store waits for it: a sweep still writing when the
+// store is closed keeps the database file alive, and the next writer
+// to come along finds it locked.
+func startSweep(ctx context.Context, w io.Writer, st *store.Store, interval time.Duration) <-chan struct{} {
+	stopped := make(chan struct{})
 	cfg := boxagent.BrainConfigFromEnv()
 	if !cfg.Ready() {
 		_, _ = fmt.Fprintln(w, "sweep off (no brain configured)")
-		return
+		close(stopped)
+		return stopped
 	}
 	_, _ = fmt.Fprintln(w, "link sweep on (every "+interval.String()+")")
 	_, _ = fmt.Fprintln(w, "audit push on (every "+interval.String()+")")
 	client := &http.Client{} // dedicated: PushEvents clones it, never shares or mutates
 	go func() {
+		defer close(stopped)
 		tick := time.NewTicker(interval)
 		defer tick.Stop()
 		for {
@@ -114,6 +122,7 @@ func startSweep(ctx context.Context, w io.Writer, st *store.Store, interval time
 			}
 		}
 	}()
+	return stopped
 }
 
 // sweepDeadLinks pushes one link-expired event per link that was never

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,7 +14,11 @@ type Device struct {
 	ExpiresAt int64
 }
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+	// pruning counts the background writers, so Close can wait for them.
+	pruning sync.WaitGroup
+}
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -23,6 +28,15 @@ func Open(path string) (*Store, error) {
 	// Single connection: :memory: databases are per-connection, and the
 	// check-then-claim in ConsumeLink must not interleave.
 	db.SetMaxOpenConns(1)
+	// A writer that finds the database locked waits for the lock instead
+	// of failing: the store prunes in the background while the box
+	// writes, and a second process (the CLI while the daemon runs) can
+	// write at the same time. Without the wait, the loser of the race
+	// loses a row — a busy error, not a slow one.
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	s := &Store{db: db}
 	if err := s.migrateAll(); err != nil {
 		db.Close()
@@ -41,7 +55,13 @@ func (s *Store) migrateAll() error {
 	return nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close closes the store. It waits for the background writers first: a
+// prune that outlived its store would keep the database locked for
+// whoever writes next.
+func (s *Store) Close() error {
+	s.pruning.Wait()
+	return s.db.Close()
+}
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS devices(name TEXT PRIMARY KEY, platform TEXT, last_cookie_at INTEGER, expires_at INTEGER);

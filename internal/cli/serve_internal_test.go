@@ -135,7 +135,8 @@ func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	stopped := startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	defer func() { cancel(); <-stopped }()
 
 	select {
 	case <-arrived:
@@ -192,7 +193,8 @@ func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	stopped := startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	defer func() { cancel(); <-stopped }()
 
 	// Wait for the first report, then let several more sweeps run: the
 	// fast ticker guarantees they do.
@@ -334,7 +336,8 @@ func TestSweepPushesAuditRows(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	stopped := startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	defer func() { cancel(); <-stopped }()
 
 	// Wait for the first push, then let several more sweeps run: the
 	// fast ticker guarantees they do.
