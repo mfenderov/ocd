@@ -167,15 +167,76 @@ func renderTunnelConfig(tunnelID, credFile string, rules []ingressRule) string {
 	return sb.String()
 }
 
-// WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
-// file: tunnel config is hand-tuned infrastructure, never silently replaced.
-// Use EnsureTunnelConfig when reruns should merge with the existing file.
-func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
+// The writer emits a fixed shape, and a rewrite reproduces only that
+// shape: the tunnel identity, the ingress block, one hostname/service
+// pair per rule, the 404 catch-all. A config that holds anything else —
+// a rule the parser cannot read, an option under a rule, another
+// top-level key — would lose it in a rewrite. The merge refuses those
+// configs instead of dropping parts of them.
+//
+// writerLineRe matches a line the writer emits: a rule's hostname, a
+// rule's local service, the 404 catch-all, or a top-level key. Its
+// hostname and service patterns are the parser's own, so a line the
+// parser cannot read is a line the writer cannot write.
+var writerLineRe = regexp.MustCompile(`^\s*(?:` + hostnamePattern + `|` + servicePattern +
+	`|-\s+service:\s*http_status:404|tunnel:\s*\S+|credentials-file:\s*\S+|ingress:)\s*$`)
+
+// topLevelKeyRe matches a name at the start of a line: a top-level key.
+var topLevelKeyRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_.-]*):`)
+
+// The groups of writerLineRe: the rule's hostname, the rule's port.
+const (
+	hostGroup = 1
+	portGroup = 2
+)
+
+// unreproducibleParts lists what a tunnel config holds that a rewrite
+// would drop: a line the writer does not emit, and a rule whose service
+// does not follow it.
+func unreproducibleParts(raw string) []string {
+	var parts []string
+	expectService := false
+	host := ""
+	for _, line := range strings.Split(raw, "\n") {
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		m := writerLineRe.FindStringSubmatch(line)
+		if m == nil {
+			parts = append(parts, unreproduciblePart(line))
+			continue
+		}
+		if m[hostGroup] != "" {
+			if expectService {
+				parts = append(parts, "a rule with no service: "+host)
+			}
+			host = m[hostGroup]
+			expectService = true
+			continue
+		}
+		if m[portGroup] != "" {
+			if !expectService {
+				parts = append(parts, "a service with no hostname: "+text)
+			}
+			expectService = false
+		}
 	}
-	rules := conventionalIngressRules(tapHost, uiHost, port, uiPort)
-	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
+	if expectService {
+		parts = append(parts, "a rule with no service: "+host)
+	}
+	return parts
+}
+
+// unreproduciblePart names what a line the writer does not emit holds.
+func unreproduciblePart(line string) string {
+	text := strings.TrimSpace(line)
+	if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+		if m := topLevelKeyRe.FindStringSubmatch(text); m != nil {
+			return "the top-level key " + m[1]
+		}
+	}
+	return "a rule the writer cannot reproduce: " + text
 }
 
 // EnsureTunnelConfig makes the box's tunnel config serve the desired
@@ -184,43 +245,47 @@ func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, u
 // hand-added rule survives — the new config is a superset of the old one,
 // never a replacement.
 //
-// A config whose rules cannot be read is left alone: no merge can promise
-// to keep what it cannot see. A config that already serves the desired
-// rules is reused, so a re-run writes nothing.
+// The file's own identity is kept: the merge never re-points the box at
+// another tunnel, and it refuses a config that holds something a rewrite
+// would drop. A config that already serves the desired rules is reused,
+// so a re-run writes nothing.
 func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			// A config we cannot read is a config we cannot merge: writing
 			// over it would lose it.
-			return false, fmt.Errorf("onboard: read tunnel config: %w", err)
+			return false, fmt.Errorf("onboard: read tunnel config: %w — re-run with --skip-tunnel to reuse the existing config", err)
 		}
 		rules := desiredIngressRules(tapHost, uiHost, port, uiPort, nil)
 		return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
 	}
-	rules, err := readableIngressRules(path, string(raw))
+	rules, err := mergeableConfig(path, string(raw), tunnelID)
 	if err != nil {
 		return false, err
 	}
 	desired := desiredIngressRules(tapHost, uiHost, port, uiPort, rules)
-	if sameIngressRules(rules, desired) && configTunnelID(string(raw)) == tunnelID {
+	if sameIngressRules(rules, desired) {
 		return true, nil
 	}
-	return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, desired))
+	return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, configCredentials(string(raw), credFile), desired))
 }
 
-// readableIngressRules reads the rules of an existing config. It refuses a
-// config this build cannot copy: writing over it would lose the rules it
-// cannot see.
-func readableIngressRules(path, raw string) ([]ingressRule, error) {
-	rules := ParseIngress(raw)
-	if len(rules) != ingressRuleCount(raw) {
-		return nil, fmt.Errorf("onboard: %s holds a rule this build cannot copy — move it aside to regenerate", path)
+// mergeableConfig reads the rules of a config the merge may rewrite: the
+// file must serve the tunnel the caller named, and it must hold nothing
+// the writer cannot reproduce.
+func mergeableConfig(path, raw, tunnelID string) ([]ingressRule, error) {
+	fileTunnel := configTunnelID(raw)
+	if fileTunnel == "" {
+		return nil, fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate, or re-run with --skip-tunnel", path)
 	}
-	if configTunnelID(raw) == "" {
-		return nil, fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate", path)
+	if fileTunnel != tunnelID {
+		return nil, fmt.Errorf("onboard: %s serves tunnel %s, not %s — move it aside to regenerate, or re-run with --skip-tunnel", path, fileTunnel, tunnelID)
 	}
-	return rules, nil
+	if parts := unreproducibleParts(raw); len(parts) > 0 {
+		return nil, fmt.Errorf("onboard: %s holds %s — remove it, move the file aside to regenerate, or re-run with --skip-tunnel", path, strings.Join(parts, "; "))
+	}
+	return ParseIngress(raw), nil
 }
 
 // configTunnelID returns the tunnel id a config names, empty when it
@@ -230,6 +295,15 @@ func configTunnelID(raw string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// configCredentials returns the credentials file a config names, or the
+// fallback when it names none.
+func configCredentials(raw, fallback string) string {
+	if m := credFileRe.FindStringSubmatch(raw); m != nil {
+		return m[1]
+	}
+	return fallback
 }
 
 func writeTunnelConfig(path, content string) error {

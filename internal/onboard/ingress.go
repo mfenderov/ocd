@@ -17,8 +17,16 @@ type ingressRule struct {
 	Port     int
 }
 
-var hostnameRe = regexp.MustCompile(`(?m)^\s*-\s+hostname:\s*(\S+)\s*$`)
-var serviceRe = regexp.MustCompile(`(?m)^\s*service:\s*http://127\.0\.0\.1:(\d+)\s*$`)
+// The patterns of the two lines a rule is made of. The writer's line
+// check is built from them, so a line the parser can read is a line the
+// writer can write.
+const (
+	hostnamePattern = `-\s+hostname:\s*(\S+)`
+	servicePattern  = `service:\s*http://127\.0\.0\.1:(\d+)`
+)
+
+var hostnameRe = regexp.MustCompile(`(?m)^\s*` + hostnamePattern + `\s*$`)
+var serviceRe = regexp.MustCompile(`(?m)^\s*` + servicePattern + `\s*$`)
 
 // ParseIngress reads the hostname/port pairs from a tunnel config.
 func ParseIngress(raw string) []ingressRule {
@@ -38,23 +46,23 @@ func ParseIngress(raw string) []ingressRule {
 	return rules
 }
 
-// ingressRuleCount counts the rules in a config that name a hostname,
-// whatever their service. A config whose count differs from the parsed
-// rules holds a rule this build cannot copy.
-func ingressRuleCount(raw string) int {
-	return len(hostnameRe.FindAllStringSubmatch(raw, -1))
-}
-
 // conventionalIngressRules are the rules for the hosts the box serves:
 // the tap host on the daemon port, the editor host on the OpenCode port.
-// On the command line path these are the names the convention gives.
+// On the command line path these are the names the convention gives. One
+// hostname gets one rule: cloudflared refuses a config that serves the
+// same host twice.
 func conventionalIngressRules(tapHost, uiHost string, port, uiPort int) []ingressRule {
 	rules := make([]ingressRule, 0, 2)
-	if h := strings.TrimSpace(tapHost); h != "" {
-		rules = append(rules, ingressRule{Hostname: h, Port: port})
-	}
-	if h := strings.TrimSpace(uiHost); h != "" {
-		rules = append(rules, ingressRule{Hostname: h, Port: uiPort})
+	seen := make(map[string]bool, 2)
+	for _, r := range []ingressRule{
+		{Hostname: strings.TrimSpace(tapHost), Port: port},
+		{Hostname: strings.TrimSpace(uiHost), Port: uiPort},
+	} {
+		if r.Hostname == "" || seen[r.Hostname] {
+			continue
+		}
+		seen[r.Hostname] = true
+		rules = append(rules, r)
 	}
 	return rules
 }
