@@ -48,29 +48,6 @@ func UIHost(boxID string) string {
 	return "oc-" + boxID + ".buyallmemes.com"
 }
 
-// DefaultTunnelPlan derives the conventional names from a box id:
-// oc-<box> tunnel, oc-tap-<box> tap host, oc-<box> UI host.
-func DefaultTunnelPlan(boxID string) TunnelPlan {
-	return TunnelPlan{
-		Name:    "oc-" + boxID,
-		TapHost: "oc-tap-" + boxID + ".buyallmemes.com",
-		UIHost:  "oc-" + boxID + ".buyallmemes.com",
-		Port:    DaemonPort,
-		UIPort:  OpenCodePort,
-	}
-}
-
-// TunnelDefaults fills blanks for the wizard: tunnel name oc-<box>, UI
-// hostname derived from the tap host's domain (oc-<box>.<domain>).
-// Bare hostnames get no UI default.
-func TunnelDefaults(boxID, tapHost string) (string, string) {
-	name := "oc-" + boxID
-	if i := strings.Index(tapHost, "."); i > 0 {
-		return name, "oc-" + boxID + tapHost[i:]
-	}
-	return name, ""
-}
-
 // DefaultCredDir mirrors cloudflared: ~/.cloudflared.
 func DefaultCredDir() (string, error) {
 	home, err := os.UserHomeDir()

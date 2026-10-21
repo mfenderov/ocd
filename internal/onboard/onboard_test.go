@@ -569,10 +569,11 @@ func TestIsTTYIsFalseForDevNull(t *testing.T) {
 }
 
 // Whatever the bot sends must be what the prompt accepts: the
-// paste-ready command carries the code as its last field.
+// paste-ready command carries the code as its last field. The bot's
+// shape is "ocd onboard <box> <code>".
 func TestAskEnrollCodeAcceptsThePasteReadyCommand(t *testing.T) {
 	old := onboard.Stdin
-	onboard.Stdin = strings.NewReader(onboard.EnrollCommand("mac", "code-abc") + "\n")
+	onboard.Stdin = strings.NewReader("ocd onboard mac code-abc\n")
 	t.Cleanup(func() { onboard.Stdin = old })
 
 	var sb strings.Builder
@@ -705,7 +706,7 @@ func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
 		"tunnel create": "Created tunnel oc-mac with id 11111111-2222-3333-4444-555555555555",
 		"tunnel route":  "Added CNAME",
 	}, nil)
-	plan := onboard.DefaultTunnelPlan("mac")
+	plan := boxTunnelPlan("mac")
 	plan.CredDir = filepath.Join(dir, ".cloudflared")
 	plan.APIToken = "test-token" // no cloudflared login needed
 	cfg := onboard.Config{
@@ -770,7 +771,7 @@ func TestOnboardSendsTunnelID(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
 	}))
 	defer srv.Close()
-	plan := onboard.DefaultTunnelPlan("mac")
+	plan := boxTunnelPlan("mac")
 	plan.CredDir = filepath.Join(dir, ".cloudflared")
 	plan.APIToken = "test-token" // no cloudflared login needed
 	cfg := onboard.Config{

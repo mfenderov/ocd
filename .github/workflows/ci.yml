@@ -21,6 +21,19 @@ jobs:
         with:
           version: v2.15.0
           args: ./cmd/... ./internal/...
+      # The dead code: the functions the program never reaches. The gate
+      # runs without -test, so a function only a test calls is dead too.
+      # The tool exits zero whatever it finds, so the step fails on any
+      # output.
+      - name: the dead code
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.52.0
+          out="$(deadcode ./cmd/ocd)"
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "dead code found — remove it, or the gate fails"
+            exit 1
+          fi
       # The CRAP bar: no function may combine many paths with little
       # testing. CRAP is never below the complexity, so this is mostly a
       # statement about how big a function may be.

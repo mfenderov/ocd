@@ -105,11 +105,24 @@ func plantOwnTunnelConfig(t *testing.T, credDir string) {
 	}
 }
 
+// boxTunnelPlan is the tunnel plan the onboarding gives a box: the
+// oc-<box> tunnel, the conventional hosts, the daemon's port and the
+// editor's.
+func boxTunnelPlan(boxID string) onboard.TunnelPlan {
+	return onboard.TunnelPlan{
+		Name:    "oc-" + boxID,
+		TapHost: onboard.TapHost(boxID),
+		UIHost:  onboard.UIHost(boxID),
+		Port:    onboard.DaemonPort,
+		UIPort:  onboard.OpenCodePort,
+	}
+}
+
 // homeOnboard is the onboarding of the box "home", whose tunnel config
 // lives in credDir.
 func homeOnboard(t *testing.T, dir, credDir string) onboard.Config {
 	t.Helper()
-	plan := onboard.DefaultTunnelPlan("home")
+	plan := boxTunnelPlan("home")
 	plan.CredDir = credDir
 	plan.APIToken = "test-token" // no cloudflared login needed
 	return onboard.Config{

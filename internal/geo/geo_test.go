@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mfenderov/ocd/internal/geo"
 )
 
 func TestLookupCity(t *testing.T) {
+	var requests atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		fmt.Fprint(w, `{"status":"success","city":"Berlin","countryCode":"DE"}`)
 	}))
 	defer srv.Close()
@@ -21,7 +24,7 @@ func TestLookupCity(t *testing.T) {
 	if got := geo.Lookup(t.Context(), "9.9.9.9"); got != "Berlin, DE" {
 		t.Fatalf("cached want Berlin, DE got %q", got)
 	}
-	if n := geo.Requests(); n != 1 {
+	if n := requests.Load(); n != 1 {
 		t.Fatalf("want 1 request (cache), got %d", n)
 	}
 }

@@ -384,6 +384,19 @@ npm run crap:self
 
 Both run in CI, and both fail the build when a function crosses the bar.
 
+**The dead code is measured too.** `deadcode` (the Go team's) walks the
+program from its entry point and reports the functions it never reaches:
+
+```bash
+go install golang.org/x/tools/cmd/deadcode@v0.52.0
+deadcode ./cmd/ocd
+```
+
+The gate runs it **without** `-test`: a function only a test calls is
+still dead in the product, and the test that keeps it alive pins a
+behaviour the product does not have. `deadcode` exits zero whatever it
+finds, so the CI step fails on any output.
+
 **The layers point inward.** The brain's domain modules never import the
 Durable Object: the types they share live in `worker/src/boxes.ts`, and
 `worker/test/architecture.test.ts` fails the build if one of them reaches

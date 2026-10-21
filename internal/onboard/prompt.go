@@ -17,13 +17,6 @@ func TelegramCommand(boxID string) string {
 	return "/enrollcode " + boxID
 }
 
-// EnrollCommand is the paste-ready command that enrolls a box with the
-// code the bot issued: `ocd onboard <box> <code>`. The bot sends it and
-// the prompt accepts it pasted, so both sides share one shape.
-func EnrollCommand(boxID, code string) string {
-	return "ocd onboard " + boxID + " " + code
-}
-
 // ResolveEnroll resolves the two things a run needs: the name of this box
 // and the one-time enroll code. A name the caller already has is used as
 // is; otherwise it is asked — it is the only question onboarding asks. A

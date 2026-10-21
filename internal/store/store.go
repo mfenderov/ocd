@@ -51,7 +51,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // migrateAll creates the schema the store needs.
 func (s *Store) migrateAll(ctx context.Context) error {
 	migrations := []func(context.Context) error{
-		s.migrate, s.migrateLinks, s.migrateIdem, s.migrateEdits, s.migrateSeen,
+		s.migrate, s.migrateLinks, s.migrateIdem, s.migrateEdits,
 	}
 	for _, migrate := range migrations {
 		if err := migrate(ctx); err != nil {
@@ -159,21 +159,4 @@ func (s *Store) RefreshExpiry(ctx context.Context, name string, d time.Duration)
 func (s *Store) ExpireDevice(ctx context.Context, name string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE devices SET last_cookie_at=0, expires_at=0 WHERE name=?`, name)
 	return err
-}
-
-func (s *Store) migrateSeen(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS seen_updates(id INTEGER PRIMARY KEY, at INTEGER);`)
-	return err
-}
-
-// SeenUpdate records a processed Telegram update ID for replay dedup.
-func (s *Store) SeenUpdate(ctx context.Context, id int64) bool {
-	var n int
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM seen_updates WHERE id=?`, id).Scan(&n)
-	if n > 0 {
-		return true
-	}
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO seen_updates(id, at) VALUES(?,strftime('%s','now'))`, id)
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM seen_updates WHERE at<strftime('%s','now')-?`, int64((24 * 60 * 60)))
-	return false
 }

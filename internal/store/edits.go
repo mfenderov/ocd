@@ -20,10 +20,6 @@ func (s *Store) migrateEdits(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) SetUsedUA(ctx context.Context, tok, ua string) {
-	s.SetUsedMeta(ctx, tok, "", ua)
-}
-
 func (s *Store) SetUsedMeta(ctx context.Context, tok, ip, ua string) {
 	_, _ = s.db.ExecContext(ctx, `UPDATE link_tokens SET used_ua=?, used_ip=? WHERE token=?`, truncateUA(ua), ip, tok)
 }

@@ -661,19 +661,6 @@ func TestEnsureTunnelConfigRefusesAnUnreadableConfig(t *testing.T) {
 	}
 }
 
-func TestTunnelDefaults(t *testing.T) {
-	name, ui := onboard.TunnelDefaults("mac", "oc-tap-mac.buyallmemes.com")
-	if name != "oc-mac" {
-		t.Fatalf("tunnel name = %q", name)
-	}
-	if ui != "oc-mac.buyallmemes.com" {
-		t.Fatalf("ui host = %q", ui)
-	}
-	if _, ui2 := onboard.TunnelDefaults("mac", "localhost"); ui2 != "" {
-		t.Fatalf("bare hostnames get no UI default, got %q", ui2)
-	}
-}
-
 func TestSetupTunnelRequiresLoginOrToken(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLOUDFLARE_API_TOKEN", "")

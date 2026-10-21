@@ -16,16 +16,9 @@ var (
 	Endpoint = "http://ip-api.com/json/"
 	client   = &http.Client{Timeout: 4 * time.Second}
 
-	mu       sync.Mutex
-	cache    = map[string]string{}
-	requests int
+	mu    sync.Mutex
+	cache = map[string]string{}
 )
-
-func Requests() int {
-	mu.Lock()
-	defer mu.Unlock()
-	return requests
-}
 
 // Lookup resolves the city of a public IP. The caller's context bounds
 // the lookup: a caller that goes away does not wait for the answer.
@@ -50,9 +43,6 @@ func Lookup(ctx context.Context, ip string) string {
 }
 
 func fetch(ctx context.Context, ip string) string {
-	mu.Lock()
-	requests++
-	mu.Unlock()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, Endpoint+ip+"?fields=status,city,countryCode", nil)
 	if err != nil {
 		return ""
