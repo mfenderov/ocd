@@ -148,7 +148,8 @@ func TestDoOnboardPendingThenApproved(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := onboard.DoOnboard(ctx, cfg, func(s string) { steps = append(steps, s) }); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(ctx, cfg, func(s string) { steps = append(steps, s) }); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	raw, _ := os.ReadFile(dir + "/env")
@@ -179,7 +180,8 @@ func TestDoOnboardPrintsTheDNSFailure(t *testing.T) {
 		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	joined := strings.Join(steps, "\n")
@@ -202,7 +204,8 @@ func TestDoOnboardSaysNothingWhenTheDNSCameOutOk(t *testing.T) {
 		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	// Nothing about the DNS is said when the brain wrote the records:
@@ -235,7 +238,8 @@ func TestDoOnboardSaysTheBrainWroteNoDNSForASkip(t *testing.T) {
 		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	joined := strings.Join(steps, "\n")
@@ -255,7 +259,8 @@ func TestDoOnboardSaysTheBrainWroteNoDNSForASkip(t *testing.T) {
 
 func TestDoOnboardRejectsBadBoxID(t *testing.T) {
 	cfg := onboard.Config{BoxID: "Bad Box!"}
-	if err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {
 		t.Fatal("want validation error before any network")
 	}
 }
@@ -284,7 +289,8 @@ func TestDoOnboardEnrollCodeSkipsWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
 		t.Fatalf("onboard with code: %v", err)
 	}
 	if gotToken != "typed-code-9" {
@@ -309,7 +315,8 @@ func TestDoOnboardBadCodeFailsFast(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := onboard.DoOnboard(ctx, cfg, nil); err == nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(ctx, cfg, nil); err == nil {
 		t.Fatal("rejected code must fail instead of waiting forever")
 	}
 }
@@ -429,7 +436,8 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
 		t.Fatalf("single-command onboard: %v", err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "env"))
@@ -622,7 +630,8 @@ func TestDoOnboardCodeBecomesHeartbeatSecret(t *testing.T) {
 		EnrollCode: "code-abc", EnvPath: envPath, DBPath: filepath.Join(dir, "ocd.db"),
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	if presented != "code-abc" {
@@ -693,7 +702,8 @@ func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
 		EnvPath: filepath.Join(dir, "env"), DBPath: filepath.Join(dir, "ocd.db"),
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	vals, err := onboard.LoadEnvFile(filepath.Join(dir, "env"))
@@ -756,7 +766,8 @@ func TestOnboardSendsTunnelID(t *testing.T) {
 		EnvPath: filepath.Join(dir, "env"), DBPath: filepath.Join(dir, "ocd.db"),
 		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
 	}
-	if err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
+	fakeRestartBox(t)
+	if _, err := onboard.DoOnboard(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("onboard: %v", err)
 	}
 	if body["tunnel_id"] != tunnelID {

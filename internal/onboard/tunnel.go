@@ -353,6 +353,20 @@ func HasCert(dir string) bool {
 	return err == nil
 }
 
+// TunnelSetup is what a tunnel setup did: the tunnel the box serves and
+// whether this run created it.
+//
+// A created tunnel has no other supervisor, so the daemon must run it. A
+// reused one already has one — the box's own service, or the daemon that
+// ran it before — and that decision is not this run's to change.
+type TunnelSetup struct {
+	// ID is the tunnel the box serves: the id, the identity. The name
+	// is a label.
+	ID string
+	// Created says whether this run created the tunnel.
+	Created bool
+}
+
 // SetupTunnel resolves the tunnel this box serves, writes config.yml and
 // routes the DNS for the tap (+UI) host. Progress mirrors DoOnboard:
 // nil-safe.
@@ -364,14 +378,14 @@ func HasCert(dir string) bool {
 // The DNS is routed every time: the records may be missing (the brain
 // writes them too), and the route overwrites, so running it again
 // changes nothing.
-func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (string, error) {
+func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (TunnelSetup, error) {
 	say := func(s string) {
 		if progress != nil {
 			progress(s)
 		}
 	}
 	if strings.TrimSpace(plan.TapHost) == "" {
-		return "", fmt.Errorf("onboard: tap hostname is required")
+		return TunnelSetup{}, fmt.Errorf("onboard: tap hostname is required")
 	}
 	if plan.Port <= 0 {
 		plan.Port = DaemonPort
@@ -382,22 +396,22 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 	if strings.TrimSpace(plan.CredDir) == "" {
 		dir, err := DefaultCredDir()
 		if err != nil {
-			return "", err
+			return TunnelSetup{}, err
 		}
 		plan.CredDir = dir
 	}
 	if !HasCert(plan.CredDir) && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
-		return "", fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
+		return TunnelSetup{}, fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
 	}
 	cfgPath := filepath.Join(plan.CredDir, "config.yml")
-	id, err := resolveTunnelID(ctx, plan, cfgPath, say)
+	id, created, err := resolveTunnelID(ctx, plan, cfgPath, say)
 	if err != nil {
-		return "", err
+		return TunnelSetup{}, err
 	}
 	credFile := filepath.Join(plan.CredDir, id+".json")
 	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port, plan.UIPort)
 	if err != nil {
-		return "", err
+		return TunnelSetup{}, err
 	}
 	if reused {
 		say("reusing tunnel config " + cfgPath)
@@ -405,12 +419,13 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 		say("writing " + cfgPath)
 	}
 	if err := routeBoxDNS(ctx, plan, id, say); err != nil {
-		return "", err
+		return TunnelSetup{}, err
 	}
-	return id, nil
+	return TunnelSetup{ID: id, Created: created}, nil
 }
 
-// resolveTunnelID resolves the tunnel id this box serves.
+// resolveTunnelID resolves the tunnel id this box serves, and says
+// whether this run created it.
 //
 // The box's own config names it, and that id wins whatever the plan calls
 // the tunnel: the name is a label, the id is the identity. So a box whose
@@ -419,26 +434,30 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 //
 // Only a box with no config of its own looks the plan's name up, and
 // creates the tunnel when the name is unknown.
-func resolveTunnelID(ctx context.Context, plan TunnelPlan, cfgPath string, say func(string)) (string, error) {
+func resolveTunnelID(ctx context.Context, plan TunnelPlan, cfgPath string, say func(string)) (string, bool, error) {
 	own, err := ownTunnelID(cfgPath)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if own != "" {
 		say(tunnelChoice(own, plan.Name))
-		return own, nil
+		return own, false, nil
 	}
 	say("listing tunnels")
 	existing, err := ListTunnels(ctx)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if id := existing[plan.Name]; id != "" {
 		say("reusing tunnel " + plan.Name)
-		return id, nil
+		return id, false, nil
 	}
 	say("creating tunnel " + plan.Name)
-	return CreateTunnel(ctx, plan.APIToken, plan.Name)
+	id, err := CreateTunnel(ctx, plan.APIToken, plan.Name)
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 // ownTunnelID returns the tunnel id the box's own config names.

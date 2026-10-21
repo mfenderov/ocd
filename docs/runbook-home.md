@@ -30,6 +30,13 @@ systemctl --user status ocd-serve ocd-tunnel
 systemctl --user restart ocd-serve        # after a binary upgrade
 ```
 
+`ocd onboard` restarts both units itself: cloudflared reads the
+ingress rules at start-up (a connector that is not restarted keeps the
+rules it loaded at boot), and the daemon reads `~/.ocd/env` at start-up
+(a re-enrolment rotates the heartbeat and admin tokens). When a unit
+cannot be restarted the onboarding says so and names it — the
+enrolment itself is committed by then and never fails over a restart.
+
 `ocd serve` loads `~/.ocd/env` itself (no sourcing needed) and reads its
 DB path from `OCD_DB`, which must be an **absolute** path: systemd's
 `EnvironmentFile=` does not expand `$HOME`, and a literal `$HOME` once
@@ -81,8 +88,10 @@ here.
    origin is down. 1033 means the tunnel has no connector.
 3. Manual recovery: `bash ~/dev/ocd/scripts/boot.sh` (idempotent,
    start-missing-only, exit 0).
-4. `ocd repair` — recomputes the derived env/tunnel values and reloads
-   the service. Safe to run any time; it never touches secrets.
+4. `ocd repair` — recomputes the derived env/tunnel values. It reloads
+   the service on macOS only; on Linux the units are restarted by hand
+   (`systemctl --user restart ocd-serve ocd-tunnel`). Safe to run any
+   time; it never touches secrets.
 5. Heartbeat rejected as "reset-looking seq" = the daemon opened a
    different database than the brain knows. Check `OCD_DB` is absolute
    and that the path holds the real `ocd.db`.

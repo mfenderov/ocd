@@ -68,12 +68,12 @@ func TestSetupTunnelFullFlow(t *testing.T) {
 		Name: "oc-mac", TapHost: "oc-tap-mac.buyallmemes.com", UIHost: "",
 		CredDir: dir, Port: 49400,
 	}
-	id, err := onboard.SetupTunnel(context.Background(), plan, func(string) {})
+	setup, err := onboard.SetupTunnel(context.Background(), plan, func(string) {})
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if id != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
-		t.Fatalf("want parsed tunnel id, got %q", id)
+	if setup.ID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Fatalf("want parsed tunnel id, got %q", setup.ID)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "config.yml"))
 	if err != nil {
@@ -94,12 +94,12 @@ func TestSetupTunnelReusesExisting(t *testing.T) {
 		Name: "oc-mac", TapHost: "oc-tap-mac.buyallmemes.com",
 		CredDir: dir, Port: 49400,
 	}
-	id, err := onboard.SetupTunnel(context.Background(), plan, func(string) {})
+	setup, err := onboard.SetupTunnel(context.Background(), plan, func(string) {})
 	if err != nil {
 		t.Fatalf("reuse: %v", err)
 	}
-	if id != "11111111-2222-3333-4444-555555555555" {
-		t.Fatalf("must reuse existing tunnel, got %q", id)
+	if setup.ID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("must reuse existing tunnel, got %q", setup.ID)
 	}
 }
 
@@ -246,12 +246,12 @@ func TestSetupTunnelReusesTheTunnelItsOwnConfigNames(t *testing.T) {
 		Name: "oc-home", TapHost: conventionalTap, UIHost: conventionalUI,
 		CredDir: dir, Port: 49400, UIPort: 49374,
 	}
-	id, err := onboard.SetupTunnel(context.Background(), plan, func(s string) { log = append(log, s) })
+	setup, err := onboard.SetupTunnel(context.Background(), plan, func(s string) { log = append(log, s) })
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if id != own {
-		t.Fatalf("the box's own tunnel must win over the plan's name, got %q", id)
+	if setup.ID != own {
+		t.Fatalf("the box's own tunnel must win over the plan's name, got %q", setup.ID)
 	}
 	assertNoTunnelCreated(t, cloudflaredCalls(t, callsFile))
 	if !logMentions(log, own, "oc-home") {
@@ -272,12 +272,12 @@ func TestSetupTunnelCreatesTheTunnelForABoxWithNoConfig(t *testing.T) {
 	plantCert(t, dir)
 
 	plan := onboard.TunnelPlan{Name: "oc-fresh", TapHost: "oc-tap-fresh.example.com", CredDir: dir, Port: 49400}
-	id, err := onboard.SetupTunnel(context.Background(), plan, nil)
+	setup, err := onboard.SetupTunnel(context.Background(), plan, nil)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if id != created {
-		t.Fatalf("want the created tunnel id, got %q", id)
+	if setup.ID != created {
+		t.Fatalf("want the created tunnel id, got %q", setup.ID)
 	}
 	calls := cloudflaredCalls(t, callsFile)
 	if !callsContain(calls, "tunnel create oc-fresh") {
@@ -710,12 +710,12 @@ func TestSetupTunnelReusesIdenticalConfig(t *testing.T) {
 	if _, err := onboard.SetupTunnel(context.Background(), plan, nil); err != nil {
 		t.Fatalf("first setup: %v", err)
 	}
-	id, err := onboard.SetupTunnel(context.Background(), plan, nil)
+	setup, err := onboard.SetupTunnel(context.Background(), plan, nil)
 	if err != nil {
 		t.Fatalf("identical rerun must pass through, got: %v", err)
 	}
-	if id != "11111111-1111-1111-1111-111111111111" {
-		t.Fatalf("want same tunnel id, got %q", id)
+	if setup.ID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("want same tunnel id, got %q", setup.ID)
 	}
 }
 
