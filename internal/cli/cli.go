@@ -181,9 +181,6 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			out, err := exec.Command("opencode", "service", "status").Output()
-			_ = out
-			_ = err
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), admin.Status(cmd.Context(), st, func(ctx context.Context, name string, args ...string) (string, error) {
 				o, e := exec.CommandContext(ctx, name, args...).Output()
 				return string(o), e

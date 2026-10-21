@@ -85,17 +85,25 @@ func BootstrapLaunchd(path string) error {
 	return nil
 }
 
+// idCommand runs `id -u`. A variable so a test can stand in for the
+// machine: no test runs `id`.
+var idCommand = func() ([]byte, error) {
+	return exec.Command("id", "-u").Output()
+}
+
 // loginUID is the uid of this login session: $UID, else `id -u`. The
 // uid is not checked here: only the caller that addresses a session
 // with it needs it to be a number.
 func loginUID() (string, error) {
 	uid := os.Getenv("UID")
 	if uid == "" {
-		out, err := exec.Command("id", "-u").Output()
+		out, err := idCommand()
 		if err != nil {
 			return "", fmt.Errorf("onboard: uid: %w", err)
 		}
-		uid = string(out[:len(out)-1])
+		// Trimmed, not sliced: `id -u` that prints nothing must not
+		// take the process down.
+		uid = strings.TrimSpace(string(out))
 	}
 	return uid, nil
 }
