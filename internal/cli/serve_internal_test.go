@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -453,6 +454,179 @@ func TestSweepPushesAfterTheAuditTrailWasReset(t *testing.T) {
 	}
 }
 
+// The trail was reset and refilled to the same length: the rowids start
+// over, so the watermark points at a row that is not the row the brain
+// has. The push must not go silent: the sweep repairs the watermark and
+// offers the trail again.
+func TestSweepPushesAfterTheTrailWasResetAndRefilled(t *testing.T) {
+	st, dbPath := auditTrail(t)
+	// The box reported up to the trail's last row.
+	if err := st.SetAuditWatermark(2); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// The trail is emptied and refilled: the rowids start over, and the
+	// new rows are new events with new times.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM audit`); err != nil {
+		t.Fatal(err)
+	}
+	// The new rows are new events: they carry their own times, and those
+	// times are not the ones the brain saw.
+	for _, at := range []string{`strftime('%s','now')`, `strftime('%s','now')-1`} {
+		if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(` + at + `,'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var (
+		mu  sync.Mutex
+		got []boxagent.Event
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Both refilled rows must be pushed: the old watermark points at a row
+	// that is not the row the brain has.
+	if len(got) != 2 {
+		t.Fatalf("want the two refilled rows pushed, got %d events", len(got))
+	}
+	for i, event := range got {
+		if event.Type != "audit" || event.Action != "tapped" {
+			t.Fatalf("want an audit event, got %+v", event)
+		}
+		if event.At == got[0].At && i == 1 {
+			t.Fatal("want the two rows to carry their own times")
+		}
+	}
+}
+
+// The row at the watermark's rowid is not the row the brain has: the
+// trail was replaced by another row that happens to sit at the same
+// place, in the same second. The rowid cannot tell the two apart — the
+// row's content can — so the watermark is repaired and the trail is
+// offered again.
+func TestSweepPushesAfterTheWatermarksRowWasReplaced(t *testing.T) {
+	st, dbPath := auditTrail(t)
+	// The box reported up to the trail's last row.
+	if err := st.SetAuditWatermark(2); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// The trail is emptied and refilled with rows that carry the old
+	// row's time — the same second — but are other events.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM audit`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),'web:1.2.3.4','tapped','mac','1.2.3.4','ok','curl/8')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),'web:1.2.3.4','tap_denied','','1.2.3.4','used-or-expired','')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var (
+		mu  sync.Mutex
+		got []boxagent.Event
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Both rows must be pushed: the watermark points at a row that is
+	// not the row the brain has.
+	if len(got) != 2 {
+		t.Fatalf("want the two replacement rows pushed, got %d events", len(got))
+	}
+}
+
+// The prune is not a reset: it takes the old rows and leaves the live
+// one. The watermark's row survives it, so the sweep must not repair the
+// watermark — the push continues where it was.
+func TestSweepKeepsTheWatermarkAfterThePrune(t *testing.T) {
+	st, live := prunedTrail(t)
+	defer st.Close()
+
+	var (
+		mu  sync.Mutex
+		got []boxagent.Event
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	var log bytes.Buffer
+	sweepAuditRows(context.Background(), &log, st, brainConfig(brain.URL), &http.Client{})
+
+	// The prune took the old row; the live row is still there.
+	watermark, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != live {
+		t.Fatalf("want the watermark left on the live row %d, got %d", live, watermark)
+	}
+	if strings.Contains(log.String(), "repaired") {
+		t.Fatalf("the prune must not repair the watermark, got %q", log.String())
+	}
+}
+
 // A brain outage must not lose the audit rows: the watermark stays where
 // it was, so the next sweep offers the same rows again.
 func TestSweepKeepsAuditRowsAfterAFailedPush(t *testing.T) {
@@ -517,6 +691,54 @@ func auditTrail(t *testing.T) (*store.Store, string) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st, dbPath
+}
+
+// prunedTrail returns a store whose trail the prune has already taken:
+// the old row is gone and the live row is left. The watermark names the
+// live row, and the rowid of that row comes back with it.
+func prunedTrail(t *testing.T) (*store.Store, int64) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "prune.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old row: written 100 days ago, so the prune takes it.
+	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.Close()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE audit SET at=at-100*86400`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The live row: the write triggers the prune, which takes the old
+	// one.
+	live := st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	if err := st.SetAuditWatermark(live); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the prune to take the old row.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rows, err := st.RecentAuditSince(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 1 {
+			return st, live
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the prune never took the old row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // deadLinkStore returns a store holding one link that was never tapped

@@ -173,6 +173,107 @@ func TestRepairAuditWatermark(t *testing.T) {
 	}
 }
 
+// The watermark is anchored to the row it names: the row's own content
+// is stored next to it, so the box can tell "the same row" from "the
+// same number". A rowid is a position, not an identity.
+func TestAuditWatermarkAnchorsItsRow(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	anchor, ok, err := st.WatermarkAnchor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("want the anchor stored with the watermark")
+	}
+	rows, err := st.RecentAuditSince(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %d", len(rows))
+	}
+	if anchor.At != rows[0].At || anchor.Action != rows[0].Action {
+		t.Fatalf("want the anchor to name the row (%d, %q), got (%d, %q)", rows[0].At, rows[0].Action, anchor.At, anchor.Action)
+	}
+	// The row is still the row: the watermark is not stale.
+	stale, err := st.AuditWatermarkStale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale {
+		t.Fatal("want a live watermark to be fresh")
+	}
+}
+
+// The anchor stays with the row the watermark names: a watermark that
+// does not move does not take the anchor with it.
+func TestAuditAnchorDoesNotMoveBackwards(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	first := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	second := st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	if err := st.SetAuditWatermark(second); err != nil {
+		t.Fatal(err)
+	}
+	anchor, ok, err := st.WatermarkAnchor()
+	if err != nil || !ok {
+		t.Fatalf("want the anchor stored, ok=%v err=%v", ok, err)
+	}
+	// A lower watermark is ignored: the anchor must keep naming the row
+	// the watermark names.
+	if err := st.SetAuditWatermark(first); err != nil {
+		t.Fatal(err)
+	}
+	after, ok, err := st.WatermarkAnchor()
+	if err != nil || !ok {
+		t.Fatalf("want the anchor stored, ok=%v err=%v", ok, err)
+	}
+	if after != anchor {
+		t.Fatalf("want the anchor left on %+v, got %+v", anchor, after)
+	}
+	watermark, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != second {
+		t.Fatalf("want the watermark left at %d, got %d", second, watermark)
+	}
+}
+
+// The repair puts the watermark back to the start of the trail, and the
+// anchor goes with it: the watermark names no row any more.
+func TestRepairAuditWatermarkDropsTheAnchor(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairAuditWatermark(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.WatermarkAnchor(); err != nil || ok {
+		t.Fatalf("want the anchor dropped, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestAuditRowMarshalSnakeCaseKeys(t *testing.T) {
 	row := store.AuditRow{At: 1, Actor: "a", Action: "b", Device: "c", IP: "d", Result: "e", UA: "f"}
 	raw, err := json.Marshal(row)

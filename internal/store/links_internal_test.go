@@ -215,6 +215,74 @@ func TestPruneKeepsTheNewestRow(t *testing.T) {
 	}
 }
 
+// A database written before the anchor existed has a watermark and no
+// anchor. It must not repair itself: the check that was there before —
+// a watermark past the trail's last rowid — is the only thing there is.
+func TestAuditWatermarkWithoutAnAnchorFallsBackToTheNumericCheck(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	// An old database: the watermark is in the meta table, and nothing
+	// else is.
+	if _, err := st.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',1)`); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := st.AuditWatermarkStale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale {
+		t.Fatal("want a watermark inside the trail to stay fresh without an anchor")
+	}
+	// Past the trail's last rowid: stale, as it was before the anchor.
+	if _, err := st.db.Exec(`UPDATE meta SET v=5000 WHERE k='audit_watermark'`); err != nil {
+		t.Fatal(err)
+	}
+	stale, err = st.AuditWatermarkStale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stale {
+		t.Fatal("want a watermark past the trail to be stale")
+	}
+}
+
+// The trail was reset and refilled: the row at the watermark's rowid is
+// another row. The rowid is a position, not an identity — the content
+// is what tells them apart.
+func TestAuditWatermarkIsStaleWhenItsRowWasReplaced(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	// The trail is emptied and refilled: the rowids start over, and the
+	// row at the watermark's rowid is another row — the same second,
+	// another action.
+	if _, err := st.db.Exec(`DELETE FROM audit`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO audit(at, actor, action, device, ip, result, ua) VALUES(strftime('%s','now'),'web:1.2.3.4','tap_denied','','1.2.3.4','used-or-expired','')`); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := st.AuditWatermarkStale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stale {
+		t.Fatal("want the watermark stale: the row it named is another row")
+	}
+}
+
 func countLinkTokens(t *testing.T, st *Store, tok string) int {
 	t.Helper()
 	var n int

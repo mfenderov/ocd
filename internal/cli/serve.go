@@ -153,23 +153,23 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 
 // auditPushFrom returns the rowid the audit push continues after.
 //
-// The watermark is the rowid of the last audit row the brain has. A
-// watermark past the trail's last row is stale: the trail was reset and
-// its rowids started over, so the watermark points past every row that
-// follows and the push would be silent for good. The watermark is
-// repaired then — it goes back to the start of the trail — and the
-// trail's rows are offered again. The brain's dedup collapses the rows
-// it already has.
+// The watermark is the rowid of the last audit row the brain has. It is
+// stale when the row it points at is gone, or is not the row the brain
+// saw: the trail was reset and refilled, its rowids started over, and
+// the rows in between would be lost for good. The watermark is repaired
+// then — it goes back to the start of the trail — and the trail's rows
+// are offered again. The brain's dedup collapses the rows it already
+// has.
 func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
 	watermark, err := st.AuditWatermark()
 	if err != nil {
 		return 0, err
 	}
-	last, err := st.LastAuditRowID()
+	stale, err := st.AuditWatermarkStale()
 	if err != nil {
 		return 0, err
 	}
-	if watermark <= last {
+	if !stale {
 		return watermark, nil
 	}
 	_, _ = fmt.Fprintln(w, "audit trail was reset: the watermark is repaired")
