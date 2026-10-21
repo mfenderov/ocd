@@ -111,21 +111,61 @@ func RenderIngress(tunnelID, credFile string, rules []ingressRule) string {
 
 // TapHostFromConfig returns the hostname serving the daemon (pair links)
 // and the one serving OpenCode, as the tunnel config states them.
-func TapHostFromConfig(cfgPath string) (tapHost, uiHost string, err error) {
+//
+// The rule named after this box wins, among the daemon rules and among
+// the editor rules: a box that serves both its old name and its own
+// keeps its own, so a repair never reverts the box to the host it used
+// to serve. A box that never followed the convention falls back to the
+// first rule of each kind.
+func TapHostFromConfig(cfgPath string, boxID string) (tapHost, uiHost string, err error) {
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return "", "", fmt.Errorf("onboard: read tunnel config: %w", err)
 	}
-	for _, r := range ParseIngress(string(raw)) {
-		if r.Port == DaemonPort && tapHost == "" {
-			tapHost = r.Hostname
-		}
-		if r.Port != DaemonPort && uiHost == "" {
-			uiHost = r.Hostname
-		}
-	}
+	daemon, editor := splitByDaemonPort(ParseIngress(string(raw)))
+	tapHost = hostForBox(daemon, hostLabel(TapHost(boxID)))
+	uiHost = hostForBox(editor, hostLabel(UIHost(boxID)))
 	if tapHost == "" {
 		return "", "", fmt.Errorf("onboard: tunnel config has no rule for the daemon port %d", DaemonPort)
 	}
 	return tapHost, uiHost, nil
+}
+
+// splitByDaemonPort splits the rules into the ones serving the daemon
+// port and the ones serving the editor.
+func splitByDaemonPort(rules []ingressRule) (daemon, editor []ingressRule) {
+	for _, r := range rules {
+		if r.Port == DaemonPort {
+			daemon = append(daemon, r)
+			continue
+		}
+		editor = append(editor, r)
+	}
+	return daemon, editor
+}
+
+// hostForBox returns the hostname this box serves out of the rules it
+// has. The rule named after the box wins; a box that never followed the
+// convention falls back to the first rule it has.
+func hostForBox(rules []ingressRule, label string) string {
+	for _, r := range rules {
+		if hostLabel(r.Hostname) == label {
+			return r.Hostname
+		}
+	}
+	if len(rules) == 0 {
+		return ""
+	}
+	return rules[0].Hostname
+}
+
+// hostLabel is the name a hostname carries before its domain. The
+// convention names a box, not a domain, so a rule is compared by its
+// label: a box that serves its own name on another domain still follows
+// the convention.
+func hostLabel(host string) string {
+	if i := strings.Index(host, "."); i > 0 {
+		return host[:i]
+	}
+	return host
 }

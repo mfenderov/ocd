@@ -43,7 +43,7 @@ func RepairEnv(envPath, boxID string) ([]string, error) {
 	}
 	tapHost, uiHost := TapHost(boxID), UIHost(boxID)
 	if cfg := tunnelConfigPath(); cfg != "" {
-		if t, u, err := TapHostFromConfig(cfg); err == nil {
+		if t, u, err := TapHostFromConfig(cfg, boxID); err == nil {
 			tapHost, uiHost = t, u
 		}
 	}
@@ -79,10 +79,17 @@ func RepairEnv(envPath, boxID string) ([]string, error) {
 // they are; only the ports are corrected. The OpenCode port is
 // discovered from the running service, because it is not fixed. Returns
 // true when the file changed.
+//
+// A config whose rules cannot be paired is refused: a rewrite would
+// write a rule with another rule's port.
 func RepairTunnel(cfgPath, boxID string) (bool, error) {
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return false, fmt.Errorf("onboard: read tunnel config: %w", err)
+	}
+	if problems := repairRuleProblems(string(raw)); len(problems) > 0 {
+		return false, fmt.Errorf("onboard: %s holds %s — fix the rule by hand, or move the file aside to regenerate",
+			cfgPath, strings.Join(problems, "; "))
 	}
 	id := tunnelIDRe.FindSubmatch(raw)
 	cred := credFileRe.FindSubmatch(raw)
@@ -126,6 +133,60 @@ func RepairTunnel(cfgPath, boxID string) (bool, error) {
 	return true, nil
 }
 
+// catchAllRe matches the 404 catch-all that closes a config's rules.
+// The writer writes it again, so it is the one rule the repair reads
+// and rewrites without losing anything.
+var catchAllRe = regexp.MustCompile(`(?m)^\s*-\s+service:\s*http_status:404\s*$`)
+
+// repairRuleProblems names the rules of a config the repair cannot
+// rewrite faithfully: a rule whose service is not a loopback HTTP URL
+// (a unix socket, an http2 service), a rule with no service, a service
+// with no hostname, a rule the parser cannot read at all.
+//
+// ParseIngress pairs the hostnames and the ports by index, so one rule
+// it cannot read shifts every pairing after it: the repair would write
+// the tap rule with the editor's port. A rule it cannot read is also
+// dropped by the rewrite, so the file is left alone instead.
+func repairRuleProblems(raw string) []string {
+	var problems []string
+	host := ""
+	for _, line := range strings.Split(raw, "\n") {
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		if m := hostnameRe.FindStringSubmatch(line); m != nil {
+			if host != "" {
+				problems = append(problems, "a rule with no service: "+host)
+			}
+			host = m[1]
+			continue
+		}
+		if serviceRe.MatchString(line) {
+			if host == "" {
+				problems = append(problems, "a service with no hostname: "+text)
+			}
+			host = ""
+			continue
+		}
+		if catchAllRe.MatchString(line) {
+			continue
+		}
+		if host != "" {
+			problems = append(problems, "a rule the repair cannot pair: "+host+" — "+text)
+			host = ""
+			continue
+		}
+		if strings.HasPrefix(text, "-") {
+			problems = append(problems, "a rule the repair cannot read: "+text)
+		}
+	}
+	if host != "" {
+		problems = append(problems, "a rule with no service: "+host)
+	}
+	return problems
+}
+
 // tunnelConfigPath is the cloudflared config of this box, if any.
 func tunnelConfigPath() string {
 	dir, err := DefaultCredDir()
@@ -166,7 +227,7 @@ func Repair(boxID string) (RepairResult, error) {
 func EnvSummary(boxID string) string {
 	tapHost, uiHost := TapHost(boxID), UIHost(boxID)
 	if cfg := tunnelConfigPath(); cfg != "" {
-		if t, u, err := TapHostFromConfig(cfg); err == nil {
+		if t, u, err := TapHostFromConfig(cfg, boxID); err == nil {
 			tapHost, uiHost = t, u
 		}
 	}
