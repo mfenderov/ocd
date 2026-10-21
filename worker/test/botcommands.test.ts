@@ -708,6 +708,27 @@ describe("the Durable Object's dispatch", () => {
     expect(mac).not.toContain("home");
   });
 
+  // The taint is the box's state when it pushed the row: a row that
+  // happened while the box's revoke was pending stays marked. The brain's
+  // table is the only place that flag lives, so a row that lost it would
+  // be shown as a clean row — with nothing to catch it.
+  it("marks a history row whose revoke was pending when the box pushed it", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit-taint"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      instance.putBox(boxRow("home", { epoch: 1 }));
+      // The revoke is pending: the box's credentials are stale.
+      instance.putTombstone({ box_id: "home", epoch: 1 });
+      instance.addAuditRow(auditRow("home", 1699999900, "tapped", "1.2.3.4"));
+
+      await instance.dispatchCommand({ name: "/faudit", args: [], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("revoke pending");
+  });
+
   it("answers /faudit for a box with no rows", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit-empty"));
     const telegram = new RecordingTelegram();
