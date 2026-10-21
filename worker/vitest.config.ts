@@ -5,6 +5,10 @@ export default defineConfig({
   test: {
     // The suite never talks to the network (see test/setup.ts).
     setupFiles: ["./test/setup.ts"],
+    // The tools have their own suite, in node: they read files, and the
+    // Workers runtime has no filesystem. The defaults are kept — naming
+    // an exclude replaces them.
+    exclude: ["**/node_modules/**", "**/.git/**", "tools/**"],
   },
   plugins: [
     cloudflareTest({

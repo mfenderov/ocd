@@ -1,6 +1,8 @@
 .worktrees/
 .superpowers/
 worker/node_modules/
+worker/coverage/
+worker/tools/coverage/
 vendor/
 node_modules/
 dist/
