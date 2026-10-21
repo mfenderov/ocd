@@ -221,6 +221,30 @@ describe("the duplicates", () => {
     });
   });
 
+  // The dedup key is box + at + action + token. The box's audit rows
+  // carry no token, so the key is the box, the second and the action:
+  // two rows with the same action in the same second collapse into one.
+  // This is disclosed and accepted; the test pins it so it cannot change
+  // silently.
+  it("keeps one row when two audit rows share a second and an action", async () => {
+    const telegram = new RecordingTelegram();
+    const at = 1700000000;
+    const events = [
+      { type: "audit", at, actor: "web:1.2.3.4", action: "tapped", device: "", ip: "1.2.3.4", result: "ok", ua: "" },
+      { type: "audit", at, actor: "web:5.6.7.8", action: "tapped", device: "", ip: "5.6.7.8", result: "denied", ua: "" },
+    ];
+
+    const status = await push("fleet-events-same-second", { id: "home", events }, BOX_TOKEN, telegram);
+
+    expect(status).toBe(200);
+    await readStore("fleet-events-same-second", (instance) => {
+      const rows = instance.auditLogRows("", 10);
+      expect(rows).toHaveLength(1);
+      // The first row wins: the second one is the same key.
+      expect(rows[0].ip).toBe("1.2.3.4");
+    });
+  });
+
   // The link is marked edited only when the edit landed, so a failed edit
   // is tried again by the next event.
   it("tries the edit again when it did not land", async () => {

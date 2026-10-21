@@ -134,7 +134,7 @@ func TestSweepPushesDeadLinksToTheBrain(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startLinkSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
 
 	select {
 	case <-arrived:
@@ -191,7 +191,7 @@ func TestSweepReportsADeadLinkExactlyOnce(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startLinkSweep(ctx, io.Discard, st, 10*time.Millisecond)
+	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
 
 	// Wait for the first report, then let several more sweeps run: the
 	// fast ticker guarantees they do.
@@ -309,6 +309,113 @@ func TestSweepLeavesTheGoBotsLinksAlone(t *testing.T) {
 	}
 	if pending[0].Note != "expired" {
 		t.Fatalf("want the Go bot's expired-link edit to still be pending, got %q", pending[0].Note)
+	}
+}
+
+// The box's audit rows are the fleet's history: the sweep pushes them to
+// the brain. The watermark says how far the box got, so the rows are
+// offered once and a restart does not re-send the whole history.
+func TestSweepPushesAuditRows(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+
+	var (
+		mu    sync.Mutex
+		got   []boxagent.Event
+		calls int
+	)
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Events []boxagent.Event `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		got = append(got, body.Events...)
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer brain.Close()
+
+	t.Setenv("OCD_WORKER_URL", brain.URL)
+	t.Setenv("OCD_BOX_ID", "mac")
+	t.Setenv("OCD_HEARTBEAT_TOKEN", "hb-secret")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSweep(ctx, io.Discard, st, 10*time.Millisecond)
+
+	// Wait for the first push, then let several more sweeps run: the
+	// fast ticker guarantees they do.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := calls
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the brain never heard about the audit rows")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("want one push of the audit rows, got %d", calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want the two audit rows, got %d: %+v", len(got), got)
+	}
+	if got[0].Type != "audit" || got[1].Type != "audit" {
+		t.Fatalf("want two audit events, got %q and %q", got[0].Type, got[1].Type)
+	}
+	if got[0].Action != "tapped" || got[0].Actor != "web:1.2.3.4" || got[0].IP != "1.2.3.4" ||
+		got[0].Device != "mac" || got[0].Result != "ok" || got[0].UA != "curl/8" {
+		t.Fatalf("want the tapped row intact, got %+v", got[0])
+	}
+	if got[0].At == 0 {
+		t.Fatalf("want the row's time, got none: %+v", got[0])
+	}
+	if got[1].Action != "tap_denied" || got[1].Result != "used-or-expired" {
+		t.Fatalf("want the denied row intact, got %+v", got[1])
+	}
+}
+
+// A brain outage must not lose the audit rows: the watermark stays where
+// it was, so the next sweep offers the same rows again.
+func TestSweepKeepsAuditRowsAfterAFailedPush(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer brain.Close()
+
+	sweepAuditRows(context.Background(), io.Discard, st, brainConfig(brain.URL), &http.Client{})
+
+	if got := st.AuditWatermark(); got != 0 {
+		t.Fatalf("want no watermark after a failed push, got %d", got)
+	}
+	rows, err := st.RecentAuditSince(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want the unreported row kept for the next sweep, got %d", len(rows))
 	}
 }
 

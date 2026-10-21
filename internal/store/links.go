@@ -16,6 +16,11 @@ const linkTTL = 10 * time.Minute
 const brainLinkVia = "admin"
 
 type AuditRow struct {
+	// RowID is the row's place in the audit table. RecentAuditSince
+	// fills it: the sweep's watermark is the rowid of the last row it
+	// reported. It stays out of the JSON: the box's own API answers with
+	// the rows as they are, rowid included nowhere.
+	RowID  int64  `json:"-"`
 	At     int64  `json:"at"`
 	Actor  string `json:"actor"`
 	Action string `json:"action"`
@@ -170,4 +175,50 @@ func (s *Store) RecentAudit(n int) []AuditRow {
 		}
 	}
 	return out
+}
+
+// auditBatch is how many audit rows one read returns. The sweep pushes
+// them in one batch; the rows past the batch wait for the next sweep.
+const auditBatch = 100
+
+// RecentAuditSince returns the audit rows written after the given rowid,
+// oldest first, at most auditBatch of them. The rowid is the sweep's
+// watermark: the rows the brain has not seen yet, so a restart does not
+// re-send the whole history.
+func (s *Store) RecentAuditSince(rowid int64) ([]AuditRow, error) {
+	rows, err := s.db.Query(`SELECT rowid, at, actor, action, device, ip, result, ua FROM audit WHERE rowid > ? ORDER BY rowid LIMIT ?`, rowid, auditBatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditRow
+	for rows.Next() {
+		var r AuditRow
+		var ua sql.NullString
+		if err := rows.Scan(&r.RowID, &r.At, &r.Actor, &r.Action, &r.Device, &r.IP, &r.Result, &ua); err != nil {
+			return nil, err
+		}
+		r.UA = ua.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AuditWatermark returns the rowid of the last audit row the box
+// reported to the brain, 0 when it never reported one.
+func (s *Store) AuditWatermark() int64 {
+	var v int64
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v); err != nil {
+		return 0
+	}
+	return v
+}
+
+// SetAuditWatermark records the rowid of the last audit row the brain
+// has. The sweep writes it only after a successful push: a failed push
+// leaves the watermark where it was, so the next sweep offers the same
+// rows again and no row is lost.
+func (s *Store) SetAuditWatermark(rowid int64) error {
+	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, rowid)
+	return err
 }
