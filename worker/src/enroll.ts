@@ -131,26 +131,55 @@ function isIPv4Literal(value: string): boolean {
 }
 
 export function isPinnedHostname(value: string, suffixes: string[] = DEFAULT_HOST_SUFFIXES): boolean {
-  if (value.length === 0 || value.length > 253) {
+  if (!isHostnameShape(value)) {
     return false;
   }
-  if (/\s/.test(value) || value.includes("/") || value.includes("://") || value.includes("@") || value.includes(":")) {
-    return false;
-  }
-  if (value.startsWith("[") || isIPv4Literal(value)) {
+  if (isAddress(value)) {
     return false;
   }
   const lower = value.toLowerCase();
+  if (!isRealDomain(lower)) {
+    return false;
+  }
+  return suffixes.some((s) => lower === s || lower.endsWith(`.${s}`));
+}
+
+// The shape of a hostname: a name of a sane length, with nothing in it
+// that is not a hostname's business.
+function isHostnameShape(value: string): boolean {
+  if (value.length === 0 || value.length > 253) {
+    return false;
+  }
+  return !hasForbiddenChars(value);
+}
+
+// The characters a hostname may not carry: whitespace, a path, a
+// scheme, a user, a port.
+function hasForbiddenChars(value: string): boolean {
+  return (
+    /\s/.test(value) ||
+    value.includes("/") ||
+    value.includes("://") ||
+    value.includes("@") ||
+    value.includes(":")
+  );
+}
+
+// An address is not a hostname: the brain calls the box back, and an
+// address is not a name it can call.
+function isAddress(value: string): boolean {
+  return value.startsWith("[") || isIPv4Literal(value);
+}
+
+// A real domain: not localhost, not a single label, not a .local name.
+function isRealDomain(lower: string): boolean {
   if (lower === "localhost" || lower.endsWith(".localhost")) {
     return false;
   }
   if (!lower.includes(".")) {
     return false;
   }
-  if (lower === "local" || lower.endsWith(".local")) {
-    return false;
-  }
-  return suffixes.some((s) => lower === s || lower.endsWith(`.${s}`));
+  return lower !== "local" && !lower.endsWith(".local");
 }
 
 export function parseEnrollBody(value: unknown, suffixes: string[] = DEFAULT_HOST_SUFFIXES): EnrollBody | null {
@@ -546,6 +575,16 @@ export interface EnrollResult {
   dns?: string;
 }
 
+// What every enrolment path needs: the store, the notifier, the clock
+// and the settings.
+interface EnrollContext {
+  store: EnrollStore;
+  body: EnrollBody;
+  notify: NotifyFn;
+  nowSec: () => number;
+  config: EnrollConfig;
+}
+
 export async function requestEnrollment(
   store: EnrollStore,
   body: EnrollBody,
@@ -557,95 +596,123 @@ export async function requestEnrollment(
   if (!isPinnedHostname(body.hostname, suffixes)) {
     throw new Error(`enroll: bad_request (hostname "${body.hostname}" not allowed)`);
   }
+  const ctx: EnrollContext = { store, body, notify, nowSec, config };
   const known = store.getBox(body.id);
   if (known && (await tokenMatches(body.enroll_token, known.heartbeat_token_hash))) {
-    // The tunnel id can change: a box that re-created its tunnel enrols
-    // again with the new id. The row must carry the current one, or the
-    // brain would later write DNS for a tunnel that no longer exists.
-    // A body that says nothing about the tunnel keeps what the row has.
-    const tunnelId = body.tunnel_id ?? known.tunnel_id;
-    // Bound-token fast path. A supplied admin_token is a rotation, never a
-    // drop: seal + store it, or fail loud when sealing is unconfigured.
-    if (body.admin_token === undefined) {
-      if (tunnelId !== known.tunnel_id) {
-        store.putBox({ ...known, tunnel_id: tunnelId });
-      }
-      return enrolledResult(config, store, body.id, false, notify);
-    }
-    if (!config.sealKey) {
-      throw new Error("enroll: seal key not configured");
-    }
-    let current: string | null = null;
-    try {
-      current = await unsealAdminToken(config.sealKey, known.admin_token_sealed);
-    } catch {
-      current = null; // unreadable binding counts as different: rotation heals it
-    }
-    if (current === body.admin_token) {
-      return enrolledResult(config, store, body.id, false, notify);
-    }
-    const now = nowSec();
-    store.putBox({
-      ...known,
-      admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token),
-      tunnel_id: tunnelId,
-    });
-    // A rotation nobody hears about is a silent credential change: ping the
-    // owner channel exactly like enrollment pings (id + time, never tokens).
-    await notify(rotationPingText(body.id, now));
-    return enrolledResult(config, store, body.id, true, notify);
+    return rebindEnrolled(ctx, known);
   }
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
   }
-  // Typed-code claim: the owner read the pending token out of Telegram and
-  // typed it into `ocd onboard`. Displaying a single-use code in the
-  // owner-only chat WAS the approval, so bind immediately with no second
-  // ping (admin-rotation pings still apply). Anything stale, rebound, or
-  // mistyped falls through to a fresh pending row below.
   const pending = store.getPending(body.id);
-  if (pending) {
-    const fresh = nowSec() - pending.first_seen <= CAPABILITY_TTL_SEC;
-    if (
-      pending.trusted === 1 &&
-      fresh &&
-      pending.hostname === body.hostname &&
-      (await tokenMatches(body.enroll_token, pending.heartbeat_token_hash))
-    ) {
-      // The box's claim is the truth about its tunnel: the brain issued
-      // the code before the box had one (the /enrollcode flow), so the
-      // pending row names no tunnel until the box claims. The claim's
-      // tunnel id rides into the box row the approval below writes; a
-      // claim that names none keeps the pending row's own.
-      const claimedTunnelId = body.tunnel_id ?? "";
-      const pendingTunnelId = claimedTunnelId !== "" ? claimedTunnelId : pending.tunnel_id;
-      let pendingSealed = pending.admin_token_sealed;
-      if (body.admin_token !== undefined) {
-        if (!config.sealKey) {
-          throw new Error("enroll: seal key not configured");
-        }
-        pendingSealed = await sealAdminToken(config.sealKey, body.admin_token);
-      }
-      if (pendingTunnelId !== pending.tunnel_id || pendingSealed !== pending.admin_token_sealed) {
-        store.putPending({ ...pending, tunnel_id: pendingTunnelId, admin_token_sealed: pendingSealed });
-      }
-      const knownNow = store.getBox(body.id);
-      const sealedNow = store.getPending(body.id)?.admin_token_sealed ?? "";
-      const rotated = !!knownNow && sealedNow !== "" && sealedNow !== (knownNow.admin_token_sealed ?? "");
-      await approveEnrollment(store, body.id, notify, nowSec, {
-        tokenHash: pending.heartbeat_token_hash,
-        hostname: pending.hostname,
-      });
-      return enrolledResult(config, store, body.id, rotated, notify);
-    }
+  if (pending && (await claimable(pending, body, nowSec))) {
+    return claimEnrollment(ctx, pending);
   }
-  let sealed = "";
-  if (body.admin_token !== undefined) {
-    if (!config.sealKey) {
-      throw new Error("enroll: seal key not configured");
+  return pendEnrollment(ctx);
+}
+
+// The fast path: the box is known and presents the token it is bound to.
+//
+// The tunnel id can change: a box that re-created its tunnel enrols
+// again with the new id. The row must carry the current one, or the
+// brain would later write DNS for a tunnel that no longer exists.
+// A body that says nothing about the tunnel keeps what the row has.
+async function rebindEnrolled(ctx: EnrollContext, known: BoxRow): Promise<EnrollResult> {
+  const { store, body, notify, nowSec, config } = ctx;
+  const tunnelId = body.tunnel_id ?? known.tunnel_id;
+  // Bound-token fast path. A supplied admin_token is a rotation, never a
+  // drop: seal + store it, or fail loud when sealing is unconfigured.
+  if (body.admin_token === undefined) {
+    if (tunnelId !== known.tunnel_id) {
+      store.putBox({ ...known, tunnel_id: tunnelId });
     }
-    sealed = await sealAdminToken(config.sealKey, body.admin_token);
+    return enrolledResult(config, store, body.id, false, notify);
   }
+  if (!config.sealKey) {
+    throw new Error("enroll: seal key not configured");
+  }
+  const current = await currentAdminToken(config.sealKey, known);
+  if (current === body.admin_token) {
+    return enrolledResult(config, store, body.id, false, notify);
+  }
+  const now = nowSec();
+  store.putBox({
+    ...known,
+    admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token),
+    tunnel_id: tunnelId,
+  });
+  // A rotation nobody hears about is a silent credential change: ping the
+  // owner channel exactly like enrollment pings (id + time, never tokens).
+  await notify(rotationPingText(body.id, now));
+  return enrolledResult(config, store, body.id, true, notify);
+}
+
+// The admin token the box is bound to, or null when the brain cannot
+// read it: an unreadable binding counts as different, so a rotation
+// heals it.
+async function currentAdminToken(sealKey: string, known: BoxRow): Promise<string | null> {
+  try {
+    return await unsealAdminToken(sealKey, known.admin_token_sealed);
+  } catch {
+    return null;
+  }
+}
+
+// The claim: the owner read the pending token out of Telegram and typed
+// it into `ocd onboard`. Displaying a single-use code in the owner-only
+// chat WAS the approval, so the box binds immediately with no second
+// ping (admin-rotation pings still apply). Anything stale, rebound, or
+// mistyped falls through to a fresh pending row.
+async function claimEnrollment(ctx: EnrollContext, pending: PendingRow): Promise<EnrollResult> {
+  const { store, body, notify, nowSec, config } = ctx;
+  // The box's claim is the truth about its tunnel: the brain issued
+  // the code before the box had one (the /enrollcode flow), so the
+  // pending row names no tunnel until the box claims. The claim's
+  // tunnel id rides into the box row the approval below writes; a
+  // claim that names none keeps the pending row's own.
+  const claimedTunnelId = body.tunnel_id ?? "";
+  const pendingTunnelId = claimedTunnelId !== "" ? claimedTunnelId : pending.tunnel_id;
+  const pendingSealed = await sealedAdminToken(config, body, pending.admin_token_sealed);
+  if (pendingTunnelId !== pending.tunnel_id || pendingSealed !== pending.admin_token_sealed) {
+    store.putPending({ ...pending, tunnel_id: pendingTunnelId, admin_token_sealed: pendingSealed });
+  }
+  const rotated = rotatedByClaim(store, body.id);
+  await approveEnrollment(store, body.id, notify, nowSec, {
+    tokenHash: pending.heartbeat_token_hash,
+    hostname: pending.hostname,
+  });
+  return enrolledResult(config, store, body.id, rotated, notify);
+}
+
+// Whether the box may claim the pending row by typing the code: the row
+// is trusted, it is fresh, it names the same hostname, and the box
+// presents the same token.
+async function claimable(pending: PendingRow, body: EnrollBody, nowSec: () => number): Promise<boolean> {
+  if (pending.trusted !== 1) {
+    return false;
+  }
+  if (nowSec() - pending.first_seen > CAPABILITY_TTL_SEC) {
+    return false;
+  }
+  if (pending.hostname !== body.hostname) {
+    return false;
+  }
+  return tokenMatches(body.enroll_token, pending.heartbeat_token_hash);
+}
+
+// Whether the claim rotated the admin token: the pending row carries a
+// sealed admin token that differs from the bound one.
+function rotatedByClaim(store: EnrollStore, boxId: string): boolean {
+  const known = store.getBox(boxId);
+  const sealed = store.getPending(boxId)?.admin_token_sealed ?? "";
+  return !!known && sealed !== "" && sealed !== (known.admin_token_sealed ?? "");
+}
+
+// The pending path: a fresh pending row and the ping that asks the owner
+// to approve it.
+async function pendEnrollment(ctx: EnrollContext): Promise<EnrollResult> {
+  const { store, body, notify, nowSec, config } = ctx;
+  const sealed = await sealedAdminToken(config, body, "");
   const now = nowSec();
   const tokenHash = await hashToken(body.enroll_token);
   store.putPending({
@@ -661,29 +728,56 @@ export async function requestEnrollment(
   // Bind the pending token hash + hostname into both links so a later
   // overwrite invalidates these (approval TOCTOU: resolve re-checks).
   const binding: CapabilityBinding = { tokenHash, hostname: body.hostname };
-  const approve = await issueCapabilityLink({
-    secret: config.capSecret,
-    baseUrl: config.baseUrl,
-    action: "approve",
-    id: body.id,
-    exp,
-    binding,
-  });
-  const deny = await issueCapabilityLink({
-    secret: config.capSecret,
-    baseUrl: config.baseUrl,
-    action: "deny",
-    id: body.id,
-    exp,
-    binding,
-  });
+  const links = await issueLinks(config, body.id, exp, binding);
   if (!config.baseUrl) {
     console.error("enroll: public base URL not configured; ping carries relative links");
   }
   if (!body.quiet) {
-    await notify(enrollPingText(body, { approve, deny }, exp));
+    await notify(enrollPingText(body, links, exp));
   }
   return { status: "pending", id: body.id, rotated: false, trusted: config.trusted === true };
+}
+
+// The sealed admin token a row carries: the caller's own, when the box
+// brought one, and the row's own otherwise.
+async function sealedAdminToken(config: EnrollConfig, body: EnrollBody, current: string): Promise<string> {
+  if (body.admin_token === undefined) {
+    return current;
+  }
+  if (!config.sealKey) {
+    throw new Error("enroll: seal key not configured");
+  }
+  return sealAdminToken(config.sealKey, body.admin_token);
+}
+
+// The two capability links the ping carries.
+async function issueLinks(
+  config: EnrollConfig,
+  id: string,
+  exp: number,
+  binding: CapabilityBinding,
+): Promise<{ approve: string; deny: string }> {
+  const secret = config.capSecret;
+  if (!secret) {
+    throw new Error("enroll: capability secret not configured");
+  }
+  const approve = await issueCapabilityLink({
+    secret,
+    baseUrl: config.baseUrl,
+    action: "approve",
+    id,
+    exp,
+    binding,
+  });
+  const deny = await issueCapabilityLink({
+    secret,
+    baseUrl: config.baseUrl,
+    action: "deny",
+    id,
+    exp,
+    binding,
+  });
+  return { approve, deny };
 }
 
 // The enrolled result, with the DNS the brain wrote (or did not). Every
@@ -761,37 +855,7 @@ async function reportDnsFailure(boxId: string, dns: string, notify: NotifyFn): P
 // the tunnel id.
 async function writeBoxDns(config: EnrollConfig, store: EnrollStore, boxId: string): Promise<string> {
   try {
-    // Can this brain write DNS at all? A brain without the credential
-    // says so on every enrolment instead of pretending it did.
-    const dns = config.dns;
-    if (!dns) {
-      console.error(
-        "enroll: no DNS credential (CLOUDFLARE_DNS_TOKEN / CLOUDFLARE_ZONE_ID) — the box's records were not written",
-      );
-      return "failed: the brain has no DNS credential";
-    }
-    const box = store.getBox(boxId);
-    const tunnelId = (box?.tunnel_id ?? "").trim();
-    // No tunnel id means no target: a record that points nowhere is
-    // worse than no record at all, so the brain skips the write and
-    // names the box that needs a re-enrol.
-    if (!tunnelId) {
-      return `skipped: no tunnel id recorded for ${boxId} — re-enrol to bind one`;
-    }
-    const tapHost = box?.hostname ?? "";
-    const uiHost = uiHostFor(boxId, tapHost);
-    if (!uiHost) {
-      return `failed: the box's hostname "${tapHost}" names no domain to derive a UI host from`;
-    }
-    // The step gets a deadline: one signal for the listing and the
-    // writes, so a hung API is a reported failure instead of a hung
-    // request.
-    const fetcher = withDeadline(dns.fetcher ?? fetch, dns.deadlineMs ?? DNS_DEADLINE_MS);
-    const outcome = await ensureBoxDns(
-      { fetcher, zoneId: dns.zoneId, token: dns.token },
-      { tapHost, uiHost, target: `${tunnelId}.cfargotunnel.com` },
-    );
-    return outcome.ok ? "ok" : `skipped: ${outcome.reason}`;
+    return await dnsStatus(config, store, boxId);
   } catch (err) {
     // The API refused us (or the network failed). The enrolment stays
     // committed: the response names the reason and the box keeps its
@@ -800,6 +864,50 @@ async function writeBoxDns(config: EnrollConfig, store: EnrollStore, boxId: stri
     console.error(`enroll: the box's DNS was not written (${reason})`);
     return `failed: ${reason}`;
   }
+}
+
+// The status of the DNS write: what the brain could do with the box's
+// row.
+async function dnsStatus(config: EnrollConfig, store: EnrollStore, boxId: string): Promise<string> {
+  // Can this brain write DNS at all? A brain without the credential
+  // says so on every enrolment instead of pretending it did.
+  const dns = config.dns;
+  if (!dns) {
+    console.error(
+      "enroll: no DNS credential (CLOUDFLARE_DNS_TOKEN / CLOUDFLARE_ZONE_ID) — the box's records were not written",
+    );
+    return "failed: the brain has no DNS credential";
+  }
+  const box = store.getBox(boxId);
+  const tunnelId = (box?.tunnel_id ?? "").trim();
+  // No tunnel id means no target: a record that points nowhere is
+  // worse than no record at all, so the brain skips the write and
+  // names the box that needs a re-enrol.
+  if (!tunnelId) {
+    return `skipped: no tunnel id recorded for ${boxId} — re-enrol to bind one`;
+  }
+  const tapHost = box?.hostname ?? "";
+  const uiHost = uiHostFor(boxId, tapHost);
+  if (!uiHost) {
+    return `failed: the box's hostname "${tapHost}" names no domain to derive a UI host from`;
+  }
+  const outcome = await writeRecords(dns, { tapHost, uiHost, tunnelId });
+  return outcome.ok ? "ok" : `skipped: ${outcome.reason}`;
+}
+
+// The box's two CNAMEs, written with the brain's credential.
+async function writeRecords(
+  dns: DnsConfig,
+  hosts: { tapHost: string; uiHost: string; tunnelId: string },
+): Promise<{ ok: boolean; reason?: string }> {
+  // The step gets a deadline: one signal for the listing and the
+  // writes, so a hung API is a reported failure instead of a hung
+  // request.
+  const fetcher = withDeadline(dns.fetcher ?? fetch, dns.deadlineMs ?? DNS_DEADLINE_MS);
+  return ensureBoxDns(
+    { fetcher, zoneId: dns.zoneId, token: dns.token },
+    { tapHost: hosts.tapHost, uiHost: hosts.uiHost, target: `${hosts.tunnelId}.cfargotunnel.com` },
+  );
 }
 
 // The box's UI host: the tap host's domain with the box's own name in
@@ -855,52 +963,67 @@ export async function approveEnrollment(
     throw new Error("enroll: forbidden (capability binding mismatch)");
   }
   const known = store.getBox(id);
-  const sealed = pending.admin_token_sealed || known?.admin_token_sealed || "";
-  // Pending-path rotation: the pending row carries a sealed admin token that
-  // differs from the bound one. Same rule as the fast path — ping the owner
-  // (id + time, never tokens) instead of swapping silently.
-  const rotated = !!known && pending.admin_token_sealed !== "" && pending.admin_token_sealed !== known.admin_token_sealed;
   const now = nowSec();
-  const row: BoxRow = known
-    ? {
-        ...known,
-        // A trusted claim may repoint the box: the owner named this
-        // hostname when asking for the code. Untrusted (approve-link)
-        // claims keep the original hostname.
-        ...(pending.trusted === 1 ? { hostname: pending.hostname } : {}),
-        heartbeat_token_hash: pending.heartbeat_token_hash,
-        admin_token_sealed: sealed,
-        // The tunnel id rides from the pending row. A pending row that
-        // names no tunnel does not erase the one the box row knows.
-        tunnel_id: pending.tunnel_id || known.tunnel_id,
-        // Re-approval rebinds trust: restart the seq counter so a box that
-        // lost its DB (seq reset to 1) is accepted again. Safe because
-        // approval itself is the owner-trusted event and the token still
-        // has to match.
-        last_seq: 0,
-        last_ts: 0,
-        enrolled: 1,
-      }
-    : {
-        id: pending.id,
-        hostname: pending.hostname,
-        heartbeat_token_hash: pending.heartbeat_token_hash,
-        admin_token_hash: "",
-        admin_token_sealed: sealed,
-        tunnel_id: pending.tunnel_id,
-        epoch: 0,
-        last_seq: 0,
-        last_ts: 0,
-        last_seen: 0,
-        enrolled: 1,
-      };
+  const row = approvedRow(pending, known);
   // Synchronous write block: bind + clear pending together, no interleave.
   store.putBox(row);
   store.deletePending(id);
-  if (rotated) {
+  if (rotatedAdmin(pending, known)) {
     await notify(rotationPingText(id, now));
   }
   return row;
+}
+
+// The box row the approval binds: the pending row's binding over the box
+// row the brain knows.
+function approvedRow(pending: PendingRow, known: BoxRow | undefined): BoxRow {
+  const sealed = pending.admin_token_sealed || known?.admin_token_sealed || "";
+  if (!known) {
+    return {
+      id: pending.id,
+      hostname: pending.hostname,
+      heartbeat_token_hash: pending.heartbeat_token_hash,
+      admin_token_hash: "",
+      admin_token_sealed: sealed,
+      tunnel_id: pending.tunnel_id,
+      epoch: 0,
+      last_seq: 0,
+      last_ts: 0,
+      last_seen: 0,
+      enrolled: 1,
+    };
+  }
+  return {
+    ...known,
+    // A trusted claim may repoint the box: the owner named this
+    // hostname when asking for the code. Untrusted (approve-link)
+    // claims keep the original hostname.
+    ...(pending.trusted === 1 ? { hostname: pending.hostname } : {}),
+    heartbeat_token_hash: pending.heartbeat_token_hash,
+    admin_token_sealed: sealed,
+    // The tunnel id rides from the pending row. A pending row that
+    // names no tunnel does not erase the one the box row knows.
+    tunnel_id: pending.tunnel_id || known.tunnel_id,
+    // Re-approval rebinds trust: restart the seq counter so a box that
+    // lost its DB (seq reset to 1) is accepted again. Safe because
+    // approval itself is the owner-trusted event and the token still
+    // has to match.
+    last_seq: 0,
+    last_ts: 0,
+    enrolled: 1,
+  };
+}
+
+// Whether the approval rotated the admin token: the pending row carries
+// a sealed admin token that differs from the bound one. Same rule as the
+// fast path — ping the owner (id + time, never tokens) instead of
+// swapping silently.
+function rotatedAdmin(pending: PendingRow, known: BoxRow | undefined): boolean {
+  return (
+    !!known &&
+    pending.admin_token_sealed !== "" &&
+    pending.admin_token_sealed !== known.admin_token_sealed
+  );
 }
 
 export function denyEnrollment(
