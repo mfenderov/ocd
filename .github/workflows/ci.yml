@@ -66,7 +66,11 @@ jobs:
         uses: cocogitto/cocogitto-action@v4
         with:
           command: bump
-          args: --auto
+          # --no-push: cocogotto pushes the version commit itself, and the
+          # step below pushes it again — two pushes race for the same ref
+          # and the release loses its tag. The step below pushes both the
+          # commit and the tag, so let it own the push.
+          args: --auto --no-push
           git-user: 'github-actions[bot]'
           git-user-email: 'github-actions[bot]@users.noreply.github.com'
       # Bot pushes made with GITHUB_TOKEN do not trigger push-event workflows,
@@ -79,6 +83,11 @@ jobs:
           if [ "$AFTER" = "$BEFORE" ]; then
             echo "No new version — nothing to release."
           else
+            # Rebase first: cocogotto may have pushed the version commit
+            # itself, and a second push of the same ref loses the race and
+            # takes the tag with it. After the rebase the push is either
+            # the version commit or a no-op.
+            git pull --rebase origin master
             git push origin master
             git push origin "$AFTER"
             echo "Triggering release workflow for $AFTER..."
