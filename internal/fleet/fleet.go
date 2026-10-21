@@ -109,7 +109,8 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("fleet: worker replied %d (%s)", e.Status, e.Code)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, extra map[string]string) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method, path string, query url.Values,
+	body any, extra map[string]string) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)

@@ -50,66 +50,125 @@ func (s *stubWorker) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := s.record(r)
 		if r.Header.Get("Authorization") != "Bearer test-token" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			writeJSON(w, http.StatusUnauthorized, `{"error":"unauthorized"}`)
 			return
 		}
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/backends":
-			w.Header().Set("Content-Type", "application/json")
-			// Clock-relative rows so the CLI's offline inference is
-			// deterministic: box-1 fresh, box-2 tombstoned, box-3 stale.
-			now := time.Now().Unix()
-			_, _ = fmt.Fprintf(w, `[
-				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,"last_seen":%d,"enrolled":1,"tombstoned":false},
-				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,"last_seen":%d,"enrolled":1,"tombstoned":true},
-				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,"last_seen":%d,"enrolled":1,"tombstoned":false}
-			]`, now, now, now-3600)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/backends/box-1/link":
-			w.Header().Set("Content-Type", "text/plain;charset=utf-8")
-			_, _ = w.Write([]byte(`https://proxy.example/?t=tok-1`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/backends/box-1/revoke":
-			var req map[string]any
-			_ = json.Unmarshal([]byte(body), &req)
-			if req["confirm"] != true {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error":"confirm_required"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"box-1","status":"revoked","epoch":2}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/revoke-all":
-			var req map[string]any
-			_ = json.Unmarshal([]byte(body), &req)
-			if req["confirm"] != true {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error":"confirm_required"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"results":[
-				{"id":"box-1","status":"revoked","epoch":2},
-				{"id":"box-2","status":"tombstoned","epoch":3,"detail":"box_unreachable"}
-			]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/audit":
-			q := r.URL.Query()
-			rows := `[
-				{"box":"box-1","at":1699999900,"actor":"owner","action":"tapped","device":"dev","ip":"127.0.0.1","result":"ok","ua":"curl/8","tainted":false},
-				{"box":"box-2","at":1700000100,"error":"box_unreachable","last_seen":1700000100,"tainted":true}
-			]`
-			if q.Get("box") == "box-1" {
-				rows = `[
-					{"box":"box-1","at":1699999900,"actor":"owner","action":"tapped","device":"dev","ip":"127.0.0.1","result":"ok","ua":"curl/8","tainted":false}
-				]`
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"rows":` + rows + `}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":"unknown_box"}`))
+		if !route(w, r, body) {
+			writeJSON(w, http.StatusNotFound, `{"error":"unknown_box"}`)
 		}
 	})
+}
+
+// route answers the request the Worker API knows, and says whether it
+// knew it.
+func route(w http.ResponseWriter, r *http.Request, body string) bool {
+	if r.Method == http.MethodGet {
+		return routeRead(w, r)
+	}
+	return routeWrite(w, r, body)
+}
+
+// routeRead answers the reads of the Worker API.
+func routeRead(w http.ResponseWriter, r *http.Request) bool {
+	switch r.URL.Path {
+	case "/api/backends":
+		writeBackends(w)
+	case "/api/audit":
+		writeAudit(w, r)
+	default:
+		return false
+	}
+	return true
+}
+
+// routeWrite answers the writes of the Worker API.
+func routeWrite(w http.ResponseWriter, r *http.Request, body string) bool {
+	switch r.URL.Path {
+	case "/api/backends/box-1/link":
+		writeText(w, `https://proxy.example/?t=tok-1`)
+	case "/api/backends/box-1/revoke":
+		writeRevoke(w, body)
+	case "/api/revoke-all":
+		writeRevokeAll(w, body)
+	default:
+		return false
+	}
+	return true
+}
+
+// writeJSON answers with a JSON body and its type.
+func writeJSON(w http.ResponseWriter, code int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(body))
+}
+
+// writeText answers with a plain body.
+func writeText(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "text/plain;charset=utf-8")
+	_, _ = w.Write([]byte(body))
+}
+
+// writeBackends answers with the fleet's boxes.
+//
+// Clock-relative rows so the CLI's offline inference is deterministic:
+// box-1 fresh, box-2 tombstoned, box-3 stale.
+func writeBackends(w http.ResponseWriter) {
+	now := time.Now().Unix()
+	writeJSON(w, http.StatusOK, fmt.Sprintf(`[
+		{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,
+		 "last_seen":%d,"enrolled":1,"tombstoned":false},
+		{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,
+		 "last_seen":%d,"enrolled":1,"tombstoned":true},
+		{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,
+		 "last_seen":%d,"enrolled":1,"tombstoned":false}
+	]`, now, now, now-3600))
+}
+
+// writeRevoke answers the revoke of one box. The body must confirm.
+func writeRevoke(w http.ResponseWriter, body string) {
+	if !confirmed(body) {
+		writeJSON(w, http.StatusBadRequest, `{"error":"confirm_required"}`)
+		return
+	}
+	writeJSON(w, http.StatusOK, `{"id":"box-1","status":"revoked","epoch":2}`)
+}
+
+// writeRevokeAll answers the revoke of every box. The body must confirm.
+func writeRevokeAll(w http.ResponseWriter, body string) {
+	if !confirmed(body) {
+		writeJSON(w, http.StatusBadRequest, `{"error":"confirm_required"}`)
+		return
+	}
+	writeJSON(w, http.StatusOK, `{"results":[
+		{"id":"box-1","status":"revoked","epoch":2},
+		{"id":"box-2","status":"tombstoned","epoch":3,"detail":"box_unreachable"}
+	]}`)
+}
+
+// confirmed says whether the request body confirms the revoke.
+func confirmed(body string) bool {
+	var req map[string]any
+	_ = json.Unmarshal([]byte(body), &req)
+	return req["confirm"] == true
+}
+
+// writeAudit answers the audit trail: the whole trail, or the rows of
+// one box.
+func writeAudit(w http.ResponseWriter, r *http.Request) {
+	rows := `[
+		{"box":"box-1","at":1699999900,"actor":"owner","action":"tapped","device":"dev",
+		 "ip":"127.0.0.1","result":"ok","ua":"curl/8","tainted":false},
+		{"box":"box-2","at":1700000100,"error":"box_unreachable","last_seen":1700000100,
+		 "tainted":true}
+	]`
+	if r.URL.Query().Get("box") == "box-1" {
+		rows = `[
+			{"box":"box-1","at":1699999900,"actor":"owner","action":"tapped","device":"dev",
+			 "ip":"127.0.0.1","result":"ok","ua":"curl/8","tainted":false}
+		]`
+	}
+	writeJSON(w, http.StatusOK, `{"rows":`+rows+`}`)
 }
 
 // runFleet builds the fleet command against the stub, executes args, and
@@ -284,9 +343,12 @@ func TestFleetNukeRevokeAll401HintsRevokeScope(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/backends":
 			now := time.Now().Unix()
 			_, _ = fmt.Fprintf(w, `[
-				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,"last_seen":%d,"enrolled":1,"tombstoned":false},
-				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,"last_seen":%d,"enrolled":1,"tombstoned":true},
-				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,"last_seen":%d,"enrolled":1,"tombstoned":false}
+				{"id":"box-1","hostname":"box-1.example.com","epoch":1,"last_seq":7,"last_ts":1000,
+				 "last_seen":%d,"enrolled":1,"tombstoned":false},
+				{"id":"box-2","hostname":"box-2.example.com","epoch":3,"last_seq":9,"last_ts":2000,
+				 "last_seen":%d,"enrolled":1,"tombstoned":true},
+				{"id":"box-3","hostname":"box-3.example.com","epoch":1,"last_seq":5,"last_ts":900,
+				 "last_seen":%d,"enrolled":1,"tombstoned":false}
 			]`, now, now, now-3600)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/revoke-all":
 			w.WriteHeader(http.StatusUnauthorized)

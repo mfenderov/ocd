@@ -52,24 +52,6 @@ func AskReonboard(box string) (bool, error) {
 	return again, nil
 }
 
-// AskInstallService confirms the macOS login service install. Non-TTY
-// callers decide with --install-service instead.
-func AskInstallService() (bool, error) {
-	install := true
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Install login service?").
-				Description("Starts ocd serve automatically on login (launchd, macOS only).").
-				Value(&install),
-		),
-	)
-	if err := form.Run(); err != nil {
-		return false, err
-	}
-	return install, nil
-}
-
 // newForm builds a single-group form. Every prompt in onboarding is one
 // question, so the form is a thin wrapper over huh.
 func newForm(fields ...huh.Field) *huh.Form {

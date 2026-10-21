@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -32,7 +34,7 @@ func serviceInstallCmd() *cobra.Command {
 			if err := ensureTunnelManaged(); err != nil {
 				return err
 			}
-			_, err := installLoginService(cmd.OutOrStdout())
+			_, err := installLoginService(cmd.Context(), cmd.OutOrStdout())
 			return err
 		},
 	}
@@ -44,7 +46,7 @@ func serviceUninstallCmd() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Stop and remove the login service",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := onboard.UnloadLoginService(); err != nil {
+			if err := onboard.UnloadLoginService(cmd.Context()); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "service removed")
@@ -59,7 +61,7 @@ func serviceStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show the login service state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			state, err := onboard.ServiceStatus()
+			state, err := onboard.ServiceStatus(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -98,14 +100,20 @@ func boxHasTunnelConfig() (bool, error) {
 
 // writeManageTunnel turns on the daemon-managed tunnel in the env file,
 // unless the env file already says so.
+//
+// A missing env file is not a failure: the write creates it, and a box
+// that has a tunnel config but no env file yet needs the flag just as
+// much as one that has it. An env file that cannot be read is a
+// failure: the flag would not be written, and the tunnel would run
+// unsupervised while the install said it was supervised.
 func writeManageTunnel() error {
 	envPath, err := onboard.DefaultEnvPath()
 	if err != nil {
 		return err
 	}
 	vals, err := onboard.LoadEnvFile(envPath)
-	if err != nil {
-		return nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	if vals["OCD_MANAGE_TUNNEL"] == "1" {
 		return nil

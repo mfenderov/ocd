@@ -13,11 +13,11 @@ import (
 )
 
 func TestPresenceShape(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	t.Setenv("OCD_BOX_ID", "box-7")
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.PresenceHandler(st))
-	req := httptest.NewRequest("GET", "/_oc/presence", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/presence", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -45,7 +45,7 @@ func TestPresenceShape(t *testing.T) {
 	}
 	// Box id is read at request time, not handler construction time.
 	t.Setenv("OCD_BOX_ID", "box-8")
-	req2 := httptest.NewRequest("GET", "/_oc/presence", nil)
+	req2 := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/presence", nil)
 	req2.Header.Set("Authorization", "Bearer s3cr3t")
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
@@ -59,13 +59,13 @@ func TestPresenceShape(t *testing.T) {
 }
 
 func TestAuditCapsN(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	for i := range 250 {
-		st.Audit(fmt.Sprintf("actor-%d", i), "tapped", "", "127.0.0.1", "ok")
+		st.Audit(t.Context(), fmt.Sprintf("actor-%d", i), "tapped", "", "127.0.0.1", "ok")
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.AuditHandler(st))
-	req := httptest.NewRequest("GET", "/_oc/audit?n=5000", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/audit?n=5000", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -83,7 +83,7 @@ func TestAuditCapsN(t *testing.T) {
 		t.Fatalf("want capped 200 rows, got %d", len(rows))
 	}
 	// Default (no n) returns 50.
-	reqDefault := httptest.NewRequest("GET", "/_oc/audit", nil)
+	reqDefault := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/audit", nil)
 	reqDefault.Header.Set("Authorization", "Bearer s3cr3t")
 	recDefault := httptest.NewRecorder()
 	h.ServeHTTP(recDefault, reqDefault)
@@ -97,11 +97,11 @@ func TestAuditCapsN(t *testing.T) {
 }
 
 func TestAuditSnakeCaseKeys(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	st.AuditUA("web:1.2.3.4", "tapped", "dev", "1.2.3.4", "ok", "curl/8")
+	st.AuditUA(t.Context(), "web:1.2.3.4", "tapped", "dev", "1.2.3.4", "ok", "curl/8")
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.AuditHandler(st))
-	req := httptest.NewRequest("GET", "/_oc/audit?n=5", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/audit?n=5", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -115,7 +115,10 @@ func TestAuditSnakeCaseKeys(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("want 1 row, got %d", len(rows))
 	}
-	wantKeys := map[string]bool{"at": true, "actor": true, "action": true, "device": true, "ip": true, "result": true, "ua": true}
+	wantKeys := map[string]bool{
+		"at": true, "actor": true, "action": true, "device": true,
+		"ip": true, "result": true, "ua": true,
+	}
 	if len(rows[0]) != len(wantKeys) {
 		t.Fatalf("want exact keys %v, got %v", wantKeys, rows[0])
 	}
@@ -130,12 +133,12 @@ func TestAuditSnakeCaseKeys(t *testing.T) {
 }
 
 func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.AuditHandler(st))
 	get := func(target string) (int, string) {
 		t.Helper()
-		req := httptest.NewRequest("GET", target, nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 		req.Header.Set("Authorization", "Bearer s3cr3t")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -146,7 +149,7 @@ func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
 		t.Fatalf("want 200 with [], got %d %q", code, body)
 	}
 	for i := range 60 {
-		st.Audit(fmt.Sprintf("actor-%d", i), "tapped", "", "127.0.0.1", "ok")
+		st.Audit(t.Context(), fmt.Sprintf("actor-%d", i), "tapped", "", "127.0.0.1", "ok")
 	}
 	// Invalid, zero, and negative n all fall back to the default 50.
 	for _, target := range []string{"/_oc/audit?n=abc", "/_oc/audit?n=0", "/_oc/audit?n=-5"} {
@@ -165,7 +168,7 @@ func TestAuditNDefaultsAndEmptyArray(t *testing.T) {
 }
 
 func TestPresenceVersionIsCanonical(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	// Unstamped dev builds report "dev". Release binaries carry the tag
 	// via ldflags (see .goreleaser.yml). If this default moves, the
@@ -174,7 +177,7 @@ func TestPresenceVersionIsCanonical(t *testing.T) {
 		t.Fatalf("canonical version moved without review: %q", boxadmin.Version)
 	}
 	h := boxadmin.RequireAdmin(st, "s3cr3t", boxadmin.PresenceHandler(st))
-	req := httptest.NewRequest("GET", "/_oc/presence", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/presence", nil)
 	req.Header.Set("Authorization", "Bearer s3cr3t")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

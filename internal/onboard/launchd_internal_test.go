@@ -10,9 +10,9 @@ import (
 // fakeLaunchctl installs a stub launchctl on PATH that records the
 // command it was asked to run and reports the given state. No test
 // loads, boots or prints a real service.
-func fakeLaunchctl(t *testing.T, state string) string {
+func fakeLaunchctl(t *testing.T) string {
 	t.Helper()
-	body := "if [ \"$1\" = \"print\" ]; then echo \"\tstate = " + state + "\"; fi\nexit 0\n"
+	body := "if [ \"$1\" = \"print\" ]; then echo \"\tstate = running\"; fi\nexit 0\n"
 	return fakeBinary(t, "launchctl", body)
 }
 
@@ -34,10 +34,10 @@ func plantPlist(t *testing.T, home string) string {
 // machine: the box runs inside the operator's session.
 func TestBootstrapLaunchdLoadsTheServiceForThisSession(t *testing.T) {
 	t.Setenv("UID", "501")
-	calls := fakeLaunchctl(t, "running")
+	calls := fakeLaunchctl(t)
 	path := filepath.Join(t.TempDir(), LaunchdLabel+".plist")
 
-	if err := BootstrapLaunchd(path); err != nil {
+	if err := BootstrapLaunchd(t.Context(), path); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	got := recordedCalls(t, calls)
@@ -52,7 +52,7 @@ func TestBootstrapLaunchdReportsAFailedLoad(t *testing.T) {
 	t.Setenv("UID", "501")
 	calls := fakeBinary(t, "launchctl", "echo 'Load failed: 5: Input/output error'\nexit 1\n")
 
-	err := BootstrapLaunchd(filepath.Join(t.TempDir(), LaunchdLabel+".plist"))
+	err := BootstrapLaunchd(t.Context(), filepath.Join(t.TempDir(), LaunchdLabel+".plist"))
 	if err == nil {
 		t.Fatal("a failed load must be reported")
 	}
@@ -70,10 +70,10 @@ func TestUnloadLoginServiceStopsAndRemovesTheService(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("UID", "501")
-	calls := fakeLaunchctl(t, "running")
+	calls := fakeLaunchctl(t)
 	path := plantPlist(t, home)
 
-	if err := UnloadLoginService(); err != nil {
+	if err := UnloadLoginService(t.Context()); err != nil {
 		t.Fatalf("unload: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -91,9 +91,9 @@ func TestUnloadLoginServiceToleratesAMissingService(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("UID", "501")
-	fakeLaunchctl(t, "running")
+	fakeLaunchctl(t)
 
-	if err := UnloadLoginService(); err != nil {
+	if err := UnloadLoginService(t.Context()); err != nil {
 		t.Fatalf("a missing service is not an error: %v", err)
 	}
 }
@@ -104,9 +104,9 @@ func TestInstallLoginServiceWritesThePlistAndLoadsIt(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("UID", "501")
-	calls := fakeLaunchctl(t, "running")
+	calls := fakeLaunchctl(t)
 
-	path, err := InstallLoginService()
+	path, err := InstallLoginService(t.Context())
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -133,10 +133,10 @@ func TestServiceStatusReportsTheStateOfTheService(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("UID", "501")
-	fakeLaunchctl(t, "running")
+	fakeLaunchctl(t)
 	plantPlist(t, home)
 
-	state, err := ServiceStatus()
+	state, err := ServiceStatus(t.Context())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestServiceStatusReportsTheStateOfTheService(t *testing.T) {
 func TestServiceStatusReportsAServiceThatIsNotInstalled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	state, err := ServiceStatus()
+	state, err := ServiceStatus(t.Context())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestServiceStatusReportsAnUnreadableUid(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	plantPlist(t, home)
 
-	state, err := ServiceStatus()
+	state, err := ServiceStatus(t.Context())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -206,9 +206,9 @@ func TestLoginUIDAsksTheSystem(t *testing.T) {
 // A uid that is not a number cannot address a session.
 func TestBootstrapLaunchdRefusesABadUid(t *testing.T) {
 	t.Setenv("UID", "not-a-number")
-	calls := fakeLaunchctl(t, "running")
+	calls := fakeLaunchctl(t)
 
-	err := BootstrapLaunchd(filepath.Join(t.TempDir(), LaunchdLabel+".plist"))
+	err := BootstrapLaunchd(t.Context(), filepath.Join(t.TempDir(), LaunchdLabel+".plist"))
 	if err == nil {
 		t.Fatal("a uid that is not a number must be refused")
 	}

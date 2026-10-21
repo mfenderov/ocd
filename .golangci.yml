@@ -1,14 +1,99 @@
+# The lint rules for the Go half. The complexity limits match the CRAP
+# bar (10): a function that may not cross the bar may not have more
+# than ten paths either.
 version: "2"
-linters:
-  default: standard
-  enable:
-    - errcheck
 
+linters:
+  enable:
+    # Correctness: the ones that catch real defects.
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forcetypeassert
+    - govet
+    - loggercheck
+    - makezero
+    - mirror
+    - nilerr
+    - noctx
+    - protogetter
+    - reassign
+    - recvcheck
+    - rowserrcheck
+    - sqlclosecheck
+    - testifylint
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+    # Complexity and size, aligned with the CRAP bar.
+    - cyclop
+    - funlen
+    - gocognit
+    - gocyclo
+    - maintidx
+    - nestif
+    # Security and duplication.
+    - gosec
+    # Style and spelling.
+    - godot
+    - misspell
+    - nakedret
+    - revive
+    - whitespace
+    # The dependency direction: the domain must not reach for the layer
+    # above it.
+    - depguard
+  settings:
+    gocyclo:
+      min-complexity: 10
+    cyclop:
+      max-complexity: 10
+    gocognit:
+      min-complexity: 15
+    funlen:
+      lines: 70
+      statements: 45
+    nestif:
+      min-complexity: 5
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: var-naming
+          disabled: true
+    depguard:
+      rules:
+        inner:
+          files:
+            - $all
+            # A test may use the CLI: it is the layer under test. The
+            # command layer is the CLI: cmd/ocd is what wires it up.
+            - "!$test"
+            - "!**/cmd/**"
+          deny:
+            - pkg: github.com/mfenderov/ocd/internal/cli
+              desc: the inner packages must not depend on the command layer
+    godot:
+      scope: declarations
   exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      # Test cleanup calls do not need error checks.
+      # A test may assert the error it got, and may name a long value.
       - path: _test\.go
-        linters: [errcheck]
-      # Deferred Close calls: immaterial here, always ignore the result.
-      - text: 'Error return value of `.*\.Close`'
-        linters: [errcheck]
+        linters:
+          - funlen
+          - errcheck
+      - path: internal/store/
+        linters:
+          - gosec

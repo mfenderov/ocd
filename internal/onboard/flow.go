@@ -111,7 +111,8 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) (Result, 
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: res.TunnelID})
+	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost,
+		heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: res.TunnelID})
 	if err != nil {
 		return res, err
 	}
@@ -237,7 +238,8 @@ func setupOnboardTunnel(ctx context.Context, cfg Config, envVals map[string]stri
 
 // awaitEnrollment waits for the owner's approval when the enrolment is
 // pending, and says what the brain did about the DNS.
-func awaitEnrollment(ctx context.Context, cfg Config, dbPath string, client *http.Client, heartbeatToken string, outcome boxagent.EnrollOutcome, say func(string)) error {
+func awaitEnrollment(ctx context.Context, cfg Config, dbPath string, client *http.Client,
+	heartbeatToken string, outcome boxagent.EnrollOutcome, say func(string)) error {
 	if outcome.Status == "enrolled" {
 		// The brain writes the box's DNS right after the enrolment
 		// commits. When it could not, the owner is looking at this
@@ -251,7 +253,7 @@ func awaitEnrollment(ctx context.Context, cfg Config, dbPath string, client *htt
 	// One line, one wait: the owner is told once that the approval
 	// is what the box is waiting for.
 	say("waiting for Telegram approval…")
-	st, err := store.Open(dbPath)
+	st, err := store.Open(ctx, dbPath)
 	if err != nil {
 		return fmt.Errorf("onboard: open store: %w", err)
 	}

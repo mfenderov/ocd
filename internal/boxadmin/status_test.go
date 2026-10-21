@@ -16,7 +16,7 @@ import (
 // the editor is up, so the handler must answer the URL of the running
 // service.
 func TestStatusHandler(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestStatusHandler(t *testing.T) {
 	}
 
 	h := boxadmin.StatusHandler(st, exec)
-	req := httptest.NewRequest("GET", "/_oc/status", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -48,7 +48,7 @@ func TestStatusHandler(t *testing.T) {
 // The status is the same line the Go bot prints, so the brain and the
 // bot never disagree about what the box is doing.
 func TestStatusHandlerMatchesTheBotLine(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestStatusHandlerMatchesTheBotLine(t *testing.T) {
 	}
 
 	h := boxadmin.StatusHandler(st, exec)
-	req := httptest.NewRequest("GET", "/_oc/status", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -75,7 +75,7 @@ func TestStatusHandlerMatchesTheBotLine(t *testing.T) {
 // The exec must run under a deadline: a hung opencode would otherwise
 // keep this handler's goroutine forever.
 func TestStatusExecRunsUnderADeadline(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestStatusExecRunsUnderADeadline(t *testing.T) {
 	}
 
 	h := boxadmin.StatusHandler(st, exec)
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/_oc/status", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil))
 
 	if !hasDeadline {
 		t.Fatal("the exec ran without a deadline: a hung opencode would hold the handler forever")
@@ -103,7 +103,7 @@ func TestStatusExecRunsUnderADeadline(t *testing.T) {
 // When the caller goes away the exec must follow, so the box does not
 // keep a goroutine that nobody waits for.
 func TestStatusExecStopsWhenTheCallerLeaves(t *testing.T) {
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestStatusExecStopsWhenTheCallerLeaves(t *testing.T) {
 
 	h := boxadmin.StatusHandler(st, exec)
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest("GET", "/_oc/status", nil).WithContext(ctx)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/_oc/status", nil).WithContext(ctx)
 	done := make(chan struct{})
 	go func() {
 		h.ServeHTTP(httptest.NewRecorder(), req)

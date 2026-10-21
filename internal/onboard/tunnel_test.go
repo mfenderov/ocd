@@ -11,31 +11,8 @@ import (
 	"github.com/mfenderov/ocd/internal/onboard"
 )
 
-// fakeCloudflared installs an executable stub answering canned outputs.
-// handlers maps "tunnel list" style subcommand keys to stdout; fail maps
-// keys to a failing exit.
-func fakeCloudflared(t *testing.T, handlers map[string]string, fail map[string]bool) string {
-	t.Helper()
-	dir := t.TempDir()
-	script := "#!/bin/sh\nkey=\"$1 $2\"\n" +
-		"case \"$key\" in\n"
-	for k, out := range handlers {
-		script += "  \"" + k + "\") printf '%s' '" + out + "';;\n"
-	}
-	script += "esac\n"
-	for k := range fail {
-		script += `if [ "$key" = "` + k + `" ]; then exit 1; fi` + "\n"
-	}
-	script += "exit 0\n"
-	p := filepath.Join(dir, "cloudflared")
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	return dir
-}
-
-const listJSON = `[{"id":"11111111-2222-3333-4444-555555555555","name":"oc-mac","created_at":"2026-10-19T00:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]`
+const listJSON = `[{"id":"11111111-2222-3333-4444-555555555555","name":"oc-mac",` +
+	`"created_at":"2026-10-19T00:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]`
 
 func plantCert(t *testing.T, dir string) {
 	t.Helper()
@@ -46,7 +23,7 @@ func plantCert(t *testing.T, dir string) {
 }
 
 func TestListTunnelsParsesNames(t *testing.T) {
-	fakeCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
+	recordingCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
 	got, err := onboard.ListTunnels(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -57,10 +34,11 @@ func TestListTunnelsParsesNames(t *testing.T) {
 }
 
 func TestSetupTunnelFullFlow(t *testing.T) {
-	fakeCloudflared(t, map[string]string{
-		"tunnel list":   `[]`,
-		"tunnel create": "Created tunnel oc-mac with id aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\nTunnel credentials written to /tmp/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json",
-		"tunnel route":  `Added CNAME oc-tap-mac.buyallmemes.com to oc-mac`,
+	recordingCloudflared(t, map[string]string{
+		"tunnel list": `[]`,
+		"tunnel create": "Created tunnel oc-mac with id aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n" +
+			"Tunnel credentials written to /tmp/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json",
+		"tunnel route": `Added CNAME oc-tap-mac.buyallmemes.com to oc-mac`,
 	}, nil)
 	dir := t.TempDir()
 	plantCert(t, dir)
@@ -87,7 +65,7 @@ func TestSetupTunnelFullFlow(t *testing.T) {
 }
 
 func TestSetupTunnelReusesExisting(t *testing.T) {
-	fakeCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
+	recordingCloudflared(t, map[string]string{"tunnel list": listJSON}, nil)
 	dir := t.TempDir()
 	plantCert(t, dir)
 	plan := onboard.TunnelPlan{
@@ -106,7 +84,10 @@ func TestSetupTunnelReusesExisting(t *testing.T) {
 // A file that is not a tunnel config is never replaced: its rules cannot
 // be read, so no merge can promise to keep them.
 func TestSetupTunnelRefusesToClobberAnUnknownConfig(t *testing.T) {
-	fakeCloudflared(t, map[string]string{"tunnel list": `[]`, "tunnel create": "id 99999999-0000-0000-0000-000000000000"}, nil)
+	recordingCloudflared(t, map[string]string{
+		"tunnel list":   `[]`,
+		"tunnel create": "id 99999999-0000-0000-0000-000000000000",
+	}, nil)
 	dir := t.TempDir()
 	plantCert(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("existing"), 0o600); err != nil {
@@ -135,7 +116,8 @@ func plantConfig(t *testing.T, path, content string) {
 
 // recordingCloudflared installs a fake cloudflared that answers canned
 // outputs and appends every invocation to a file, so a test can see
-// which calls were made. It returns the path of that file.
+// which calls were made. It returns the path of that file. The fail map
+// names the keys the stub must fail on.
 func recordingCloudflared(t *testing.T, handlers map[string]string, fail map[string]bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -151,6 +133,7 @@ func recordingCloudflared(t *testing.T, handlers map[string]string, fail map[str
 	}
 	script += "exit 0\n"
 	p := filepath.Join(dir, "cloudflared")
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +608,8 @@ func TestEnsureTunnelConfigRefusesAnotherTunnelsConfig(t *testing.T) {
 	cred := filepath.Join(dir, id+".json")
 	plantConfig(t, path, homeConfig(id, cred))
 
-	_, err := onboard.EnsureTunnelConfig(path, other, filepath.Join(dir, other+".json"), conventionalTap, conventionalUI, 49400, 49374)
+	_, err := onboard.EnsureTunnelConfig(path, other, filepath.Join(dir, other+".json"),
+		conventionalTap, conventionalUI, 49400, 49374)
 	if err == nil {
 		t.Fatal("a config that serves another tunnel must not be re-pointed")
 	}
@@ -649,7 +633,8 @@ func TestEnsureTunnelConfigWritesOneRulePerHostname(t *testing.T) {
 	const id = "11111111-2222-3333-4444-555555555555"
 	cred := filepath.Join(dir, id+".json")
 
-	if _, err := onboard.EnsureTunnelConfig(path, id, cred, "oc-x.buyallmemes.com", "oc-x.buyallmemes.com", 49400, 49374); err != nil {
+	if _, err := onboard.EnsureTunnelConfig(path, id, cred,
+		"oc-x.buyallmemes.com", "oc-x.buyallmemes.com", 49400, 49374); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -676,19 +661,6 @@ func TestEnsureTunnelConfigRefusesAnUnreadableConfig(t *testing.T) {
 	}
 }
 
-func TestTunnelDefaults(t *testing.T) {
-	name, ui := onboard.TunnelDefaults("mac", "oc-tap-mac.buyallmemes.com")
-	if name != "oc-mac" {
-		t.Fatalf("tunnel name = %q", name)
-	}
-	if ui != "oc-mac.buyallmemes.com" {
-		t.Fatalf("ui host = %q", ui)
-	}
-	if _, ui2 := onboard.TunnelDefaults("mac", "localhost"); ui2 != "" {
-		t.Fatalf("bare hostnames get no UI default, got %q", ui2)
-	}
-}
-
 func TestSetupTunnelRequiresLoginOrToken(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLOUDFLARE_API_TOKEN", "")
@@ -699,7 +671,7 @@ func TestSetupTunnelRequiresLoginOrToken(t *testing.T) {
 }
 
 func TestSetupTunnelReusesIdenticalConfig(t *testing.T) {
-	fakeCloudflared(t, map[string]string{
+	recordingCloudflared(t, map[string]string{
 		"tunnel list":   `[]`,
 		"tunnel create": "Created tunnel oc-dup with id 11111111-1111-1111-1111-111111111111",
 		"tunnel route":  `Added CNAME`,
@@ -727,6 +699,7 @@ func TestRouteDNSOverwritesAnExistingRecord(t *testing.T) {
 	dir := t.TempDir()
 	args := filepath.Join(dir, "args")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + args + "'\nexit 0\n"
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, "cloudflared"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

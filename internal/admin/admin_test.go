@@ -11,40 +11,40 @@ import (
 )
 
 func TestRevokeRotatesAndMarksExpired(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	st.AddDevice("mac", "darwin")
+	st.AddDevice(t.Context(), "mac", "darwin")
 	var ran []string
-	exec := func(name string, args ...string) (string, error) {
+	exec := func(_ context.Context, name string, args ...string) (string, error) {
 		ran = append(ran, name+" "+strings.Join(args, " "))
 		if args[0] == "status" {
 			return "http://127.0.0.1:49374", nil
 		}
 		return "", nil
 	}
-	if err := admin.Revoke(st, exec); err != nil {
+	if err := admin.Revoke(t.Context(), st, exec); err != nil {
 		t.Fatal(err)
 	}
 	if len(ran) != 3 {
 		t.Fatalf("want set+start+status, got %v", ran)
 	}
-	d, _ := st.GetDevice("mac")
+	d, _ := st.GetDevice(t.Context(), "mac")
 	if d.ExpiresAt != 0 {
 		t.Fatalf("device must show expired, got %d", d.ExpiresAt)
 	}
 }
 
 func TestRevokeAbortsWhenStartFails(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	st.AddDevice("mac", "darwin")
-	exec := func(name string, args ...string) (string, error) {
+	st.AddDevice(t.Context(), "mac", "darwin")
+	exec := func(_ context.Context, name string, args ...string) (string, error) {
 		if len(args) > 1 && args[1] == "start" {
 			return "", errors.New("boom")
 		}
 		return "", nil
 	}
-	if err := admin.Revoke(st, exec); err == nil {
+	if err := admin.Revoke(t.Context(), st, exec); err == nil {
 		t.Fatal("want error when start fails")
 	}
 }
@@ -52,9 +52,9 @@ func TestRevokeAbortsWhenStartFails(t *testing.T) {
 // The status names the service and the devices: the operator reads it
 // to see what this box serves.
 func TestStatusNamesTheServiceAndTheDevices(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
-	st.AddDevice("mac", "darwin")
+	st.AddDevice(t.Context(), "mac", "darwin")
 	exec := func(_ context.Context, _ string, _ ...string) (string, error) {
 		return "http://127.0.0.1:49374\n", nil
 	}
@@ -71,7 +71,7 @@ func TestStatusNamesTheServiceAndTheDevices(t *testing.T) {
 // A service that does not answer leaves the status saying so: the
 // operator must not read a stale line as a live one.
 func TestStatusReportsAServiceThatIsDown(t *testing.T) {
-	st, _ := store.Open(":memory:")
+	st, _ := store.Open(t.Context(), ":memory:")
 	defer st.Close()
 	exec := func(_ context.Context, _ string, _ ...string) (string, error) {
 		return "", errors.New("connection refused")

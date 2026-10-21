@@ -86,7 +86,7 @@ func TestWaitEnrolled(t *testing.T) {
 		_, _ = w.Write([]byte(`{"enrolled":true}`))
 	}))
 	defer srv.Close()
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestWaitEnrolledTimeout(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	st, err := store.Open(":memory:")
+	st, err := store.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,10 @@ func TestDoOnboardPendingThenApproved(t *testing.T) {
 		t.Fatalf("onboard: %v", err)
 	}
 	raw, _ := os.ReadFile(dir + "/env")
-	for _, want := range []string{"OCD_BOX_ID", "OCD_WORKER_URL", "OCD_HEARTBEAT_TOKEN", "OCD_ENROLL_TOKEN", "OCD_ADMIN_TOKEN", "OCD_PUBLIC_URL"} {
+	for _, want := range []string{
+		"OCD_BOX_ID", "OCD_WORKER_URL", "OCD_HEARTBEAT_TOKEN",
+		"OCD_ENROLL_TOKEN", "OCD_ADMIN_TOKEN", "OCD_PUBLIC_URL",
+	} {
 		if !strings.Contains(string(raw), want+"=") {
 			t.Fatalf("env must define %s, got:\n%s", want, raw)
 		}
@@ -228,7 +231,8 @@ func TestDoOnboardSaysNothingWhenTheDNSCameOutOk(t *testing.T) {
 func TestDoOnboardSaysTheBrainWroteNoDNSForASkip(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"skipped: no tunnel id recorded for mac — re-enrol to bind one"}`))
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"skipped: no tunnel id recorded for mac — re-enrol to ` +
+			`bind one"}`))
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
@@ -293,6 +297,8 @@ func TestDoOnboardEnrollCodeSkipsWait(t *testing.T) {
 	if _, err := onboard.DoOnboard(ctx, cfg, nil); err != nil {
 		t.Fatalf("onboard with code: %v", err)
 	}
+	// The code is the test's own fake, not a secret.
+	//nolint:gosec // the typed code is a fixture, not a credential.
 	if gotToken != "typed-code-9" {
 		t.Fatalf("must enroll with the typed code, sent %q", gotToken)
 	}
@@ -387,7 +393,10 @@ func TestApplyEnvDefaultsSkipsPresent(t *testing.T) {
 
 func TestLaunchdPlist(t *testing.T) {
 	out := onboard.LaunchdPlist("/opt/homebrew/bin/ocd", "/Users/x")
-	for _, want := range []string{"dev.ocd.serve", "/opt/homebrew/bin/ocd", "<string>serve</string>", "RunAtLoad", "KeepAlive", ".ocd/daemon.log"} {
+	for _, want := range []string{
+		"dev.ocd.serve", "/opt/homebrew/bin/ocd", "<string>serve</string>",
+		"RunAtLoad", "KeepAlive", ".ocd/daemon.log",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("plist must contain %q", want)
 		}
@@ -417,6 +426,7 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 		"  \"tunnel create\") echo 'Created tunnel oc-t9 with id 99999999-0000-0000-0000-000000000000';;\n" +
 		"  \"tunnel route\") exit 0;;\n" +
 		"esac\nexit 0\n"
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, "cloudflared"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +455,8 @@ func TestDoOnboardWithTunnelEndToEnd(t *testing.T) {
 		t.Fatalf("env must enable tunnel supervision, got:\n%s", raw)
 	}
 	tpl, _ := os.ReadFile(filepath.Join(credDir, "config.yml"))
-	if !strings.Contains(string(tpl), "aaaaaaaa") && !strings.Contains(string(tpl), "99999999-0000-0000-0000-000000000000") {
+	if !strings.Contains(string(tpl), "aaaaaaaa") &&
+		!strings.Contains(string(tpl), "99999999-0000-0000-0000-000000000000") {
 		t.Fatalf("tunnel config must carry the created id, got:\n%s", tpl)
 	}
 }
@@ -462,7 +473,9 @@ func TestExistingIdentity(t *testing.T) {
 	if _, ok := onboard.ExistingIdentity(p); ok {
 		t.Fatal("env without box id means fresh box")
 	}
-	env := "OCD_BOX_ID=\"mac\"\nOCD_PUBLIC_URL=\"https://oc-tap-mac.buyallmemes.com/pair\"\nOCD_PAIR_URL=\"https://oc-mac.buyallmemes.com\"\n"
+	env := "OCD_BOX_ID=\"mac\"\n" +
+		"OCD_PUBLIC_URL=\"https://oc-tap-mac.buyallmemes.com/pair\"\n" +
+		"OCD_PAIR_URL=\"https://oc-mac.buyallmemes.com\"\n"
 	if err := os.WriteFile(p, []byte(env), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -556,10 +569,11 @@ func TestIsTTYIsFalseForDevNull(t *testing.T) {
 }
 
 // Whatever the bot sends must be what the prompt accepts: the
-// paste-ready command carries the code as its last field.
+// paste-ready command carries the code as its last field. The bot's
+// shape is "ocd onboard <box> <code>".
 func TestAskEnrollCodeAcceptsThePasteReadyCommand(t *testing.T) {
 	old := onboard.Stdin
-	onboard.Stdin = strings.NewReader(onboard.EnrollCommand("mac", "code-abc") + "\n")
+	onboard.Stdin = strings.NewReader("ocd onboard mac code-abc\n")
 	t.Cleanup(func() { onboard.Stdin = old })
 
 	var sb strings.Builder
@@ -652,7 +666,7 @@ func TestDoOnboardCodeBecomesHeartbeatSecret(t *testing.T) {
 func TestServiceStatusWithoutPlist(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	state, err := onboard.ServiceStatus()
+	state, err := onboard.ServiceStatus(t.Context())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -687,12 +701,12 @@ func TestOnboardWiresTapPairAndUIPort(t *testing.T) {
 	defer srv.Close()
 	// Hermetic: a fake cloudflared on PATH, so the test never touches
 	// the real binary, the network, or the account.
-	fakeCloudflared(t, map[string]string{
+	recordingCloudflared(t, map[string]string{
 		"tunnel list":   `[]`,
 		"tunnel create": "Created tunnel oc-mac with id 11111111-2222-3333-4444-555555555555",
 		"tunnel route":  "Added CNAME",
 	}, nil)
-	plan := onboard.DefaultTunnelPlan("mac")
+	plan := boxTunnelPlan("mac")
 	plan.CredDir = filepath.Join(dir, ".cloudflared")
 	plan.APIToken = "test-token" // no cloudflared login needed
 	cfg := onboard.Config{
@@ -745,7 +759,7 @@ func TestLoadEnvFileExpandsHome(t *testing.T) {
 func TestOnboardSendsTunnelID(t *testing.T) {
 	dir := t.TempDir()
 	const tunnelID = "99999999-0000-0000-0000-000000000000"
-	fakeCloudflared(t, map[string]string{
+	recordingCloudflared(t, map[string]string{
 		"tunnel list":   `[]`,
 		"tunnel create": "Created tunnel oc-mac with id " + tunnelID,
 		"tunnel route":  "Added CNAME",
@@ -757,7 +771,7 @@ func TestOnboardSendsTunnelID(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac"}`))
 	}))
 	defer srv.Close()
-	plan := onboard.DefaultTunnelPlan("mac")
+	plan := boxTunnelPlan("mac")
 	plan.CredDir = filepath.Join(dir, ".cloudflared")
 	plan.APIToken = "test-token" // no cloudflared login needed
 	cfg := onboard.Config{

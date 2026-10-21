@@ -48,29 +48,6 @@ func UIHost(boxID string) string {
 	return "oc-" + boxID + ".buyallmemes.com"
 }
 
-// DefaultTunnelPlan derives the conventional names from a box id:
-// oc-<box> tunnel, oc-tap-<box> tap host, oc-<box> UI host.
-func DefaultTunnelPlan(boxID string) TunnelPlan {
-	return TunnelPlan{
-		Name:    "oc-" + boxID,
-		TapHost: "oc-tap-" + boxID + ".buyallmemes.com",
-		UIHost:  "oc-" + boxID + ".buyallmemes.com",
-		Port:    DaemonPort,
-		UIPort:  OpenCodePort,
-	}
-}
-
-// TunnelDefaults fills blanks for the wizard: tunnel name oc-<box>, UI
-// hostname derived from the tap host's domain (oc-<box>.<domain>).
-// Bare hostnames get no UI default.
-func TunnelDefaults(boxID, tapHost string) (name, ui string) {
-	name = "oc-" + boxID
-	if i := strings.Index(tapHost, "."); i > 0 {
-		ui = "oc-" + boxID + tapHost[i:]
-	}
-	return name, ui
-}
-
 // DefaultCredDir mirrors cloudflared: ~/.cloudflared.
 func DefaultCredDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -94,7 +71,7 @@ func cloudflared(ctx context.Context, apiToken string, args ...string) (string, 
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		out := strings.TrimSpace(stderr.String() + " " + stdout.String())
-		return "", fmt.Errorf("onboard: cloudflared %s: %v %s", strings.Join(args, " "), err, out)
+		return "", fmt.Errorf("onboard: cloudflared %s: %w %s", strings.Join(args, " "), err, out)
 	}
 	return stdout.String(), nil
 }
@@ -284,13 +261,14 @@ func unreproduciblePart(line string) string {
 // another tunnel, and it refuses a config that holds something a rewrite
 // would drop. A config that already serves the desired rules is reused,
 // so a re-run writes nothing.
-func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
+func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			// A config we cannot read is a config we cannot merge: writing
 			// over it would lose it.
-			return false, fmt.Errorf("onboard: read tunnel config: %w — re-run with --skip-tunnel to reuse the existing config", err)
+			return false, fmt.Errorf("onboard: read tunnel config: %w"+
+				" — re-run with --skip-tunnel to reuse the existing config", err)
 		}
 		rules := desiredIngressRules(tapHost, uiHost, port, uiPort, nil)
 		return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
@@ -309,7 +287,8 @@ func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, 
 // notATunnelConfig names a file that cannot say which tunnel this box
 // serves. The merge and the setup refuse it with the same words.
 func notATunnelConfig(path string) error {
-	return fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate, or re-run with --skip-tunnel", path)
+	return fmt.Errorf("onboard: %s is not a tunnel config"+
+		" — move it aside to regenerate, or re-run with --skip-tunnel", path)
 }
 
 // mergeableConfig reads the rules of a config the merge may rewrite: the
@@ -321,10 +300,13 @@ func mergeableConfig(path, raw, tunnelID string) ([]ingressRule, error) {
 		return nil, notATunnelConfig(path)
 	}
 	if fileTunnel != tunnelID {
-		return nil, fmt.Errorf("onboard: %s serves tunnel %s, not %s — move it aside to regenerate, or re-run with --skip-tunnel", path, fileTunnel, tunnelID)
+		return nil, fmt.Errorf("onboard: %s serves tunnel %s, not %s"+
+			" — move it aside to regenerate, or re-run with --skip-tunnel", path, fileTunnel, tunnelID)
 	}
 	if parts := unreproducibleParts(raw); len(parts) > 0 {
-		return nil, fmt.Errorf("onboard: %s holds %s — remove it, move the file aside to regenerate, or re-run with --skip-tunnel", path, strings.Join(parts, "; "))
+		return nil, fmt.Errorf("onboard: %s holds %s"+
+			" — remove it, move the file aside to regenerate, or re-run with --skip-tunnel",
+			path, strings.Join(parts, "; "))
 	}
 	return ParseIngress(raw), nil
 }
@@ -496,7 +478,8 @@ func checkCloudflaredLogin(plan TunnelPlan) error {
 	if cloudflaredAuthenticated(plan.CredDir, plan.APIToken) {
 		return nil
 	}
-	return fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
+	return fmt.Errorf("onboard: no cloudflared login found" +
+		" — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
 }
 
 // resolveTunnelID resolves the tunnel id this box serves, and says

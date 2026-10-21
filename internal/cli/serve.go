@@ -12,6 +12,7 @@ import (
 
 	"github.com/mfenderov/ocd/internal/boxadmin"
 	"github.com/mfenderov/ocd/internal/boxagent"
+	"github.com/mfenderov/ocd/internal/mint"
 	"github.com/mfenderov/ocd/internal/pair"
 	"github.com/mfenderov/ocd/internal/store"
 )
@@ -29,6 +30,11 @@ const linkSweepBatch = 50
 // sweepPushTimeout bounds one push to the brain. The sweep must never
 // hold the daemon hostage to a slow brain.
 const sweepPushTimeout = 3 * time.Second
+
+// serverTimeout bounds how long a slow client may hold a connection. The
+// daemon answers small requests; a client that sends nothing must not
+// keep a goroutine and a socket forever.
+const serverTimeout = 30 * time.Second
 
 // heartbeatInterval resolves the box→Worker heartbeat pace.
 // OCD_HEARTBEAT_INTERVAL overrides the 30s spec default with a Go duration
@@ -58,7 +64,7 @@ func serveAddr() string {
 // containing that segment, which would answer the worker instead of the box.
 // An unset token skips mounting cleanly: the daemon stays healthy without
 // an admin listener, and the skip is logged for the boot log.
-func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func() (string, error)) {
+func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair mint.Exec) {
 	token := os.Getenv("OCD_ADMIN_TOKEN")
 	if token == "" {
 		_, _ = fmt.Fprintln(w, "admin off (OCD_ADMIN_TOKEN unset)")
@@ -68,19 +74,12 @@ func mountAdmin(mux *http.ServeMux, w io.Writer, st *store.Store, execPair func(
 	if publicBase == "" {
 		publicBase = "https://oc-tap.buyallmemes.com/pair"
 	}
-	execService := func(ctx context.Context, name string, args ...string) (string, error) {
-		out, err := exec.CommandContext(ctx, name, args...).Output()
-		return string(out), err
-	}
 	mux.Handle("/_oc/mint", boxadmin.RequireAdmin(st, token, boxadmin.MintHandler(st, execPair, publicBase)))
-	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token, boxadmin.RevokeHandler(st, func(name string, args ...string) (string, error) {
-		// Revoke runs to the end: a half-revoked box is worse than a
-		// slow one, so it gets no deadline.
-		return execService(context.Background(), name, args...)
-	})))
+	mux.Handle("/_oc/revoke", boxadmin.RequireAdmin(st, token,
+		boxadmin.RevokeHandler(st, opencodeExec)))
 	mux.Handle("/_oc/audit", boxadmin.RequireAdmin(st, token, boxadmin.AuditHandler(st)))
 	mux.Handle("/_oc/presence", boxadmin.RequireAdmin(st, token, boxadmin.PresenceHandler(st)))
-	mux.Handle("/_oc/status", boxadmin.RequireAdmin(st, token, boxadmin.StatusHandler(st, execService)))
+	mux.Handle("/_oc/status", boxadmin.RequireAdmin(st, token, boxadmin.StatusHandler(st, opencodeExec)))
 	_, _ = fmt.Fprintln(w, "admin on (/_oc/* behind Bearer auth)")
 }
 
@@ -132,7 +131,7 @@ func startSweep(ctx context.Context, w io.Writer, st *store.Store, interval time
 // next sweep reports the same tokens again. Once the brain has them the
 // rows go, so a dead link is reported exactly once.
 func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxagent.BrainConfig, client *http.Client) {
-	tokens, err := st.ExpiredLinkTokens(linkSweepBatch)
+	tokens, err := st.ExpiredLinkTokens(ctx, linkSweepBatch)
 	if err != nil {
 		_, _ = fmt.Fprintln(w, "link sweep failed:", err)
 		return
@@ -155,7 +154,7 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 	// The brain has them. A dead link is worth nothing to anyone else —
 	// the claim path refuses it on its TTL — so the rows go and no sweep
 	// reports the same dead link again.
-	if err := st.DeleteLinkTokens(tokens); err != nil {
+	if err := st.DeleteLinkTokens(ctx, tokens); err != nil {
 		_, _ = fmt.Fprintln(w, "link sweep delete failed:", err)
 	}
 }
@@ -170,12 +169,12 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 // watermark is repaired then — it goes back to the start of the trail —
 // and the trail's rows are offered again. The brain's dedup collapses
 // the rows it already has.
-func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
-	watermark, err := st.AuditWatermark()
+func auditPushFrom(ctx context.Context, w io.Writer, st *store.Store) (int64, error) {
+	watermark, err := st.AuditWatermark(ctx)
 	if err != nil {
 		return 0, err
 	}
-	stale, err := st.AuditWatermarkStale()
+	stale, err := st.AuditWatermarkStale(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -187,7 +186,7 @@ func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
 	// and not "reset" — a prune is not a reset, and the operator reads
 	// this line.
 	_, _ = fmt.Fprintln(w, "audit trail lost the brain's last row: the watermark is repaired")
-	if err := st.RepairAuditWatermark(); err != nil {
+	if err := st.RepairAuditWatermark(ctx); err != nil {
 		return 0, err
 	}
 	return 0, nil
@@ -202,7 +201,7 @@ func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
 // The push is best effort, like the dead-link push: a brain outage is
 // logged, never fatal.
 func sweepAuditRows(ctx context.Context, w io.Writer, st *store.Store, cfg boxagent.BrainConfig, client *http.Client) {
-	watermark, err := auditPushFrom(w, st)
+	watermark, err := auditPushFrom(ctx, w, st)
 	if err != nil {
 		// The box does not know where it left off. Pushing anyway would
 		// re-offer rows the brain already has and move the watermark
@@ -210,7 +209,7 @@ func sweepAuditRows(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 		_, _ = fmt.Fprintln(w, "audit push skipped:", err)
 		return
 	}
-	rows, err := st.RecentAuditSince(watermark)
+	rows, err := st.RecentAuditSince(ctx, watermark)
 	if err != nil {
 		_, _ = fmt.Fprintln(w, "audit rows read failed:", err)
 		return
@@ -241,7 +240,7 @@ func sweepAuditRows(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 	}
 	// The brain has them: the watermark moves to the last row sent, so no
 	// sweep offers them again.
-	if err := st.SetAuditWatermark(rows[len(rows)-1].RowID); err != nil {
+	if err := st.SetAuditWatermark(ctx, rows[len(rows)-1].RowID); err != nil {
 		_, _ = fmt.Fprintln(w, "audit watermark write failed:", err)
 	}
 }
@@ -270,7 +269,9 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 			if !enrolled {
 				enrollToken = os.Getenv("OCD_ENROLL_TOKEN")
 			}
-			ok, err := boxagent.SendOnce(st, client, workerURL, os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"), enrollToken, boxadmin.Version)
+			ok, err := boxagent.SendOnce(ctx, st, client, workerURL,
+				os.Getenv("OCD_BOX_ID"), os.Getenv("OCD_HEARTBEAT_TOKEN"),
+				enrollToken, boxadmin.Version)
 			if err != nil {
 				_, _ = fmt.Fprintln(w, "heartbeat failed:", err)
 				return
@@ -294,23 +295,26 @@ func startHeartbeat(ctx context.Context, w io.Writer, st *store.Store) {
 // RunServe runs the box daemon: the /pair page, the box API behind
 // /_oc, the heartbeat to the Worker and the sweeps that tell the brain
 // what happened here. Telegram is the brain's business, not the box's.
-func RunServe(w io.Writer) error {
-	st, err := openStore()
+//
+// The context is the daemon's life: when it is cancelled the listener
+// closes and the background writers stop.
+func RunServe(ctx context.Context, w io.Writer) error {
+	st, err := openStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	execPair := func() (string, error) {
+	execPair := func(execCtx context.Context) (string, error) {
 		url := os.Getenv("OCD_PAIR_URL")
 		if url == "" {
 			url = "https://oc.buyallmemes.com"
 		}
-		out, err := exec.Command("opencode", "pair", "--url", url).Output()
+		// opencode is our own binary, and the url is the configured origin.
+		//nolint:gosec // the argv is opencode's own, with the configured pair origin.
+		out, err := exec.CommandContext(execCtx, "opencode", "pair", "--url", url).Output()
 		return string(out), err
 	}
-
-	ctx := context.Background()
 
 	mux := http.NewServeMux()
 	mux.Handle("/pair", pair.Handler(st, execPair))
@@ -326,10 +330,15 @@ func RunServe(w io.Writer) error {
 	}
 
 	addr := serveAddr()
-	ln, err := net.Listen("tcp", addr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(w, "ocd serve on http://"+ln.Addr().String())
-	return http.Serve(ln, mux)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: serverTimeout,
+		IdleTimeout:       serverTimeout,
+	}
+	return srv.Serve(ln)
 }

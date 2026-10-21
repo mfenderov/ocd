@@ -14,6 +14,7 @@ func fakeBinary(t *testing.T, name, body string) string {
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
 	script := "#!/bin/sh\necho \"$@\" >> " + calls + "\n" + body
+	//nolint:gosec // the stub binary must be executable: it stands in for a real one.
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

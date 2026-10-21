@@ -2,6 +2,7 @@ package pair
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -70,16 +71,17 @@ func pushLinkUsed(st *store.Store, tok, device, ip, ua string) {
 			UA:    ua,
 		}})
 		if err != nil {
-			st.AuditUA("box:"+cfg.BoxID, "push_failed", device, ip, err.Error(), ua)
+			st.AuditUA(ctx, "box:"+cfg.BoxID, "push_failed", device, ip, err.Error(), ua)
 		}
 	}()
 }
 
-func Handler(st *store.Store, exec func() (string, error)) http.Handler {
+func Handler(st *store.Store, exec mint.Exec) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		ip := who(r)
 		if !authorized(r) {
-			st.AuditUA("web:"+ip, "tap_denied", "", ip, "no-jwt", r.Header.Get("User-Agent"))
+			st.AuditUA(ctx, "web:"+ip, "tap_denied", "", ip, "no-jwt", r.Header.Get("User-Agent"))
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -88,31 +90,38 @@ func Handler(st *store.Store, exec func() (string, error)) http.Handler {
 			http.Error(w, "missing tap token", http.StatusBadRequest)
 			return
 		}
-		device, ok := st.ConsumeLink(tok)
+		device, ok := st.ConsumeLink(ctx, tok)
 		if !ok {
-			st.AuditUA("web:"+ip, "tap_denied", "", ip, "used-or-expired", r.Header.Get("User-Agent"))
+			st.AuditUA(ctx, "web:"+ip, "tap_denied", "", ip, "used-or-expired", r.Header.Get("User-Agent"))
 			http.Error(w, "link already used or expired", http.StatusGone)
 			return
 		}
-		st.SetUsedMeta(tok, clientIP(r), r.Header.Get("User-Agent"))
-		st.AuditUA("web:"+ip, "tapped", device, ip, "ok", r.Header.Get("User-Agent"))
-		link, err := mint.Mint(st, exec, device, "web")
+		st.SetUsedMeta(ctx, tok, clientIP(r), r.Header.Get("User-Agent"))
+		st.AuditUA(ctx, "web:"+ip, "tapped", device, ip, "ok", r.Header.Get("User-Agent"))
+		link, err := mint.Mint(ctx, st, exec, device, "web")
 		if err != nil {
-			st.AuditUA("web:"+ip, "mint_failed", device, ip, err.Error(), r.Header.Get("User-Agent"))
-			if err == mint.ErrRateLimited {
+			st.AuditUA(ctx, "web:"+ip, "mint_failed", device, ip, err.Error(), r.Header.Get("User-Agent"))
+			if errors.Is(err, mint.ErrRateLimited) {
 				http.Error(w, "wait a bit before next link", http.StatusTooManyRequests)
 				return
 			}
 			http.Error(w, "mint failed", http.StatusBadGateway)
 			return
 		}
-		rowID := st.AuditUA("web:"+ip, "consumed", device, ip, "ok", r.Header.Get("User-Agent"))
+		rowID := st.AuditUA(ctx, "web:"+ip, "consumed", device, ip, "ok", r.Header.Get("User-Agent"))
 		go func() {
-			if city := geo.Lookup(stripPort(ip)); city != "" {
-				st.SetResultExtra(rowID, city)
+			// The lookup outlives the tap, so it does not take the tap's
+			// cancellation with it.
+			lookupCtx := context.WithoutCancel(ctx)
+			if city := geo.Lookup(lookupCtx, stripPort(ip)); city != "" {
+				st.SetResultExtra(lookupCtx, rowID, city)
 			}
 		}()
+		// The link is what `opencode pair` printed: it is the tap's whole
+		// point, and no request field reaches it.
+		//nolint:gosec // the link comes from the pairing exec, not from the request.
 		http.Redirect(w, r, link, http.StatusFound)
+		//nolint:gosec // the link comes from the pairing exec, not from the request.
 		_, _ = fmt.Fprint(w, link)
 		pushLinkUsed(st, tok, device, ip, r.Header.Get("User-Agent"))
 	})

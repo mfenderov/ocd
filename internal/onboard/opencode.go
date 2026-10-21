@@ -3,7 +3,6 @@ package onboard
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -48,25 +47,4 @@ func OpenCodePortOrDefault(ctx context.Context) (int, string) {
 		return OpenCodePort, err.Error()
 	}
 	return port, ""
-}
-
-// ParseServiceURL extracts the port from a service URL like
-// "http://127.0.0.1:31047". Exported for tests.
-func ParseServiceURL(raw string) (int, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return 0, fmt.Errorf("onboard: empty service url")
-	}
-	u, err := url.Parse(trimmed)
-	if err != nil {
-		return 0, fmt.Errorf("onboard: bad service url %q: %w", trimmed, err)
-	}
-	if p := u.Port(); p != "" {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return 0, fmt.Errorf("onboard: bad service port %q", p)
-		}
-		return n, nil
-	}
-	return 0, fmt.Errorf("onboard: service url %q has no port", trimmed)
 }

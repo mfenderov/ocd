@@ -78,7 +78,8 @@ func enrollURL(base string) string {
 // and what the brain did about the box's DNS. The enroll token travels
 // in the body: first contact has no bearer credentials yet. Any non-200
 // is an error, no local retry.
-func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (EnrollOutcome, error) {
+func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname,
+	enrollToken, adminToken string, opts EnrollOptions) (EnrollOutcome, error) {
 	if err := checkEnrollInput(id, hostname, enrollToken); err != nil {
 		return EnrollOutcome{}, err
 	}
@@ -121,7 +122,8 @@ func enrollContext(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // newEnrollRequest is the request the enrolment sends.
-func newEnrollRequest(ctx context.Context, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (*http.Request, error) {
+func newEnrollRequest(ctx context.Context, workerURL, id, hostname,
+	enrollToken, adminToken string, opts EnrollOptions) (*http.Request, error) {
 	payload, err := json.Marshal(enrollRequest{
 		ID:          id,
 		Hostname:    hostname,
@@ -154,7 +156,8 @@ func setEnrollHeaders(req *http.Request, opts EnrollOptions) {
 // error it replied with.
 func readEnrollOutcome(resp *http.Response) (EnrollOutcome, error) {
 	if resp.StatusCode != http.StatusOK {
-		return EnrollOutcome{}, fmt.Errorf("boxagent: enroll worker replied %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return EnrollOutcome{}, fmt.Errorf("boxagent: enroll worker replied %d %s",
+			resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	var out EnrollOutcome
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

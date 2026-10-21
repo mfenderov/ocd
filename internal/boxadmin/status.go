@@ -23,7 +23,7 @@ const statusTimeout = 2 * time.Second
 //
 // The exec argv is fixed inside admin.Status; nothing from the request
 // reaches the command line.
-func StatusHandler(st *store.Store, exec func(ctx context.Context, name string, args ...string) (string, error)) http.Handler {
+func StatusHandler(st *store.Store, exec admin.Exec) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), statusTimeout)
 		defer cancel()

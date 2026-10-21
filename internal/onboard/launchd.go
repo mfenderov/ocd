@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,7 +71,7 @@ func WriteLaunchdPlist(path, exe, home string) error {
 
 // BootstrapLaunchd loads the service for this login session (uid from $UID
 // or `id -u`). Requires macOS launchctl.
-func BootstrapLaunchd(path string) error {
+func BootstrapLaunchd(ctx context.Context, path string) error {
 	uid, err := loginUID()
 	if err != nil {
 		return err
@@ -78,9 +79,12 @@ func BootstrapLaunchd(path string) error {
 	if _, err := strconv.Atoi(uid); err != nil {
 		return fmt.Errorf("onboard: bad uid %q", uid)
 	}
-	out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, path).CombinedOutput()
+	// launchctl takes a fixed argv: the uid of this login session and
+	// this box's own plist. Nothing from a request reaches it.
+	//nolint:gosec // the argv is launchctl's own, with this box's uid and plist.
+	out, err := exec.CommandContext(ctx, "launchctl", "bootstrap", "gui/"+uid, path).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("onboard: launchctl bootstrap: %v %s", err, out)
+		return fmt.Errorf("onboard: launchctl bootstrap: %w %s", err, out)
 	}
 	return nil
 }
@@ -112,12 +116,12 @@ func loginUID() (string, error) {
 // session. macOS only; callers gate on runtime.GOOS. Re-running refreshes
 // the plist: an already-loaded copy is booted out first so the new
 // content takes effect.
-func InstallLoginService() (string, error) {
-	path, err := installLoginPlist()
+func InstallLoginService(ctx context.Context) (string, error) {
+	path, err := installLoginPlist(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := BootstrapLaunchd(path); err != nil {
+	if err := BootstrapLaunchd(ctx, path); err != nil {
 		return path, err
 	}
 	return path, nil
@@ -125,7 +129,7 @@ func InstallLoginService() (string, error) {
 
 // installLoginPlist writes the plist of the login service, replacing the
 // one an older build wrote.
-func installLoginPlist() (string, error) {
+func installLoginPlist(ctx context.Context) (string, error) {
 	exe, err := ServiceExecutable()
 	if err != nil {
 		return "", err
@@ -138,7 +142,7 @@ func installLoginPlist() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_ = UnloadLoginService()
+	_ = UnloadLoginService(ctx)
 	if err := WriteLaunchdPlist(path, exe, home); err != nil {
 		return "", err
 	}
@@ -154,7 +158,7 @@ func ServiceExecutable() (string, error) {
 
 // UnloadLoginService stops and removes the login service. Missing service
 // is not an error: the goal state is "not installed".
-func UnloadLoginService() error {
+func UnloadLoginService(ctx context.Context) error {
 	path, err := LaunchdPath()
 	if err != nil {
 		return err
@@ -163,7 +167,9 @@ func UnloadLoginService() error {
 	if err != nil {
 		return err
 	}
-	_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+LaunchdLabel).Run()
+	// launchctl takes a fixed argv: this box's own uid and label.
+	//nolint:gosec // the argv is launchctl's own, with this box's uid and label.
+	_ = exec.CommandContext(ctx, "launchctl", "bootout", "gui/"+uid+"/"+LaunchdLabel).Run()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("onboard: remove plist: %w", err)
 	}
@@ -172,23 +178,42 @@ func UnloadLoginService() error {
 
 // ServiceStatus reports the launchd service state ("running", "not
 // loaded", or the raw state string) and whether the plist exists.
-func ServiceStatus() (string, error) {
+func ServiceStatus(ctx context.Context) (string, error) {
 	path, err := LaunchdPath()
 	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(path); err != nil {
+	if !plistInstalled(path) {
 		return "not installed", nil
 	}
 	uid, ok := serviceUID()
 	if !ok {
 		return "installed", nil
 	}
-	out, err := exec.Command("launchctl", "print", "gui/"+uid+"/"+LaunchdLabel).CombinedOutput()
-	if err != nil {
+	state, ok := launchdPrintState(ctx, uid)
+	if !ok {
 		return "installed (not loaded)", nil
 	}
-	return launchdState(string(out)), nil
+	return state, nil
+}
+
+// plistInstalled says whether the service plist is on disk.
+func plistInstalled(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// launchdPrintState is the state launchctl reports for the service, and
+// whether it reported one at all: a service that is not loaded has no
+// state to report.
+func launchdPrintState(ctx context.Context, uid string) (string, bool) {
+	// launchctl takes a fixed argv: this box's own uid and label.
+	//nolint:gosec // the argv is launchctl's own, with this box's uid and label.
+	out, err := exec.CommandContext(ctx, "launchctl", "print", "gui/"+uid+"/"+LaunchdLabel).CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	return launchdState(string(out)), true
 }
 
 // serviceUID is the uid of this login session, when it can be read:
