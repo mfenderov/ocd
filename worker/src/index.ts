@@ -14,6 +14,18 @@ export interface Env {
   ACCESS_ALLOWED_EMAIL?: string;
 }
 
+// The brain's Durable Object: the one binding every route needs. A brain
+// without it fails loud — the answer says so, and the log says why.
+function fleetStub(env: Env | undefined): DurableObjectStub | Response {
+  if (!env?.FLEET_STATE) {
+    console.error("FLEET_STATE binding is not configured");
+    return new Response("FLEET_STATE binding is not configured", {
+      status: 500,
+    });
+  }
+  return env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
+}
+
 // Single choke point for every plain DO passthrough: binding check, then
 // forward method + mapped path + headers + body verbatim. Backends reads go
 // through here too so the Authorization/Access headers reach the DO scope
@@ -24,13 +36,10 @@ export async function forwardToDo(
   env: Env | undefined,
   doPath: string,
 ): Promise<Response> {
-  if (!env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+  const stub = fleetStub(env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
   return await stub.fetch(new Request(`http://do${doPath}`, request));
 }
 
@@ -114,26 +123,20 @@ export const EDGE_ROUTES: readonly EdgeRoute[] = [
 // The enrolment routes: the query string rides along — capability links
 // carry id/exp/sig as params.
 async function handleEnrollApi(ctx: EdgeContext, doPath: string): Promise<Response> {
-  if (!ctx.env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = ctx.env.FLEET_STATE.get(ctx.env.FLEET_STATE.idFromName("fleet"));
   const search = ctx.url.search;
   return await stub.fetch(new Request(`http://do${doPath}${search}`, ctx.request));
 }
 
 // The link route: the box id comes out of the path.
 async function handleLinkApi(ctx: EdgeContext): Promise<Response> {
-  if (!ctx.env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = ctx.env.FLEET_STATE.get(ctx.env.FLEET_STATE.idFromName("fleet"));
   return await stub.fetch(
     new Request(`http://do/link/${encodeURIComponent(ctx.id)}`, ctx.request),
   );
@@ -141,13 +144,10 @@ async function handleLinkApi(ctx: EdgeContext): Promise<Response> {
 
 // The audit route: the box/n filter params belong to the DO handler.
 async function handleAuditApi(ctx: EdgeContext): Promise<Response> {
-  if (!ctx.env?.FLEET_STATE) {
-    console.error("FLEET_STATE binding is not configured");
-    return new Response("FLEET_STATE binding is not configured", {
-      status: 500,
-    });
+  const stub = fleetStub(ctx.env);
+  if (stub instanceof Response) {
+    return stub;
   }
-  const stub = ctx.env.FLEET_STATE.get(ctx.env.FLEET_STATE.idFromName("fleet"));
   const search = ctx.url.search;
   return await stub.fetch(new Request(`http://do/audit${search}`, ctx.request));
 }

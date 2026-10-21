@@ -39,8 +39,8 @@ export function exact(path: string): PathRule {
   return { kind: "exact", path };
 }
 
-// The path with a name in it: the name must be there ("/api/backends/{id}
-// /revoke"), and it may hold a "/".
+// The path with a name in it: the name must be there
+// ("/api/backends/{id}/revoke"), and it may hold a "/".
 export function requiredId(head: string, tail = ""): PathRule {
   return { kind: "wrapped", head, tail, idRequired: true };
 }

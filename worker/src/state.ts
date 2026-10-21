@@ -43,7 +43,7 @@ import {
 
 // What a route's handler gets: the request, the URL, and the id the path
 // names.
-interface DoContext {
+export interface DoContext {
   request: Request;
   url: URL;
   // The id the path names, empty when the path names none.
