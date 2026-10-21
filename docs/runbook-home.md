@@ -50,10 +50,9 @@ This box follows the naming convention like every other box.
 - editor UI: `https://oc-home.buyallmemes.com` → 127.0.0.1:49374 (opencode)
 - tap links: `https://oc-tap-home.buyallmemes.com/pair` → 127.0.0.1:49400 (daemon)
 
-The old names still answer, and are dropped only after the Mac is on:
-
-- editor UI: `https://oc.buyallmemes.com` → 127.0.0.1:49374 (opencode)
-- tap links: `https://oc-tap.buyallmemes.com/pair` → 127.0.0.1:49400 (daemon)
+The box's old names (`oc.buyallmemes.com`, `oc-tap.buyallmemes.com`) are
+gone: they left the tunnel config and the DNS when the Mac came on. A link
+you still hold that points at them is dead.
 
 `ocd repair` reads the hostnames from `~/.cloudflared/config.yml` — the
 source of truth — and only fixes ports. Never let a tool invent hostnames

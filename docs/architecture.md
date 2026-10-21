@@ -336,8 +336,9 @@ for every box yet:
   tunnel config (`~/.cloudflared/config.yml`) is the source of truth for
   the hostnames it serves — `ocd repair` reads hostnames from there and
   only fixes ports. The primary box's old names (`oc.buyallmemes.com`
-  and `oc-tap.buyallmemes.com`) still answer: they stay in the tunnel
-  config and in DNS until the Mac is on, and they are dropped after that.
+  and `oc-tap.buyallmemes.com`) are gone: they left the tunnel config
+  and the DNS when the Mac came on, and every box now answers on the
+  one convention.
 
 ## 6. Who holds which secret
 
