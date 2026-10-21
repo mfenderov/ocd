@@ -103,7 +103,9 @@ func TestSetupTunnelReusesExisting(t *testing.T) {
 	}
 }
 
-func TestSetupTunnelRefusesToClobberConfig(t *testing.T) {
+// A file that is not a tunnel config is never replaced: its rules cannot
+// be read, so no merge can promise to keep them.
+func TestSetupTunnelRefusesToClobberAnUnknownConfig(t *testing.T) {
 	fakeCloudflared(t, map[string]string{"tunnel list": `[]`, "tunnel create": "id 99999999-0000-0000-0000-000000000000"}, nil)
 	dir := t.TempDir()
 	plantCert(t, dir)
@@ -112,7 +114,202 @@ func TestSetupTunnelRefusesToClobberConfig(t *testing.T) {
 	}
 	plan := onboard.TunnelPlan{Name: "oc-x", TapHost: "oc-tap-x.buyallmemes.com", CredDir: dir, Port: 49400}
 	if _, err := onboard.SetupTunnel(context.Background(), plan, func(string) {}); err == nil {
-		t.Fatal("must not overwrite an existing config.yml")
+		t.Fatal("must not overwrite a file that is not a tunnel config")
+	}
+}
+
+// plantConfig writes a tunnel config for a test.
+func plantConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// homeConfig is the box's own config: the old names, the old ports.
+func homeConfig(id, cred string) string {
+	return "tunnel: " + id + "\n" +
+		"credentials-file: " + cred + "\n" +
+		"ingress:\n" +
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:49374\n" +
+		"  - service: http_status:404\n"
+}
+
+const (
+	conventionalTap = "oc-tap-home.buyallmemes.com"
+	conventionalUI  = "oc-home.buyallmemes.com"
+)
+
+// The box's config already serves the old names. The new config serves
+// them too: a tap link the owner already holds must keep working.
+func TestEnsureTunnelConfigServesTheOldNamesAndTheNewOnes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	cred := filepath.Join(dir, id+".json")
+	plantConfig(t, path, homeConfig(id, cred))
+
+	reused, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if reused {
+		t.Fatal("the conventional hosts are missing: the config must be written")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "tunnel: " + id + "\n" +
+		"credentials-file: " + cred + "\n" +
+		"ingress:\n" +
+		"  - hostname: " + conventionalTap + "\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: " + conventionalUI + "\n    service: http://127.0.0.1:49374\n" +
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:49374\n" +
+		"  - service: http_status:404\n"
+	if string(raw) != want {
+		t.Fatalf("the config must serve the old names and the new ones, got:\n%s", raw)
+	}
+}
+
+// A config the operator hand-tuned keeps its rules: the new config is a
+// superset of the old one, never a replacement.
+func TestEnsureTunnelConfigKeepsAnOperatorRule(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	cred := filepath.Join(dir, id+".json")
+	plantConfig(t, path, "tunnel: "+id+"\n"+
+		"credentials-file: "+cred+"\n"+
+		"ingress:\n"+
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n"+
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:49374\n"+
+		"  - hostname: oc-extra.buyallmemes.com\n    service: http://127.0.0.1:31047\n"+
+		"  - service: http_status:404\n")
+
+	if _, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "tunnel: " + id + "\n" +
+		"credentials-file: " + cred + "\n" +
+		"ingress:\n" +
+		"  - hostname: " + conventionalTap + "\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: " + conventionalUI + "\n    service: http://127.0.0.1:49374\n" +
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:49374\n" +
+		"  - hostname: oc-extra.buyallmemes.com\n    service: http://127.0.0.1:31047\n" +
+		"  - service: http_status:404\n"
+	if string(raw) != want {
+		t.Fatalf("the operator's own rule must survive, got:\n%s", raw)
+	}
+}
+
+// A config that already serves the conventional hosts is reused: a
+// re-run writes nothing at all.
+func TestEnsureTunnelConfigReusesAConfigThatAlreadyServesThem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	cred := filepath.Join(dir, id+".json")
+	plantConfig(t, path, "tunnel: "+id+"\n"+
+		"credentials-file: "+cred+"\n"+
+		"ingress:\n"+
+		"  - hostname: "+conventionalTap+"\n    service: http://127.0.0.1:49400\n"+
+		"  - hostname: "+conventionalUI+"\n    service: http://127.0.0.1:49374\n"+
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n"+
+		"  - hostname: oc.buyallmemes.com\n    service: http://127.0.0.1:49374\n"+
+		"  - service: http_status:404\n"+
+		"# the operator's own note\n")
+
+	reused, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if !reused {
+		t.Fatal("the config already serves the conventional hosts: nothing to write")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "# the operator's own note") {
+		t.Fatalf("a reused config must not be rewritten, got:\n%s", raw)
+	}
+}
+
+// A box with no config gets the conventional rules.
+func TestEnsureTunnelConfigWritesTheConventionalRulesForANewBox(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "11111111-2222-3333-4444-555555555555"
+	cred := filepath.Join(dir, id+".json")
+
+	reused, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if reused {
+		t.Fatal("there was no config to reuse")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "tunnel: " + id + "\n" +
+		"credentials-file: " + cred + "\n" +
+		"ingress:\n" +
+		"  - hostname: " + conventionalTap + "\n    service: http://127.0.0.1:49400\n" +
+		"  - hostname: " + conventionalUI + "\n    service: http://127.0.0.1:49374\n" +
+		"  - service: http_status:404\n"
+	if string(raw) != want {
+		t.Fatalf("a new box must get the conventional rules, got:\n%s", raw)
+	}
+}
+
+// A rule this build cannot read is never lost: the config is left
+// alone, because no merge can promise to keep what it cannot see.
+func TestEnsureTunnelConfigRefusesAConfigItCannotCopy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	cred := filepath.Join(dir, id+".json")
+	plantConfig(t, path, "tunnel: "+id+"\n"+
+		"credentials-file: "+cred+"\n"+
+		"ingress:\n"+
+		"  - hostname: oc-tap.buyallmemes.com\n    service: http://127.0.0.1:49400\n"+
+		"  - hostname: elsewhere.example.com\n    service: https://elsewhere.example.com\n"+
+		"  - service: http_status:404\n")
+
+	if _, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374); err == nil {
+		t.Fatal("a rule that cannot be copied must not be dropped")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "elsewhere.example.com") {
+		t.Fatalf("the config must be left alone, got:\n%s", raw)
+	}
+}
+
+// A config that cannot be read is never written over either: the read
+// fails first, and the operator sees why.
+func TestEnsureTunnelConfigRefusesAnUnreadableConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	const id = "7ed965a2-9828-46f6-851e-24cf1b9fedf6"
+	cred := filepath.Join(dir, id+".json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := onboard.EnsureTunnelConfig(path, id, cred, conventionalTap, conventionalUI, 49400, 49374); err == nil {
+		t.Fatal("a config that cannot be read must not be replaced")
 	}
 }
 

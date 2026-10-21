@@ -38,15 +38,67 @@ func ParseIngress(raw string) []ingressRule {
 	return rules
 }
 
+// ingressRuleCount counts the rules in a config that name a hostname,
+// whatever their service. A config whose count differs from the parsed
+// rules holds a rule this build cannot copy.
+func ingressRuleCount(raw string) int {
+	return len(hostnameRe.FindAllStringSubmatch(raw, -1))
+}
+
+// conventionalIngressRules are the rules for the hosts the box serves:
+// the tap host on the daemon port, the editor host on the OpenCode port.
+// On the command line path these are the names the convention gives.
+func conventionalIngressRules(tapHost, uiHost string, port, uiPort int) []ingressRule {
+	rules := make([]ingressRule, 0, 2)
+	if h := strings.TrimSpace(tapHost); h != "" {
+		rules = append(rules, ingressRule{Hostname: h, Port: port})
+	}
+	if h := strings.TrimSpace(uiHost); h != "" {
+		rules = append(rules, ingressRule{Hostname: h, Port: uiPort})
+	}
+	return rules
+}
+
+// desiredIngressRules returns the rules a config should serve: the
+// conventional hosts first, then the rules the existing config holds
+// that are not the conventional hosts, in the config's own order. The old
+// names keep serving and a hand-added rule survives — the new set is a
+// superset of the old one, never a replacement.
+func desiredIngressRules(tapHost, uiHost string, port, uiPort int, existing []ingressRule) []ingressRule {
+	conventional := conventionalIngressRules(tapHost, uiHost, port, uiPort)
+	seen := make(map[string]bool, len(conventional)+len(existing))
+	rules := make([]ingressRule, 0, len(conventional)+len(existing))
+	for _, r := range conventional {
+		seen[r.Hostname] = true
+		rules = append(rules, r)
+	}
+	for _, r := range existing {
+		if seen[r.Hostname] {
+			continue
+		}
+		seen[r.Hostname] = true
+		rules = append(rules, r)
+	}
+	return rules
+}
+
+// sameIngressRules reports whether two rule lists hold the same rules in
+// the same order.
+func sameIngressRules(a, b []ingressRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // RenderIngress writes a tunnel config with the given rules.
 func RenderIngress(tunnelID, credFile string, rules []ingressRule) string {
-	var sb strings.Builder
-	_, _ = fmt.Fprintf(&sb, "tunnel: %s\ncredentials-file: %s\ningress:\n", tunnelID, credFile)
-	for _, r := range rules {
-		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", r.Hostname, r.Port)
-	}
-	_, _ = fmt.Fprintf(&sb, "  - service: http_status:404\n")
-	return sb.String()
+	return renderTunnelConfig(tunnelID, credFile, rules)
 }
 
 // TapHostFromConfig returns the hostname serving the daemon (pair links)

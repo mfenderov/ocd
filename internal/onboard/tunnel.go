@@ -156,13 +156,12 @@ func RouteDNS(ctx context.Context, apiToken, tunnel, hostname string) error {
 }
 
 // renderTunnelConfig is the whole config.yml content: tunnel identity plus
-// one ingress rule per hostname, closed by a 404 catch-all.
-func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port, uiPort int) string {
+// the ingress rules, closed by a 404 catch-all.
+func renderTunnelConfig(tunnelID, credFile string, rules []ingressRule) string {
 	var sb strings.Builder
 	_, _ = fmt.Fprintf(&sb, "tunnel: %s\ncredentials-file: %s\ningress:\n", tunnelID, credFile)
-	_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", tapHost, port)
-	if strings.TrimSpace(uiHost) != "" {
-		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", strings.TrimSpace(uiHost), uiPort)
+	for _, r := range rules {
+		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", r.Hostname, r.Port)
 	}
 	_, _ = fmt.Fprintf(&sb, "  - service: http_status:404\n")
 	return sb.String()
@@ -170,26 +169,67 @@ func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port, uiPort
 
 // WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
 // file: tunnel config is hand-tuned infrastructure, never silently replaced.
-// Use EnsureTunnelConfig when reruns should pass through unchanged files.
+// Use EnsureTunnelConfig when reruns should merge with the existing file.
 func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
 	}
-	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort))
+	rules := conventionalIngressRules(tapHost, uiHost, port, uiPort)
+	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
 }
 
-// EnsureTunnelConfig writes config.yml unless an identical one is already
-// there (re-runs pass through silently). A differing file still refuses:
-// pass --skip-tunnel to reuse existing infra untouched.
+// EnsureTunnelConfig makes the box's tunnel config serve the desired
+// rules: the conventional hosts first, then every rule the file already
+// held, in the file's own order. The old names keep serving and a
+// hand-added rule survives — the new config is a superset of the old one,
+// never a replacement.
+//
+// A config whose rules cannot be read is left alone: no merge can promise
+// to keep what it cannot see. A config that already serves the desired
+// rules is reused, so a re-run writes nothing.
 func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
-	want := renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort)
-	if raw, err := os.ReadFile(path); err == nil {
-		if string(raw) == want {
-			return true, nil
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// A config we cannot read is a config we cannot merge: writing
+			// over it would lose it.
+			return false, fmt.Errorf("onboard: read tunnel config: %w", err)
 		}
-		return false, fmt.Errorf("onboard: %s differs — move it aside to regenerate, or re-run with --skip-tunnel", path)
+		rules := desiredIngressRules(tapHost, uiHost, port, uiPort, nil)
+		return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
 	}
-	return false, writeTunnelConfig(path, want)
+	rules, err := readableIngressRules(path, string(raw))
+	if err != nil {
+		return false, err
+	}
+	desired := desiredIngressRules(tapHost, uiHost, port, uiPort, rules)
+	if sameIngressRules(rules, desired) && configTunnelID(string(raw)) == tunnelID {
+		return true, nil
+	}
+	return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, desired))
+}
+
+// readableIngressRules reads the rules of an existing config. It refuses a
+// config this build cannot copy: writing over it would lose the rules it
+// cannot see.
+func readableIngressRules(path, raw string) ([]ingressRule, error) {
+	rules := ParseIngress(raw)
+	if len(rules) != ingressRuleCount(raw) {
+		return nil, fmt.Errorf("onboard: %s holds a rule this build cannot copy — move it aside to regenerate", path)
+	}
+	if configTunnelID(raw) == "" {
+		return nil, fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate", path)
+	}
+	return rules, nil
+}
+
+// configTunnelID returns the tunnel id a config names, empty when it
+// names none.
+func configTunnelID(raw string) string {
+	if m := tunnelIDRe.FindStringSubmatch(raw); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 func writeTunnelConfig(path, content string) error {
