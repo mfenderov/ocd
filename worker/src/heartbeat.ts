@@ -189,15 +189,18 @@ function defaultNowSec(): number {
 // re-enroll (which rebinds). Genuine replays of high seqs stay silent.
 export const REENROLL_SEQ_THRESHOLD = 10;
 
-export const MISMATCH_PING_WINDOW_MS = 15 * 60 * 1000;
+// PING_WINDOW_MS: one owner ping per box per condition per window. Both
+// heartbeat warnings use it: a wrong-token box and a box that lost its DB
+// beat every 30s, and each condition is worth one message, not a stream.
+export const PING_WINDOW_MS = 15 * 60 * 1000;
 
-// shouldPingMismatch rate-limits mismatch pings to one per box per window.
-// A wrong-token box beats every 30s; without this the owner gets spammed.
-export function shouldPingMismatch(
+// The ledger rule the two guards share: the first ping for a box goes
+// out, the next one waits for the window to close.
+function withinWindow(
   seen: Map<string, number>,
   id: string,
   nowMs: number,
-  windowMs: number = MISMATCH_PING_WINDOW_MS,
+  windowMs: number,
 ): boolean {
   const last = seen.get(id);
   if (last !== undefined && nowMs - last < windowMs) {
@@ -205,6 +208,29 @@ export function shouldPingMismatch(
   }
   seen.set(id, nowMs);
   return true;
+}
+
+// shouldPingMismatch rate-limits mismatch pings to one per box per window.
+// A wrong-token box beats every 30s; without this the owner gets spammed.
+export function shouldPingMismatch(
+  seen: Map<string, number>,
+  id: string,
+  nowMs: number,
+  windowMs: number = PING_WINDOW_MS,
+): boolean {
+  return withinWindow(seen, id, nowMs, windowMs);
+}
+
+// shouldPingReenroll rate-limits re-enroll pings to one per box per window.
+// The ledger is the caller's: a wrong token and a lost DB are different
+// facts, and each keeps its own ledger, so neither may hide the other.
+export function shouldPingReenroll(
+  seen: Map<string, number>,
+  id: string,
+  nowMs: number,
+  windowMs: number = PING_WINDOW_MS,
+): boolean {
+  return withinWindow(seen, id, nowMs, windowMs);
 }
 
 export function reenrollPingText(id: string): string {

@@ -21,7 +21,7 @@ import {
   type AuditRow as EventAuditRow,
   type LinkRow,
 } from "./events";
-import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, tokenMatches } from "./heartbeat";
+import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
 import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import {
@@ -245,7 +245,11 @@ export class FleetState implements DurableObject {
   // writes it. Both come from the Worker env; the token never leaves it.
   private zoneId?: string;
   private dnsToken?: string;
+  // The owner-ping ledgers: one message per box per condition per window.
+  // A wrong token and a lost DB are different facts, so they keep separate
+  // ledgers — neither may hide the other.
   private mismatchPinged = new Map<string, number>();
+  private reenrollPinged = new Map<string, number>();
   // The alarm's dependencies: the client that carries the notices, the
   // chat they go to, the probe that asks a box whether it is there and
   // the clock. The constructor fills them from the Worker env; a test
@@ -1015,6 +1019,7 @@ export class FleetState implements DurableObject {
           await notify(mismatchAlertText(id));
         },
         async (id: string) => {
+          if (!shouldPingReenroll(this.reenrollPinged, id, Date.now())) return;
           await notify(reenrollPingText(id));
         },
       );
