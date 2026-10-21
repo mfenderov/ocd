@@ -424,6 +424,34 @@ Durable Object: the types they share live in `worker/src/boxes.ts`, and
 back for `state.ts`. The transport (`worker/src/index.ts`) is the only layer
 allowed to know the application. In Go, nothing imports `internal/cli`.
 
+### The dead code is measured too
+
+The linter sees the shape of the code; it does not see the code nobody
+uses. That is knip's job: the files, exports, types and dependencies that
+nothing reaches.
+
+The entry points are the ones that actually run, and each one is declared
+where it belongs: the Worker's handler (`worker/src/index.ts`, the `main`
+of `worker/wrangler.toml`), the tests (`worker/test/*.test.ts` and
+`worker/tools/crap/*.test.ts`, read from the two vitest configs) and the
+CRAP tool's command line (`worker/tools/crap/cli.ts`, the `crap` script).
+knip reads the npm scripts too, so the packages the scripts call —
+`vitest`, `typescript` for `tsc`, `wrangler` — count as used although no
+module imports them.
+
+The one thing knip cannot know is the platform: `cloudflare:test` and
+`cloudflare:workers` are the Workers runtime's own modules, not npm
+packages, so `worker/knip.jsonc` tells knip to leave them alone.
+
+```bash
+cd worker
+npm run knip
+```
+
+It runs in CI — in the `worker` job and in the `tools` job — and it fails
+the build on any finding: a file nothing imports, an export nothing names,
+a type nothing asks for, a dependency nobody uses.
+
 ## 8. Related documents
 
 - `docs/runbook-home.md` — the WSL box: systemd units, repair, failure triage

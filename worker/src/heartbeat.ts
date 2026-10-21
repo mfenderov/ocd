@@ -7,7 +7,7 @@ import type { BoxRow } from "./boxes";
 // `Authorization: Bearer <heartbeat-token>`. Extra fields (notably any
 // hostname/URL and enroll_token) are accepted but ignored here: pinned
 // hostnames never change via heartbeat (SSRF rule), enrollment is Task 3.
-export interface HeartbeatBody {
+interface HeartbeatBody {
   id: string;
   seq: number;
   box_now: number;
@@ -26,7 +26,7 @@ export interface HeartbeatStore {
   deleteTombstone?(boxId: string): void;
 }
 
-export function parseHeartbeatBody(value: unknown): HeartbeatBody | null {
+function parseHeartbeatBody(value: unknown): HeartbeatBody | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
@@ -131,11 +131,11 @@ export async function tokenMatches(provided: string, storedHash: string): Promis
   return timingSafeEqual(await hashToken(provided), storedHash);
 }
 
-export type ReplayVerdict = "ok" | "stale_seq" | "replayed_timestamp";
+type ReplayVerdict = "ok" | "stale_seq" | "replayed_timestamp";
 
 // Worker-side replay rule: accept only seq greater than stored last_seq and
 // box_now greater than the last accepted box timestamp.
-export function checkReplay(
+function checkReplay(
   row: Pick<BoxRow, "last_seq" | "last_ts">,
   seq: number,
   boxNow: number,
@@ -164,7 +164,7 @@ export function pinnedHostname(registry: Map<string, string>, boxId: string): st
   return hostname;
 }
 
-export function boxUrl(hostname: string, path: string): string {
+function boxUrl(hostname: string, path: string): string {
   if (!path.startsWith("/")) {
     throw new Error("refused: box path must be absolute");
   }
@@ -223,7 +223,7 @@ export const REENROLL_SEQ_THRESHOLD = 10;
 // PING_WINDOW_MS: one owner ping per box per condition per window. Both
 // heartbeat warnings use it: a wrong-token box and a box that lost its DB
 // beat every 30s, and each condition is worth one message, not a stream.
-export const PING_WINDOW_MS = 15 * 60 * 1000;
+const PING_WINDOW_MS = 15 * 60 * 1000;
 
 // The ledger rule the two guards share: the first ping for a box goes
 // out, the next one waits for the window to close.

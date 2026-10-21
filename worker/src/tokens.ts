@@ -41,7 +41,7 @@ function defaultNowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-export function parseTokenScopes(raw: string): CliScope[] {
+function parseTokenScopes(raw: string): CliScope[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

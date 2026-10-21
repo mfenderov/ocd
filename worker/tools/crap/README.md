@@ -84,7 +84,7 @@ npm run crap:self
 
 The tool is held to the same bar it applies to everything else: its own
 suite runs in node, its own coverage is measured, and its own functions
-must score 10 or less. It currently passes with 0 of 70 functions over
+must score 10 or less. It currently passes with 0 of 73 functions over
 the bar, average 2.2.
 
 Its first draft failed that bar on four of its own functions — the flag
@@ -94,6 +94,11 @@ line. Splitting them is what the tool asks of everything else.
 The tools are linted with the brain's own ESLint config, type-aware rules
 and all: `npm run lint` covers `worker/src`, `worker/test` and
 `worker/tools`.
+
+They are held to the dead-code bar too: `npm run knip` covers the brain
+and the tools in one run, so an export of this tool that nobody imports
+fails the build like any other. The tool's own files are in that run —
+the shape below is what knip measures.
 
 ## The shape
 

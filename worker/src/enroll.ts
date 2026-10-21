@@ -81,7 +81,7 @@ export interface DnsConfig {
 // The DNS call gets 5s, like the audit's outbound call. The box waits
 // 15s for its enrolment answer, so a slow API must fail long before
 // that — and the owner's approve tap must not hang either.
-export const DNS_DEADLINE_MS = 5_000;
+const DNS_DEADLINE_MS = 5_000;
 
 export interface EnrollStore {
   getBox(id: string): BoxRow | undefined;
@@ -104,12 +104,12 @@ export type NotifyFn = (text: string) => Promise<void>;
 // would later call back (SSRF-adjacent intake). Suffix matching is
 // dot-boundary exact: "notbuyallmemes.com" and "x.buyallmemes.com.evil.com"
 // do not match.
-export const DEFAULT_HOST_SUFFIXES = ["buyallmemes.com"];
+const DEFAULT_HOST_SUFFIXES = ["buyallmemes.com"];
 
 // How long a tunnel id may be. A cloudflared tunnel id is a UUID, so this
 // is generous; the cap keeps an unauthenticated enrolment from parking a
 // huge string in the pending row.
-export const TUNNEL_ID_MAX_LEN = 128;
+const TUNNEL_ID_MAX_LEN = 128;
 
 export function parseHostSuffixes(raw?: string): string[] {
   if (raw === undefined) {
@@ -284,7 +284,7 @@ export type ResolveAction = "approve" | "deny";
 // the CURRENT pending row, so overwriting a pending request invalidates
 // previously issued links (approval TOCTOU). Endpoints verify signature +
 // expiry before resolving anything.
-export const CAPABILITY_TTL_SEC = 900;
+const CAPABILITY_TTL_SEC = 900;
 
 // Values bound into an enrollment capability link at issue time. Both are
 // non-secret (a SHA-256 hex and a public DNS name) and travel as link
@@ -298,7 +298,7 @@ export function capBinding(tokenHash: string, hostname: string): string {
   return `${tokenHash}.${hostname}`;
 }
 
-export interface CapabilityToken {
+interface CapabilityToken {
   id: string;
   exp: number;
   sig: string;
@@ -306,7 +306,7 @@ export interface CapabilityToken {
   hostname?: string;
 }
 
-export function parseCapabilityQuery(url: URL): CapabilityToken | null {
+function parseCapabilityQuery(url: URL): CapabilityToken | null {
   const id = url.searchParams.get("id");
   const expRaw = url.searchParams.get("exp");
   const sig = url.searchParams.get("sig");
@@ -357,7 +357,7 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-export async function signCapability(
+async function signCapability(
   secret: string,
   action: ResolveAction,
   id: string,
@@ -563,7 +563,7 @@ export async function unsealAdminToken(secret: string, sealed: string): Promise<
   return new TextDecoder().decode(pt);
 }
 
-export type EnrollStatus = "pending" | "enrolled";
+type EnrollStatus = "pending" | "enrolled";
 
 // What an enrolment did. The dns field says what the brain did about the
 // box's two CNAMEs: "ok", "skipped: <reason>" or "failed: <reason>". It

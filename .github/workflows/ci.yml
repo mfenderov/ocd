@@ -45,6 +45,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      - run: npm run knip
       - run: npm test
       # The brain's own CRAP bar, with the TypeScript twin of gocrap.
       - name: the CRAP bar
@@ -67,6 +68,7 @@ jobs:
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
       - run: npm run lint
+      - run: npm run knip
       - run: npm run test:tools
       # The tool that applies the bar is held to the bar.
       - name: the tool measures itself

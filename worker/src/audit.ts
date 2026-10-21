@@ -18,7 +18,7 @@ import { BOX_API } from "./boxapi";
 export const AUDIT_DEADLINE_MS = 5_000;
 
 // Box row contract (binding, from Plan 1): snake_case JSON array.
-export interface BoxAuditRow {
+interface BoxAuditRow {
   at: number;
   actor: string;
   action: string;
@@ -28,14 +28,14 @@ export interface BoxAuditRow {
   ua: string;
 }
 
-export interface MergedAuditRow extends BoxAuditRow {
+interface MergedAuditRow extends BoxAuditRow {
   box: string;
   tainted: boolean;
 }
 
 // Last-synced marker for a box that could not be read. `at` repeats
 // `last_seen` so markers sort with events by time; `error` names the cause.
-export interface AuditErrorRow {
+interface AuditErrorRow {
   box: string;
   at: number;
   error: "box_timeout" | "box_unreachable" | "box_error" | "misconfigured";
@@ -72,7 +72,7 @@ export function parseAuditN(raw: string | null): number {
 
 // Internal per-box failure. Thrown inside the fan-out task, converted to an
 // AuditErrorRow by the allSettled driver — never escapes fetchAudits.
-export class BoxAuditError extends Error {
+class BoxAuditError extends Error {
   code: AuditErrorRow["error"];
   detail?: string;
   constructor(code: AuditErrorRow["error"], detail?: string) {

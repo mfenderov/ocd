@@ -11,7 +11,7 @@ import { BOX_API } from "./boxapi";
 // before any fetch. Plaintext admin tokens and keys are never logged.
 
 // Box calls get 15s (mint execs a password rotation server-side).
-export const MINT_DEADLINE_MS = 15_000;
+const MINT_DEADLINE_MS = 15_000;
 
 // Pending-revoke marker. Invariant for Task 5 (revoke): tombstone.epoch is
 // the greatest stale epoch — a box is tainted while its heartbeat epoch has

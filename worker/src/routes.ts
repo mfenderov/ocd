@@ -65,7 +65,7 @@ export function optionalSingleId(head: string): PathRule {
 // The id a path names, when the path is this route's path. Null when the
 // path is not this route's path; the empty string when the path is, and
 // names nothing.
-export function matchPath(rule: PathRule, pathname: string): string | null {
+function matchPath(rule: PathRule, pathname: string): string | null {
   if (rule.kind === "exact") {
     return matchExact(rule, pathname);
   }

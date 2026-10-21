@@ -15,9 +15,9 @@ import { BOX_API } from "./boxapi";
 // Plaintext admin tokens are never logged.
 
 // Box calls get 15s (revoke execs a password rotation server-side).
-export const REVOKE_DEADLINE_MS = 15_000;
+const REVOKE_DEADLINE_MS = 15_000;
 
-export type RevokeStatus = "revoked" | "tombstoned" | "unknown_box" | "misconfigured" | "box_error";
+type RevokeStatus = "revoked" | "tombstoned" | "unknown_box" | "misconfigured" | "box_error";
 
 export interface RevokeResult {
   id: string;

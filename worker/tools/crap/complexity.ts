@@ -157,7 +157,7 @@ function linesOf(node: ts.Node, source: ts.SourceFile): { start: number; end: nu
  * the nested ones — the order does not matter for the score, only the
  * list does.
  */
-export function functionsIn(file: string, source: ts.SourceFile): FunctionInfo[] {
+function functionsIn(file: string, source: ts.SourceFile): FunctionInfo[] {
   const found: FunctionInfo[] = [];
   const visit = (node: ts.Node): void => {
     if (isFunctionLike(node)) {
