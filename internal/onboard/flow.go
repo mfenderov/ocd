@@ -50,6 +50,21 @@ type Config struct {
 	PollInterval time.Duration
 }
 
+// Result is what an onboarding did: the tunnel the box serves, what
+// the daemon will run, and what bringing the box back up did.
+type Result struct {
+	// TunnelID is the tunnel the box serves: its id, the identity.
+	// Empty when the box has no tunnel.
+	TunnelID string
+	// DaemonRunsTunnel says whether the daemon runs the connector
+	// itself. The env file decides, and the env file is what the
+	// daemon reads.
+	DaemonRunsTunnel bool
+	// Restart is what bringing the box back up did: what did not
+	// happen, and who runs the daemon now.
+	Restart RestartResult
+}
+
 // DefaultDBPath mirrors internal/cli.openStore: OCD_DB or ~/.ocd/ocd.db.
 func DefaultDBPath() (string, error) {
 	if p := os.Getenv("OCD_DB"); p != "" {
@@ -70,14 +85,15 @@ func tapBase(host string) string {
 // DoOnboard runs the full enrollment: secrets, env file, enroll POST, then
 // heartbeat until the owner approves in Telegram. Progress reports go to
 // progress (nil-safe); the caller renders them (spinner or plain prints).
-func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
+func DoOnboard(ctx context.Context, cfg Config, progress func(string)) (Result, error) {
+	var res Result
 	say := func(s string) {
 		if progress != nil {
 			progress(s)
 		}
 	}
 	if err := ValidateBoxID(cfg.BoxID); err != nil {
-		return err
+		return res, err
 	}
 	if cfg.WorkerURL == "" {
 		cfg.WorkerURL = DefaultWorkerURL
@@ -93,7 +109,7 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	if dbPath == "" {
 		dbPath, err = DefaultDBPath()
 		if err != nil {
-			return err
+			return res, err
 		}
 	}
 	say("minting box secrets")
@@ -104,12 +120,12 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	if heartbeatToken == "" {
 		heartbeatToken, err = GenerateSecret()
 		if err != nil {
-			return err
+			return res, err
 		}
 	}
 	adminToken, err := GenerateSecret()
 	if err != nil {
-		return err
+		return res, err
 	}
 	envVals := map[string]string{
 		"OCD_BOX_ID": cfg.BoxID,
@@ -132,23 +148,26 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	// The tunnel id tells the brain which cloudflared tunnel this box
 	// uses, so the brain can own the box's DNS later. It stays empty
 	// when the box has no tunnel.
-	var tunnelID string
 	if cfg.Tunnel != nil {
-		// Onboard-provisioned tunnel => onboard-supervised tunnel:
-		// `ocd serve` manages cloudflared itself, no external service.
-		envVals["OCD_MANAGE_TUNNEL"] = "1"
 		say("setting up tunnel " + cfg.Tunnel.Name)
-		id, err := SetupTunnel(ctx, *cfg.Tunnel, say)
+		setup, err := SetupTunnel(ctx, *cfg.Tunnel, say)
 		if err != nil {
-			return err
+			return res, err
 		}
-		tunnelID = id
+		res.TunnelID = setup.ID
+		if setup.Created {
+			// This run created the tunnel: nothing else owns it, so
+			// the daemon must run it. A run that reused the box's own
+			// tunnel leaves that decision to whatever already
+			// supervises it — and the env file keeps the key it had.
+			envVals["OCD_MANAGE_TUNNEL"] = "1"
+		}
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
+	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: res.TunnelID})
 	if err != nil {
-		return err
+		return res, err
 	}
 	if outcome.Status == "enrolled" {
 		// The brain writes the box's DNS right after the enrolment
@@ -159,27 +178,44 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 		} else {
 			say("enrolled")
 		}
-		say("writing " + cfg.EnvPath)
-		return writeEnv(cfg, envVals)
-	}
-	if strings.TrimSpace(cfg.EnrollCode) != "" {
-		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
-	}
-	// One line, one wait: the owner is told once that the approval is
-	// what the box is waiting for.
-	say("waiting for Telegram approval…")
-	st, err := store.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("onboard: open store: %w", err)
-	}
-	defer st.Close()
-	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-	if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
-		return err
+	} else {
+		if strings.TrimSpace(cfg.EnrollCode) != "" {
+			return res, fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
+		}
+		// One line, one wait: the owner is told once that the approval
+		// is what the box is waiting for.
+		say("waiting for Telegram approval…")
+		st, err := store.Open(dbPath)
+		if err != nil {
+			return res, fmt.Errorf("onboard: open store: %w", err)
+		}
+		defer st.Close()
+		waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+		if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
+			return res, err
+		}
 	}
 	say("writing " + cfg.EnvPath)
-	return writeEnv(cfg, envVals)
+	if err := writeEnv(cfg, envVals); err != nil {
+		return res, err
+	}
+	// The box must run what was just written: the connector must load
+	// the new ingress rules, and the daemon the new env file. Both are
+	// the platform's own services to restart.
+	res.DaemonRunsTunnel = daemonManagesTunnel(cfg.EnvPath)
+	res.Restart = RestartBox(ctx, res.TunnelID, res.DaemonRunsTunnel)
+	return res, nil
+}
+
+// daemonManagesTunnel says whether the daemon runs the connector: the
+// env file decides, and the env file is what the daemon reads.
+func daemonManagesTunnel(envPath string) bool {
+	vals, err := LoadEnvFile(envPath)
+	if err != nil {
+		return false
+	}
+	return vals["OCD_MANAGE_TUNNEL"] == "1"
 }
 
 // writeEnv persists the box identity. It runs only after the enrollment

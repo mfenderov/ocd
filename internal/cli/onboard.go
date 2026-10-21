@@ -120,10 +120,11 @@ func runOnboard(w interface {
 		EnvPath:    envPath,
 		Timeout:    10 * time.Minute,
 	}
+	var res onboard.Result
 	if onboard.IsTTY() {
-		err = onboard.RunSpinner(ctx, cfg)
+		res, err = onboard.RunSpinner(ctx, cfg)
 	} else {
-		err = onboard.RunPlain(ctx, w, cfg)
+		res, err = onboard.RunPlain(ctx, w, cfg)
 	}
 	if err != nil {
 		return err
@@ -135,7 +136,13 @@ func runOnboard(w interface {
 			return err
 		}
 	}
-	onboard.RenderResult(w, cfg, serviced)
+	onboard.RenderResult(w, cfg, res, serviced)
+	// What did not happen is the operator's to fix, so it is said
+	// loudly: the enrolment is committed, but the box still runs what
+	// it ran before.
+	for _, notice := range res.Restart.Notices {
+		_, _ = fmt.Fprintln(w, "⚠ "+notice)
+	}
 	return nil
 }
 

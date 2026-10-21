@@ -30,10 +30,15 @@ else
 fi
 
 # Stage 2: tunnel. Outbound-only; reconnects by itself on network churn.
-if pgrep -f "cloudflared tunnel run oc-wsl" >/dev/null 2>&1; then
+# The tunnel's id, not its name: a rename in Cloudflare cannot stop it.
+TUNNEL_ID=7ed965a2-9828-46f6-851e-24cf1b9fedf6
+# The pattern matches the tunnel however it was started: boot.sh runs
+# "cloudflared tunnel run <id>", the unit carries --config in between.
+# A pattern that misses the running tunnel starts a second one.
+if pgrep -f "cloudflared tunnel.*run.*$TUNNEL_ID" >/dev/null 2>&1; then
   log OK "tunnel already running"
 elif command -v cloudflared >/dev/null 2>&1; then
-  if nohup cloudflared tunnel run oc-wsl >>"$LOG" 2>&1 & then
+  if nohup cloudflared tunnel run "$TUNNEL_ID" >>"$LOG" 2>&1 & then
     log OK "tunnel started pid $!"
   else
     log FAIL "tunnel failed to launch"

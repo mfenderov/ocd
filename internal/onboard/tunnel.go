@@ -156,40 +156,160 @@ func RouteDNS(ctx context.Context, apiToken, tunnel, hostname string) error {
 }
 
 // renderTunnelConfig is the whole config.yml content: tunnel identity plus
-// one ingress rule per hostname, closed by a 404 catch-all.
-func renderTunnelConfig(tunnelID, credFile, tapHost, uiHost string, port, uiPort int) string {
+// the ingress rules, closed by a 404 catch-all.
+func renderTunnelConfig(tunnelID, credFile string, rules []ingressRule) string {
 	var sb strings.Builder
 	_, _ = fmt.Fprintf(&sb, "tunnel: %s\ncredentials-file: %s\ningress:\n", tunnelID, credFile)
-	_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", tapHost, port)
-	if strings.TrimSpace(uiHost) != "" {
-		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", strings.TrimSpace(uiHost), uiPort)
+	for _, r := range rules {
+		_, _ = fmt.Fprintf(&sb, "  - hostname: %s\n    service: http://127.0.0.1:%d\n", r.Hostname, r.Port)
 	}
 	_, _ = fmt.Fprintf(&sb, "  - service: http_status:404\n")
 	return sb.String()
 }
 
-// WriteTunnelConfig renders config.yml. Refuses to overwrite an existing
-// file: tunnel config is hand-tuned infrastructure, never silently replaced.
-// Use EnsureTunnelConfig when reruns should pass through unchanged files.
-func WriteTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("onboard: %s exists — move it aside to regenerate", path)
+// The writer emits a fixed shape, and a rewrite reproduces only that
+// shape: the tunnel identity, the ingress block, one hostname/service
+// pair per rule, the 404 catch-all. A config that holds anything else —
+// a rule the parser cannot read, an option under a rule, another
+// top-level key — would lose it in a rewrite. The merge refuses those
+// configs instead of dropping parts of them.
+//
+// writerLineRe matches a line the writer emits: a rule's hostname, a
+// rule's local service, the 404 catch-all, or a top-level key. Its
+// hostname and service patterns are the parser's own, so a line the
+// parser cannot read is a line the writer cannot write.
+var writerLineRe = regexp.MustCompile(`^\s*(?:` + hostnamePattern + `|` + servicePattern +
+	`|-\s+service:\s*http_status:404|tunnel:\s*\S+|credentials-file:\s*\S+|ingress:)\s*$`)
+
+// topLevelKeyRe matches a name at the start of a line: a top-level key.
+var topLevelKeyRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_.-]*):`)
+
+// The groups of writerLineRe: the rule's hostname, the rule's port.
+const (
+	hostGroup = 1
+	portGroup = 2
+)
+
+// unreproducibleParts lists what a tunnel config holds that a rewrite
+// would drop: a line the writer does not emit, and a rule whose service
+// does not follow it.
+func unreproducibleParts(raw string) []string {
+	var parts []string
+	expectService := false
+	host := ""
+	for _, line := range strings.Split(raw, "\n") {
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		m := writerLineRe.FindStringSubmatch(line)
+		if m == nil {
+			parts = append(parts, unreproduciblePart(line))
+			continue
+		}
+		if m[hostGroup] != "" {
+			if expectService {
+				parts = append(parts, "a rule with no service: "+host)
+			}
+			host = m[hostGroup]
+			expectService = true
+			continue
+		}
+		if m[portGroup] != "" {
+			if !expectService {
+				parts = append(parts, "a service with no hostname: "+text)
+			}
+			expectService = false
+		}
 	}
-	return writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort))
+	if expectService {
+		parts = append(parts, "a rule with no service: "+host)
+	}
+	return parts
 }
 
-// EnsureTunnelConfig writes config.yml unless an identical one is already
-// there (re-runs pass through silently). A differing file still refuses:
-// pass --skip-tunnel to reuse existing infra untouched.
-func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
-	want := renderTunnelConfig(tunnelID, credFile, tapHost, uiHost, port, uiPort)
-	if raw, err := os.ReadFile(path); err == nil {
-		if string(raw) == want {
-			return true, nil
+// unreproduciblePart names what a line the writer does not emit holds.
+func unreproduciblePart(line string) string {
+	text := strings.TrimSpace(line)
+	if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+		if m := topLevelKeyRe.FindStringSubmatch(text); m != nil {
+			return "the top-level key " + m[1]
 		}
-		return false, fmt.Errorf("onboard: %s differs — move it aside to regenerate, or re-run with --skip-tunnel", path)
 	}
-	return false, writeTunnelConfig(path, want)
+	return "a rule the writer cannot reproduce: " + text
+}
+
+// EnsureTunnelConfig makes the box's tunnel config serve the desired
+// rules: the conventional hosts first, then every rule the file already
+// held, in the file's own order. The old names keep serving and a
+// hand-added rule survives — the new config is a superset of the old one,
+// never a replacement.
+//
+// The file's own identity is kept: the merge never re-points the box at
+// another tunnel, and it refuses a config that holds something a rewrite
+// would drop. A config that already serves the desired rules is reused,
+// so a re-run writes nothing.
+func EnsureTunnelConfig(path, tunnelID, credFile, tapHost, uiHost string, port, uiPort int) (reused bool, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// A config we cannot read is a config we cannot merge: writing
+			// over it would lose it.
+			return false, fmt.Errorf("onboard: read tunnel config: %w — re-run with --skip-tunnel to reuse the existing config", err)
+		}
+		rules := desiredIngressRules(tapHost, uiHost, port, uiPort, nil)
+		return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, credFile, rules))
+	}
+	rules, err := mergeableConfig(path, string(raw), tunnelID)
+	if err != nil {
+		return false, err
+	}
+	desired := desiredIngressRules(tapHost, uiHost, port, uiPort, rules)
+	if sameIngressRules(rules, desired) {
+		return true, nil
+	}
+	return false, writeTunnelConfig(path, renderTunnelConfig(tunnelID, configCredentials(string(raw), credFile), desired))
+}
+
+// notATunnelConfig names a file that cannot say which tunnel this box
+// serves. The merge and the setup refuse it with the same words.
+func notATunnelConfig(path string) error {
+	return fmt.Errorf("onboard: %s is not a tunnel config — move it aside to regenerate, or re-run with --skip-tunnel", path)
+}
+
+// mergeableConfig reads the rules of a config the merge may rewrite: the
+// file must serve the tunnel the caller named, and it must hold nothing
+// the writer cannot reproduce.
+func mergeableConfig(path, raw, tunnelID string) ([]ingressRule, error) {
+	fileTunnel := configTunnelID(raw)
+	if fileTunnel == "" {
+		return nil, notATunnelConfig(path)
+	}
+	if fileTunnel != tunnelID {
+		return nil, fmt.Errorf("onboard: %s serves tunnel %s, not %s — move it aside to regenerate, or re-run with --skip-tunnel", path, fileTunnel, tunnelID)
+	}
+	if parts := unreproducibleParts(raw); len(parts) > 0 {
+		return nil, fmt.Errorf("onboard: %s holds %s — remove it, move the file aside to regenerate, or re-run with --skip-tunnel", path, strings.Join(parts, "; "))
+	}
+	return ParseIngress(raw), nil
+}
+
+// configTunnelID returns the tunnel id a config names, empty when it
+// names none.
+func configTunnelID(raw string) string {
+	if m := tunnelIDRe.FindStringSubmatch(raw); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// configCredentials returns the credentials file a config names, or the
+// fallback when it names none.
+func configCredentials(raw, fallback string) string {
+	if m := credFileRe.FindStringSubmatch(raw); m != nil {
+		return m[1]
+	}
+	return fallback
 }
 
 func writeTunnelConfig(path, content string) error {
@@ -233,16 +353,39 @@ func HasCert(dir string) bool {
 	return err == nil
 }
 
-// SetupTunnel creates (or reuses) the tunnel, routes DNS for tap (+UI),
-// and writes config.yml. Progress mirrors DoOnboard: nil-safe.
-func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (string, error) {
+// TunnelSetup is what a tunnel setup did: the tunnel the box serves and
+// whether this run created it.
+//
+// A created tunnel has no other supervisor, so the daemon must run it. A
+// reused one already has one — the box's own service, or the daemon that
+// ran it before — and that decision is not this run's to change.
+type TunnelSetup struct {
+	// ID is the tunnel the box serves: the id, the identity. The name
+	// is a label.
+	ID string
+	// Created says whether this run created the tunnel.
+	Created bool
+}
+
+// SetupTunnel resolves the tunnel this box serves, writes config.yml and
+// routes the DNS for the tap (+UI) host. Progress mirrors DoOnboard:
+// nil-safe.
+//
+// The box's own config names the tunnel the box serves, and that id is
+// the box's — whatever the plan calls the tunnel. The name is a label,
+// the id is the identity, so a box never ends up with a second tunnel.
+//
+// The DNS is routed every time: the records may be missing (the brain
+// writes them too), and the route overwrites, so running it again
+// changes nothing.
+func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (TunnelSetup, error) {
 	say := func(s string) {
 		if progress != nil {
 			progress(s)
 		}
 	}
 	if strings.TrimSpace(plan.TapHost) == "" {
-		return "", fmt.Errorf("onboard: tap hostname is required")
+		return TunnelSetup{}, fmt.Errorf("onboard: tap hostname is required")
 	}
 	if plan.Port <= 0 {
 		plan.Port = DaemonPort
@@ -253,48 +396,116 @@ func SetupTunnel(ctx context.Context, plan TunnelPlan, progress func(string)) (s
 	if strings.TrimSpace(plan.CredDir) == "" {
 		dir, err := DefaultCredDir()
 		if err != nil {
-			return "", err
+			return TunnelSetup{}, err
 		}
 		plan.CredDir = dir
 	}
 	if !HasCert(plan.CredDir) && strings.TrimSpace(plan.APIToken) == "" && os.Getenv("CLOUDFLARE_API_TOKEN") == "" {
-		return "", fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
+		return TunnelSetup{}, fmt.Errorf("onboard: no cloudflared login found — run `cloudflared tunnel login` or provide a CLOUDFLARE_API_TOKEN")
+	}
+	cfgPath := filepath.Join(plan.CredDir, "config.yml")
+	id, created, err := resolveTunnelID(ctx, plan, cfgPath, say)
+	if err != nil {
+		return TunnelSetup{}, err
+	}
+	credFile := filepath.Join(plan.CredDir, id+".json")
+	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port, plan.UIPort)
+	if err != nil {
+		return TunnelSetup{}, err
+	}
+	if reused {
+		say("reusing tunnel config " + cfgPath)
+	} else {
+		say("writing " + cfgPath)
+	}
+	if err := routeBoxDNS(ctx, plan, id, say); err != nil {
+		return TunnelSetup{}, err
+	}
+	return TunnelSetup{ID: id, Created: created}, nil
+}
+
+// resolveTunnelID resolves the tunnel id this box serves, and says
+// whether this run created it.
+//
+// The box's own config names it, and that id wins whatever the plan calls
+// the tunnel: the name is a label, the id is the identity. So a box whose
+// config names a tunnel never creates a second one — the old names' DNS
+// keeps pointing at the tunnel the box actually runs.
+//
+// Only a box with no config of its own looks the plan's name up, and
+// creates the tunnel when the name is unknown.
+func resolveTunnelID(ctx context.Context, plan TunnelPlan, cfgPath string, say func(string)) (string, bool, error) {
+	own, err := ownTunnelID(cfgPath)
+	if err != nil {
+		return "", false, err
+	}
+	if own != "" {
+		say(tunnelChoice(own, plan.Name))
+		return own, false, nil
 	}
 	say("listing tunnels")
 	existing, err := ListTunnels(ctx)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	id := existing[plan.Name]
-	if id == "" {
-		say("creating tunnel " + plan.Name)
-		id, err = CreateTunnel(ctx, plan.APIToken, plan.Name)
-		if err != nil {
-			return "", err
-		}
-	} else {
+	if id := existing[plan.Name]; id != "" {
 		say("reusing tunnel " + plan.Name)
+		return id, false, nil
 	}
-	cfgPath := filepath.Join(plan.CredDir, "config.yml")
-	credFile := filepath.Join(plan.CredDir, id+".json")
-	reused, err := EnsureTunnelConfig(cfgPath, id, credFile, plan.TapHost, plan.UIHost, plan.Port, plan.UIPort)
+	say("creating tunnel " + plan.Name)
+	id, err := CreateTunnel(ctx, plan.APIToken, plan.Name)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if reused {
-		say("reusing tunnel config")
-		return id, nil
-	}
-	say("writing " + cfgPath)
-	say("routing DNS " + plan.TapHost)
-	if err := RouteDNS(ctx, plan.APIToken, id, plan.TapHost); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(plan.UIHost) != "" {
-		say("routing DNS " + strings.TrimSpace(plan.UIHost))
-		if err := RouteDNS(ctx, plan.APIToken, id, strings.TrimSpace(plan.UIHost)); err != nil {
-			return "", err
+	return id, true, nil
+}
+
+// ownTunnelID returns the tunnel id the box's own config names.
+//
+// Empty when the box has no config of its own — that box may create a
+// tunnel. A config that exists but names no tunnel is refused: the box
+// has a config, and creating a tunnel behind it would leave the box with
+// two.
+func ownTunnelID(cfgPath string) (string, error) {
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
 		}
+		// A config we cannot read is a config we cannot learn the box's
+		// tunnel from, and writing over it would lose it.
+		return "", fmt.Errorf("onboard: read tunnel config: %w — re-run with --skip-tunnel to reuse the existing config", err)
+	}
+	id := configTunnelID(string(raw))
+	if id == "" {
+		return "", notATunnelConfig(cfgPath)
 	}
 	return id, nil
+}
+
+// tunnelChoice says which tunnel the box serves and why: its own config
+// names it, whatever the plan calls the tunnel.
+func tunnelChoice(id, planName string) string {
+	if planName == "" {
+		return "reusing the box's own tunnel " + id
+	}
+	return "reusing the box's own tunnel " + id + " (the plan calls it " + planName + ")"
+}
+
+// routeBoxDNS points the box's hosts at its tunnel.
+//
+// The records may be missing — the brain writes them too, and a box set
+// up before the brain owned the DNS has none. The route overwrites, so
+// running it again changes nothing.
+func routeBoxDNS(ctx context.Context, plan TunnelPlan, tunnelID string, say func(string)) error {
+	say("routing DNS " + plan.TapHost)
+	if err := RouteDNS(ctx, plan.APIToken, tunnelID, plan.TapHost); err != nil {
+		return err
+	}
+	uiHost := strings.TrimSpace(plan.UIHost)
+	if uiHost == "" {
+		return nil
+	}
+	say("routing DNS " + uiHost)
+	return RouteDNS(ctx, plan.APIToken, tunnelID, uiHost)
 }

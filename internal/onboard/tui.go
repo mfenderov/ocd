@@ -86,13 +86,17 @@ func newInput(title, description string, value *string, validate func(string) er
 }
 
 type statusMsg string
-type doneMsg struct{ err error }
+type doneMsg struct {
+	err error
+	res Result
+}
 
 type spinnerModel struct {
 	spinner spinner.Model
 	status  string
 	done    bool
 	err     error
+	res     Result
 	cancel  context.CancelFunc
 }
 
@@ -110,6 +114,7 @@ func (m spinnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.done = true
 		m.err = msg.err
+		m.res = msg.res
 		return m, tea.Quit
 	}
 	var cmd tea.Cmd
@@ -126,7 +131,7 @@ func (m spinnerModel) View() string {
 
 // RunSpinner executes DoOnboard with live status, blocking until approval,
 // timeout, or abort. Returns the DoOnboard error, if any.
-func RunSpinner(ctx context.Context, cfg Config) error {
+func RunSpinner(ctx context.Context, cfg Config) (Result, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	p := tea.NewProgram(spinnerModel{
@@ -135,44 +140,54 @@ func RunSpinner(ctx context.Context, cfg Config) error {
 		cancel:  cancel,
 	})
 	go func() {
-		err := DoOnboard(ctx, cfg, func(s string) { p.Send(statusMsg(s)) })
-		p.Send(doneMsg{err})
+		res, err := DoOnboard(ctx, cfg, func(s string) { p.Send(statusMsg(s)) })
+		p.Send(doneMsg{err: err, res: res})
 	}()
 	final, err := p.Run()
 	if err != nil {
-		return err
+		return Result{}, err
 	}
-	if m, ok := final.(spinnerModel); ok && m.err != nil {
-		return m.err
+	m, ok := final.(spinnerModel)
+	if !ok {
+		return Result{}, nil
 	}
-	return nil
+	return m.res, m.err
 }
 
 // RunPlain is the non-TTY path: same flow, line prints, flags only.
-func RunPlain(ctx context.Context, w io.Writer, cfg Config) error {
+func RunPlain(ctx context.Context, w io.Writer, cfg Config) (Result, error) {
 	say := func(s string) { _, _ = fmt.Fprintln(w, "•", s) }
-	if err := DoOnboard(ctx, cfg, say); err != nil {
-		return err
+	res, err := DoOnboard(ctx, cfg, say)
+	if err != nil {
+		return res, err
 	}
 	_, _ = fmt.Fprintln(w, okStyle.Render("onboarded ✓"))
-	return nil
+	return res, nil
 }
 
 // RenderResult prints the closing panel: what happened and what is next.
-func RenderResult(w io.Writer, cfg Config, serviced bool) {
+func RenderResult(w io.Writer, cfg Config, res Result, serviced bool) {
 	_, _ = fmt.Fprintln(w, titleStyle.Render("Box "+cfg.BoxID+" is in the fleet."))
 	if serviced {
 		_, _ = fmt.Fprintln(w, "Login service installed: ocd serve starts automatically on login.")
 		return
 	}
 	if cfg.Tunnel != nil {
-		_, _ = fmt.Fprintf(w, "Tunnel %s is configured (config.yml written).\n", cfg.Tunnel.Name)
-		_, _ = fmt.Fprintf(w, "  cloudflared tunnel run %s\n", cfg.Tunnel.Name)
+		// The tunnel is named by its id: the name is a label, and a
+		// rename must never be able to stop the box.
+		_, _ = fmt.Fprintf(w, "Tunnel %s is configured (config.yml written).\n", res.TunnelID)
+		if res.DaemonRunsTunnel {
+			_, _ = fmt.Fprintln(w, "  the daemon runs the connector — it starts with the daemon")
+		}
 	} else {
 		_, _ = fmt.Fprintln(w, "Next: point a tunnel at this box, then start the daemon:")
 		_, _ = fmt.Fprintln(w, "  cloudflared tunnel run <name>   # ingress -> :49400")
 	}
-	_, _ = fmt.Fprintln(w, "  ocd serve                       # heartbeat + admin + pair")
+	// The daemon is only the operator's to start when no service runs
+	// it: the onboarding restarts the platform's own service.
+	if !res.Restart.DaemonRunsAsService {
+		_, _ = fmt.Fprintln(w, "  ocd serve                       # heartbeat + admin + pair")
+	}
 }
 
 // RenderIdentity prints what this box is: its name and the URLs it
