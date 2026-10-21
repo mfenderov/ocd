@@ -24,27 +24,21 @@ func Open(path string) (*Store, error) {
 	// check-then-claim in ConsumeLink must not interleave.
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := s.migrateLinks(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := s.migrateIdem(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := s.migrateEdits(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := s.migrateSeen(); err != nil {
+	if err := s.migrateAll(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateAll creates the schema the store needs.
+func (s *Store) migrateAll() error {
+	for _, migrate := range []func() error{s.migrate, s.migrateLinks, s.migrateIdem, s.migrateEdits, s.migrateSeen} {
+		if err := migrate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -101,9 +95,10 @@ func (s *Store) ListDevices() []string {
 	var out []string
 	for rows.Next() {
 		var n string
-		if err := rows.Scan(&n); err == nil {
-			out = append(out, n)
+		if err := rows.Scan(&n); err != nil {
+			continue
 		}
+		out = append(out, n)
 	}
 	return out
 }

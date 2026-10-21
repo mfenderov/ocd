@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -187,32 +188,47 @@ func auditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
-			if len(rows) == 0 {
-				_, _ = fmt.Fprintln(out, "no audit rows")
-				return nil
-			}
-			w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "BOX\tAT\tACTOR\tACTION\tRESULT\tFLAGS")
-			for _, r := range rows {
-				flags := ""
-				if r.Tainted {
-					flags = "tainted"
-				}
-				if r.IsError() {
-					detail := r.Error
-					if r.Detail != "" {
-						detail += ": " + r.Detail
-					}
-					_, _ = fmt.Fprintf(w, "%s\t%d\t-\t-\terror:%s\t%s\n", r.Box, r.At, detail, flags)
-					continue
-				}
-				_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Box, r.At, r.Actor, r.Action, r.Result, flags)
-			}
-			return w.Flush()
+			return printAuditRows(cmd.OutOrStdout(), rows)
 		},
 	}
 	audit.Flags().StringVar(&box, "box", "", "limit to one box id")
 	audit.Flags().IntVar(&n, "n", 50, "max event rows (default 50, cap 200)")
 	return audit
+}
+
+// printAuditRows renders the merged audit rows as a table.
+func printAuditRows(out io.Writer, rows []AuditRow) error {
+	if len(rows) == 0 {
+		_, _ = fmt.Fprintln(out, "no audit rows")
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "BOX\tAT\tACTOR\tACTION\tRESULT\tFLAGS")
+	for _, r := range rows {
+		printAuditRow(w, r)
+	}
+	return w.Flush()
+}
+
+// printAuditRow renders one audit row: an event, or the marker of a box
+// that could not be synced.
+func printAuditRow(w io.Writer, r AuditRow) {
+	flags := ""
+	if r.Tainted {
+		flags = "tainted"
+	}
+	if r.IsError() {
+		_, _ = fmt.Fprintf(w, "%s\t%d\t-\t-\terror:%s\t%s\n", r.Box, r.At, auditErrorDetail(r), flags)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", r.Box, r.At, r.Actor, r.Action, r.Result, flags)
+}
+
+// auditErrorDetail is the error of an audit row, with the detail the
+// worker sent with it.
+func auditErrorDetail(r AuditRow) string {
+	if r.Detail == "" {
+		return r.Error
+	}
+	return r.Error + ": " + r.Detail
 }
