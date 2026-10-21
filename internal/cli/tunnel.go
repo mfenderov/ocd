@@ -35,24 +35,33 @@ func runTunnel(ctx context.Context, w io.Writer) {
 	const maxBackoff = 60 * time.Second
 	for {
 		_, _ = fmt.Fprintln(w, "tunnel: starting cloudflared")
-		cmd := exec.CommandContext(ctx, "cloudflared", "tunnel", "run")
-		cmd.Stdout = w
-		cmd.Stderr = w
-		err := cmd.Run()
-		select {
-		case <-ctx.Done():
+		err := runCloudflared(ctx, w)
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 		_, _ = fmt.Fprintf(w, "tunnel: cloudflared exited (%v), retry in %s\n", err, backoff)
-		select {
-		case <-ctx.Done():
+		if !waitFor(ctx, backoff) {
 			return
-		case <-time.After(backoff):
 		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// runCloudflared runs the connector until it exits.
+func runCloudflared(ctx context.Context, w io.Writer) error {
+	cmd := exec.CommandContext(ctx, "cloudflared", "tunnel", "run")
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
+}
+
+// waitFor waits for the backoff, and reports whether the box is still
+// running.
+func waitFor(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
