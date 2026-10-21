@@ -70,13 +70,23 @@ function row(cells: string[]): string {
   return padded.join(" ").trimEnd();
 }
 
+/**
+ * The threshold the report counts against: the bar, or 30 when there is
+ * no bar — the same default gocrap uses when its threshold is not set.
+ */
+export function effectiveMax(max: number): number {
+  return max > 0 ? max : 30;
+}
+
 /** The report, as a table: the worst first. */
 export function formatReport(entries: CrapEntry[], max: number, verbose: boolean): string {
+  const threshold = effectiveMax(max);
   const sorted = [...entries].sort((a, b) => b.crap - a.crap);
-  const shown = verbose ? sorted : sorted.filter((e) => e.crap > max);
+  // Without a bar every function is listed: there is nothing to fail.
+  const shown = verbose || max <= 0 ? sorted : sorted.filter((e) => e.crap > threshold);
   const lines = [row(COLUMNS.map((c) => c.head))];
   for (const entry of shown) {
-    const verdict = entry.crap > max ? "FAIL" : "ok";
+    const verdict = entry.crap > threshold ? "FAIL" : "ok";
     lines.push(
       row([
         verdict,
@@ -88,10 +98,10 @@ export function formatReport(entries: CrapEntry[], max: number, verbose: boolean
       ]),
     );
   }
-  const summary = summarize(entries, max);
+  const summary = summarize(entries, threshold);
   lines.push("");
   lines.push(
-    `Average CRAP: ${summary.average.toFixed(1)} | Functions: ${summary.functions} | Above ${max}: ${summary.above}`,
+    `Average CRAP: ${summary.average.toFixed(1)} | Functions: ${summary.functions} | Above ${threshold}: ${summary.above}`,
   );
   return lines.join("\n");
 }

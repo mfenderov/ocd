@@ -36,6 +36,12 @@ describe("complexity", () => {
     expect(complexityOfSource("switch (a) { case 1: return 1; case 2: return 2 }")).toBe(3);
   });
 
+  it("does not count the default case of a switch", () => {
+    // gocyclo ignores it: the default is where the switch lands, not a
+    // decision of its own.
+    expect(complexityOfSource("switch (a) { case 1: return 1; default: return 2 }")).toBe(2);
+  });
+
   it("leaves a nested function's complexity to the nested function", () => {
     expect(complexityOfSource("if (a) { const g = () => { if (b) { return 1 } return 2 } }")).toBe(2);
   });

@@ -65,14 +65,17 @@ type Result struct {
 	Restart RestartResult
 }
 
-// DefaultDBPath mirrors internal/cli.openStore: OCD_DB or ~/.ocd/ocd.db.
+// DefaultDBPath is the one rule for the database path: OCD_DB, else
+// ~/.ocd/ocd.db. The CLI calls it too, so the error names the failure
+// and not this package: the operator may be running `ocd serve`, not
+// the onboarding.
 func DefaultDBPath() (string, error) {
 	if p := os.Getenv("OCD_DB"); p != "" {
 		return p, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("onboard: home dir: %w", err)
+		return "", fmt.Errorf("home dir: %w", err)
 	}
 	return filepath.Join(home, ".ocd", "ocd.db"), nil
 }
@@ -152,12 +155,17 @@ func onboardDefaults(cfg Config) Config {
 }
 
 // onboardDBPath is the database the box keeps: the one the caller named,
-// else the default.
+// else the default. The onboarding's own failures carry its prefix; the
+// shared rule does not.
 func onboardDBPath(cfg Config) (string, error) {
 	if cfg.DBPath != "" {
 		return cfg.DBPath, nil
 	}
-	return DefaultDBPath()
+	path, err := DefaultDBPath()
+	if err != nil {
+		return "", fmt.Errorf("onboard: %w", err)
+	}
+	return path, nil
 }
 
 // onboardSecrets mints the box's secrets: the heartbeat token (the code

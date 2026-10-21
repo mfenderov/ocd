@@ -18,6 +18,17 @@ const REPORT = JSON.stringify({
   },
 });
 
+/** A report with a statement that straddles the end of a function. */
+const STRADDLING = JSON.stringify({
+  "/src/a.ts": {
+    statementMap: {
+      "0": { start: { line: 1 }, end: { line: 1 } },
+      "1": { start: { line: 2 }, end: { line: 4 } },
+    },
+    s: { "0": 1, "1": 0 },
+  },
+});
+
 describe("coverage", () => {
   it("reads the statements of a file", () => {
     const report = parseCoverage(REPORT);
@@ -43,6 +54,13 @@ describe("coverage", () => {
   it("says zero for a function with no statements", () => {
     const report = parseCoverage(REPORT);
     expect(coverageFor(report, "/src/a.ts", "empty", 90, 91)).toBe(0);
+  });
+
+  it("counts a statement that overlaps the function's lines", () => {
+    const report = parseCoverage(STRADDLING);
+    // The statement of lines 2 to 4 is not wholly inside the function on
+    // lines 1 to 3, but it overlaps it — and gocrap counts it.
+    expect(coverageFor(report, "/src/a.ts", "f", 1, 3)).toBe(50);
   });
 
   it("knows whether a function was called at all", () => {
