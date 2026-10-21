@@ -23,7 +23,7 @@ export interface Options {
 export const DEFAULT_MAX = 10;
 
 /** The flags that take a value, and what each one sets. */
-const VALUE_FLAGS: Record<string, (options: Options, value: string) => void> = {
+const VALUE_FLAGS: Partial<Record<string, (options: Options, value: string) => void>> = {
   "-c": (options, value) => {
     options.coverage = value;
   },

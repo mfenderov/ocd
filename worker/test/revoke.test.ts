@@ -35,7 +35,7 @@ beforeAll(async () => {
       { bootstrapSecret: BOOTSTRAP },
     );
     expect(res.status).toBe(200);
-    return ((await res.json()) as { token: string }).token;
+    return (await res.json<{ token: string }>()).token;
   });
 });
 
@@ -97,15 +97,13 @@ function confirmRequest(path: string, body: unknown): Request {
 }
 
 function epochFetcher(epoch: number, calls: FetchCall[]): typeof fetch {
-  return (async (url: string, init?: RequestInit) => {
+  return ((url: string, init?: RequestInit) => {
     calls.push({ url: url.toString(), init: init ?? {} });
-    return Response.json({ epoch });
+    return Promise.resolve(Response.json({ epoch }));
   }) as typeof fetch;
 }
 
-const offlineFetcher = (async () => {
-  throw new Error("conn refused");
-}) as typeof fetch;
+const offlineFetcher: typeof fetch = () => Promise.reject(new Error("conn refused"));
 
 describe("revoke confirm gate (unit)", () => {
   it("missing confirm is 400 and never touches the box", async () => {
@@ -138,7 +136,7 @@ describe("revoke confirm gate (unit)", () => {
 });
 
 describe("revoke single box (unit)", () => {
-  it("raiseTombstone writes when absent, raises when higher, keeps otherwise", async () => {
+  it("raiseTombstone writes when absent, raises when higher, keeps otherwise", () => {
     const store = new MemStore();
     raiseTombstone(store, "rt-1", 2);
     expect(store.getTombstone("rt-1")).toEqual({ box_id: "rt-1", epoch: 2 });
@@ -206,8 +204,8 @@ describe("revoke single box (unit)", () => {
     for (const body of bodies) {
       const store = new MemStore();
       await seedBox(store, "rev-badepoch", 1);
-      const fetcher = (async () =>
-        new Response(body, { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+      const fetcher: typeof fetch = () =>
+        Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "application/json" } }));
       const result = await revokeOneBox("rev-badepoch", store, { sealKey: SEAL_KEY, fetcher });
       expect(result).toMatchObject({
         id: "rev-badepoch",
@@ -265,8 +263,8 @@ describe("revoke single box (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "rev-keep-badepoch", 1);
     store.putTombstone({ box_id: "rev-keep-badepoch", epoch: 5 });
-    const fetcher = (async () =>
-      new Response("ok", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+    const fetcher: typeof fetch = () =>
+      Promise.resolve(new Response("ok", { status: 200, headers: { "content-type": "application/json" } }));
     const result = await revokeOneBox("rev-keep-badepoch", store, { sealKey: SEAL_KEY, fetcher });
     expect(result).toMatchObject({
       id: "rev-keep-badepoch",
@@ -291,7 +289,7 @@ describe("revoke single box (unit)", () => {
   it("box non-200 is a per-box box_error with no tombstone", async () => {
     const store = new MemStore();
     await seedBox(store, "rev-err", 1);
-    const fetcher = (async () => new Response("mint first", { status: 409 })) as typeof fetch;
+    const fetcher: typeof fetch = () => Promise.resolve(new Response("mint first", { status: 409 }));
     const result = await revokeOneBox("rev-err", store, { sealKey: SEAL_KEY, fetcher });
     expect(result).toMatchObject({ id: "rev-err", status: "box_error", box_status: 409 });
     expect(store.getTombstone("rev-err")).toBeUndefined();
@@ -303,7 +301,7 @@ describe("revoke single box (unit)", () => {
   it("a dead tunnel (5xx) is unreachable, not a refusal: tombstoned", async () => {
     const store = new MemStore();
     await seedBox(store, "rev-530", 3);
-    const fetcher = (async () => new Response("error code: 1016", { status: 530 })) as typeof fetch;
+    const fetcher: typeof fetch = () => Promise.resolve(new Response("error code: 1016", { status: 530 }));
     const result = await revokeOneBox("rev-530", store, { sealKey: SEAL_KEY, fetcher });
     expect(result).toMatchObject({ id: "rev-530", status: "tombstoned", epoch: 3, box_status: 530 });
     expect(result.detail).toContain("box_unreachable");
@@ -317,7 +315,7 @@ describe("revoke single box (unit)", () => {
   it("a box that answers 502 is a failed revoke, not an unreachable box", async () => {
     const store = new MemStore();
     await seedBox(store, "rev-502", 3);
-    const fetcher = (async () => new Response("revoke failed\n", { status: 502 })) as typeof fetch;
+    const fetcher: typeof fetch = () => Promise.resolve(new Response("revoke failed\n", { status: 502 }));
     const result = await revokeOneBox("rev-502", store, { sealKey: SEAL_KEY, fetcher });
     expect(result).toMatchObject({ id: "rev-502", status: "tombstoned", epoch: 3, box_status: 502 });
     expect(result.detail).toContain("box_revoke_failed");
@@ -350,11 +348,11 @@ describe("revoke-all (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "rev-all-on", 1);
     await seedBox(store, "rev-all-off", 4);
-    const fetcher = (async (url: string, init?: RequestInit) => {
+    const fetcher = ((url: string) => {
       if (url.toString().includes("rev-all-off")) {
-        throw new Error("conn refused");
+        return Promise.reject(new Error("conn refused"));
       }
-      return Response.json({ epoch: 2 });
+      return Promise.resolve(Response.json({ epoch: 2 }));
     }) as typeof fetch;
     const results = await revokeAllBoxes(store, { sealKey: SEAL_KEY, fetcher });
     expect(results).toEqual([
@@ -454,7 +452,7 @@ describe("revoke routes through the worker + DO", () => {
     });
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ id: "route-revoke-off", status: "misconfigured" });
-    const tombstone = await inState(stub, async (instance) =>
+    const tombstone = await inState(stub, (instance) =>
       instance.getTombstone("route-revoke-off"),
     );
     expect(tombstone).toBeUndefined();

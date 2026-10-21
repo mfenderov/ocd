@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // Knip finds the entry points on its own, from the files that are
+  // already the truth about them:
+  //
+  //   src/index.ts         the Worker's handler — wrangler.toml's `main`
+  //   test/*.test.ts       the brain's tests — vitest.config.ts
+  //   tools/crap/*.test.ts the tools' tests — tools/vitest.config.ts
+  //   tools/crap/cli.ts    the CRAP tool's command line — the `crap` script
+  //
+  // The npm scripts are read as well, so the packages the scripts call
+  // (vitest, typescript for tsc, wrangler) count as used even though no
+  // module imports them. Naming the entry points here again would only
+  // duplicate those truths — knip says so itself, with a "remove
+  // redundant entry pattern" hint on every run.
+
+  // `cloudflare:test` and `cloudflare:workers` are the platform's own
+  // modules: the Workers runtime provides them, npm does not. They are
+  // not a dependency to declare, so knip must not look for one.
+  "ignoreDependencies": ["cloudflare"]
+}

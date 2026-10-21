@@ -5,7 +5,7 @@ import { EDGE_ROUTES } from "../src/index";
 import { findRoute } from "../src/routes";
 import { handleMintToken, type CliScope } from "../src/tokens";
 import { generateRsaKey, signRsaJwt } from "./jwt-test-helpers";
-import { inState } from "./helpers";
+import { inState, requestedUrl } from "./helpers";
 
 const BOOTSTRAP = "test-bootstrap-scopes-2";
 
@@ -27,7 +27,7 @@ async function mintDirect(scopes: string[] | undefined, bearer: string): Promise
       { bootstrapSecret: BOOTSTRAP },
     );
     expect(res.status).toBe(200);
-    return ((await res.json()) as { token: string }).token;
+    return (await res.json<{ token: string }>()).token;
   });
 }
 
@@ -201,15 +201,15 @@ describe("valid Access JWT end-to-end (env threading)", () => {
     // there): anything but the certs URL falls through to the real fetch.
     // Left active across the SELF call below so the full edge + DO path is
     // proven; restored in finally.
-    await inState(stub, async () => {
+    await inState(stub, () => {
       const globals = globalThis as unknown as Record<string, unknown>;
       globals["__prevFetch"] = globalThis.fetch;
-      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-        if (input.toString() === jwksUrl()) {
+      globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        if (requestedUrl(input) === jwksUrl()) {
           return Response.json(jwks);
         }
         return (globals["__prevFetch"] as typeof fetch)(input, init);
-      }) as typeof fetch;
+      };
     });
     try {
       // Direct DO route: proves constructor env → accessConfig → verify.
@@ -220,7 +220,7 @@ describe("valid Access JWT end-to-end (env threading)", () => {
             headers: { [ACCESS_ASSERTION_HEADER]: jwt },
           }),
         );
-        return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+        return { status: res.status, body: await res.json<Record<string, unknown>>() };
       });
       // Unknown box: auth passed, the link handler ran and 404d.
       expect(direct.status).toBe(404);
@@ -234,7 +234,7 @@ describe("valid Access JWT end-to-end (env threading)", () => {
       expect(viaEdge.status).toBe(404);
       expect(await viaEdge.json()).toMatchObject({ error: "unknown_box" });
     } finally {
-      await inState(stub, async () => {
+      await inState(stub, () => {
         const globals = globalThis as unknown as Record<string, unknown>;
         globalThis.fetch = globals["__prevFetch"] as typeof fetch;
         delete globals["__prevFetch"];

@@ -60,7 +60,7 @@ async function bootstrapMint(store: MemStore, scopes?: unknown): Promise<{ token
     bootstrapSecret: BOOTSTRAP,
   });
   expect(res.status).toBe(200);
-  const body = (await res.json()) as { token: string; id: string; scopes: string[] };
+  const body = await res.json<{ token: string; id: string; scopes: string[] }>();
   return { token: body.token, id: body.id };
 }
 
@@ -71,7 +71,7 @@ describe("token mint (unit)", () => {
       bootstrapSecret: BOOTSTRAP,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { token: string; id: string; scopes: string[] };
+    const body = await res.json<{ token: string; id: string; scopes: string[] }>();
     expect(typeof body.token).toBe("string");
     expect(body.token.length).toBeGreaterThan(16);
     expect(typeof body.id).toBe("string");
@@ -131,7 +131,7 @@ describe("token mint (unit)", () => {
       bootstrapSecret: BOOTSTRAP,
     });
     expect(second.status).toBe(200);
-    const body = (await second.json()) as { token: string; id: string; scopes: string[] };
+    const body = await second.json<{ token: string; id: string; scopes: string[] }>();
     expect(body.scopes).toEqual(["audit"]);
     expect(body.id).not.toBe(first.id);
     expect(store.countTokens()).toBe(2);
@@ -154,7 +154,7 @@ describe("token rotate (unit)", () => {
     const first = await bootstrapMint(store);
     const res = await handleRotateToken(first.id, tokenRequest(`/tokens/${first.id}/rotate`, "POST", {}, first.token), store);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { token: string; id: string; scopes: string[] };
+    const body = await res.json<{ token: string; id: string; scopes: string[] }>();
     expect(body.id).toBe(first.id);
     expect(body.token).not.toBe(first.token);
     // Old value is dead, new value verifies, hash restores to the new value.
@@ -172,7 +172,7 @@ describe("token rotate (unit)", () => {
       bootstrapSecret: BOOTSTRAP,
     });
     expect(minted.status).toBe(200);
-    const scoped = (await minted.json()) as { token: string; id: string };
+    const scoped = await minted.json<{ token: string; id: string }>();
     const res = await handleRotateToken(scoped.id, tokenRequest(`/tokens/${scoped.id}/rotate`, "POST", {}, admin.token), store);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ id: scoped.id, scopes: ["link", "audit"] });
@@ -191,7 +191,7 @@ describe("token rotate (unit)", () => {
       bootstrapSecret: BOOTSTRAP,
     });
     expect(scoped.status).toBe(200);
-    const scopedToken = ((await scoped.json()) as { token: string }).token;
+    const scopedToken = (await scoped.json<{ token: string }>()).token;
     const scopedDenied = await handleRotateToken(
       first.id,
       tokenRequest(`/tokens/${first.id}/rotate`, "POST", {}, scopedToken),
@@ -216,7 +216,7 @@ describe("token delete (unit)", () => {
     const minted = await handleMintToken(tokenRequest("/tokens", "POST", {}, first.token), store, {
       bootstrapSecret: BOOTSTRAP,
     });
-    const adminToken = ((await minted.json()) as { token: string }).token;
+    const adminToken = (await minted.json<{ token: string }>()).token;
     const res = await handleDeleteToken(first.id, tokenRequest(`/tokens/${first.id}`, "DELETE", undefined, adminToken), store);
     expect(res.status).toBe(200);
     expect(await requireScope(store, first.token, "manage")).toBeNull();
@@ -261,7 +261,7 @@ describe("token store through the real DO (SQLite backend)", () => {
         bootstrapSecret: BOOTSTRAP,
       });
       expect(res.status).toBe(200);
-      return (await res.json()) as { token: string; id: string; scopes: string[] };
+      return await res.json<{ token: string; id: string; scopes: string[] }>();
     });
     const checked = await inState(stub, async (instance) => {
       const ok = await requireScope(instance, minted.token, "link");
@@ -325,7 +325,7 @@ describe("scope list", () => {
         bootstrapSecret: BOOTSTRAP,
       });
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { scopes: string[] };
+      const body = await res.json<{ scopes: string[] }>();
       expect(body.scopes).toContain(scope);
     }
   });

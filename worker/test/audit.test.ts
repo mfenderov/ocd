@@ -35,7 +35,7 @@ beforeAll(async () => {
       { bootstrapSecret: BOOTSTRAP },
     );
     expect(res.status).toBe(200);
-    return ((await res.json()) as { token: string }).token;
+    return (await res.json<{ token: string }>()).token;
   });
 });
 
@@ -85,14 +85,14 @@ function seedRow(at: number, actor: string): Record<string, unknown> {
 }
 
 function rowsFetcher(entries: Array<[string, unknown]>, calls: FetchCall[]): typeof fetch {
-  return (async (url: string, init?: RequestInit) => {
+  return ((url: string, init?: RequestInit) => {
     calls.push({ url: url.toString(), init: init ?? {} });
     for (const [part, body] of entries) {
       if (url.toString().includes(part)) {
-        return Response.json(body);
+        return Promise.resolve(Response.json(body));
       }
     }
-    throw new Error("conn refused");
+    return Promise.reject(new Error("conn refused"));
   }) as typeof fetch;
 }
 
@@ -155,9 +155,7 @@ describe("audit merge (unit)", () => {
   it("an offline box yields a last-synced marker, never a silent gap", async () => {
     const store = new MemStore();
     await seedBox(store, "audit-off", { last_seen: 1700000123 });
-    const failing = (async () => {
-      throw new Error("conn refused");
-    }) as typeof fetch;
+    const failing: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: failing });
     expect(rows).toEqual([
       { box: "audit-off", at: 1700000123, error: "box_unreachable", last_seen: 1700000123, tainted: false },
@@ -169,14 +167,14 @@ describe("audit merge (unit)", () => {
     await seedBox(store, "audit-500");
     await seedBox(store, "audit-garbled");
     await seedBox(store, "audit-shaped");
-    const fetcher = (async (url: string) => {
+    const fetcher = ((url: string) => {
       if (url.includes("audit-500")) {
-        return new Response("boom", { status: 500 });
+        return Promise.resolve(new Response("boom", { status: 500 }));
       }
       if (url.includes("audit-garbled")) {
-        return new Response("{oops", { status: 200 });
+        return Promise.resolve(new Response("{oops", { status: 200 }));
       }
-      return Response.json({ at: 1 });
+      return Promise.resolve(Response.json({ at: 1 }));
     }) as typeof fetch;
     const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher });
     expect(rows).toHaveLength(3);
@@ -216,9 +214,7 @@ describe("audit merge (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "audit-off-tainted", { epoch: 1, last_seen: 1700000123 });
     store.tombstones.set("audit-off-tainted", { box_id: "audit-off-tainted", epoch: 1 });
-    const failing = (async () => {
-      throw new Error("conn refused");
-    }) as typeof fetch;
+    const failing: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: failing });
     expect(rows).toEqual([
       { box: "audit-off-tainted", at: 1700000123, error: "box_unreachable", last_seen: 1700000123, tainted: true },
@@ -339,7 +335,7 @@ describe("audit merge (unit)", () => {
   it("programmer errors propagate instead of masking as box_unreachable", async () => {
     const store = new MemStore();
     await seedBox(store, "audit-badfetch");
-    const nullFetcher = (async () => null) as unknown as typeof fetch;
+    const nullFetcher = (() => Promise.resolve(null)) as unknown as typeof fetch;
     await expect(
       fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: nullFetcher }),
     ).rejects.toThrow(TypeError);
@@ -391,7 +387,7 @@ describe("audit routes through the worker + DO", () => {
       headers: { authorization: `Bearer ${routeToken}` },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { rows: unknown[] };
+    const body = await res.json<{ rows: unknown[] }>();
     expect(Array.isArray(body.rows)).toBe(true);
     expect(body.rows).toContainEqual({
       box: "route-audit-known",

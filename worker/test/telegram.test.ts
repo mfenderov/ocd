@@ -8,14 +8,15 @@ interface FetchCall {
 
 // Fake fetcher: records the call and answers Telegram's envelope.
 function stubFetcher(status: number, body: string, calls: FetchCall[]): typeof fetch {
-  return (async (url: string, init?: RequestInit) => {
+  return ((url: string, init?: RequestInit) => {
     calls.push({ url: url.toString(), init: init ?? {} });
-    return new Response(body, { status });
+    return Promise.resolve(new Response(body, { status }));
   }) as typeof fetch;
 }
 
 function sentBody(call: FetchCall): Record<string, unknown> {
-  return JSON.parse(String(call.init.body)) as Record<string, unknown>;
+  // The body is JSON text: the client sends text, never a blob.
+  return JSON.parse(call.init.body as string) as Record<string, unknown>;
 }
 
 const OK_MESSAGE = JSON.stringify({ ok: true, result: { message_id: 42 } });
@@ -158,9 +159,7 @@ describe("telegram client", () => {
   });
 
   it("an unreachable telegram rejects instead of resolving", async () => {
-    const down = (async () => {
-      throw new Error("conn refused");
-    }) as typeof fetch;
+    const down: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const client = createTelegramClient("TOKEN", down);
 
     await expect(client.sendMessage(7, "hi")).rejects.toThrow(/sendMessage/);
@@ -169,9 +168,7 @@ describe("telegram client", () => {
   it("a network failure keeps the cause for debugging, but never the token", async () => {
     const inner = new Error("connect ECONNREFUSED https://api.telegram.org/botSECRET-TOKEN/sendMessage");
     const outer = new Error("fetch failed", { cause: inner });
-    const down = (async () => {
-      throw outer;
-    }) as typeof fetch;
+    const down: typeof fetch = () => Promise.reject(outer);
     const client = createTelegramClient("SECRET-TOKEN", down);
 
     const err = await client.sendMessage(7, "hi").then(

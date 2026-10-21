@@ -74,7 +74,7 @@ function row(cells: string[]): string {
  * The threshold the report counts against: the bar, or 30 when there is
  * no bar — the same default gocrap uses when its threshold is not set.
  */
-export function effectiveMax(max: number): number {
+function effectiveMax(max: number): number {
   return max > 0 ? max : 30;
 }
 

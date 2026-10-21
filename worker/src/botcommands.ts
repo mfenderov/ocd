@@ -94,8 +94,9 @@ interface Reply {
 
 // A command handler answers with the message to send, or with nothing
 // when the command has nothing to say (the Go bot stays silent in the
-// same cases).
-type CommandHandler = (cmd: BotCommand, deps: CommandDeps) => Promise<Reply | undefined>;
+// same cases). A handler with nothing to wait for answers straight
+// away; the caller awaits the answer either way.
+type CommandHandler = (cmd: BotCommand, deps: CommandDeps) => Reply | undefined | Promise<Reply | undefined>;
 
 // The row limit of /faudit: ten by default, thirty at most (the Go bot's
 // clamp).
@@ -247,14 +248,14 @@ function commandName(name: string): string {
 
 // /fleet: every enrolled box, its state and how long ago it was seen,
 // with the board's buttons under it.
-async function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Reply {
   return boardReply(fleetBoard, deps);
 }
 
 // /link: the menu of boxes the owner picks a machine from. The Go bot
 // sends the same board for /fleet and /link, so the menu and the board
 // are the same buttons.
-async function linkCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+function linkCommand(_cmd: BotCommand, deps: CommandDeps): Reply {
   return boardReply(linkMenu, deps);
 }
 

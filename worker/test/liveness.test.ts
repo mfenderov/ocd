@@ -9,7 +9,7 @@ import type { FleetState } from "../src/state";
 import type { LinkRow } from "../src/events";
 import { handleMintToken } from "../src/tokens";
 import type { TelegramClient } from "../src/telegram";
-import { inState } from "./helpers";
+import { inState, requestedUrl } from "./helpers";
 
 // The brain's clock in the tests: a fixed second, so "200 seconds ago"
 // means what it says.
@@ -60,19 +60,23 @@ class RecordingTelegram implements TelegramClient {
   readonly messages: Array<{ chatId: number; text: string }> = [];
   readonly edits: Array<{ chatId: number; messageId: number; text: string }> = [];
 
-  async sendMessage(chatId: number, text: string): Promise<{ message_id: number }> {
+  sendMessage(chatId: number, text: string): Promise<{ message_id: number }> {
     this.messages.push({ chatId, text });
-    return { message_id: this.messages.length };
+    return Promise.resolve({ message_id: this.messages.length });
   }
 
-  async editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
+  editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
     this.edits.push({ chatId, messageId, text });
-    return true;
+    return Promise.resolve(true);
   }
 
-  async answerCallbackQuery(): Promise<void> {}
+  answerCallbackQuery(): Promise<void> {
+    return Promise.resolve();
+  }
 
-  async setWebhook(): Promise<void> {}
+  setWebhook(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 describe("the liveness sweep", () => {
@@ -83,7 +87,7 @@ describe("the liveness sweep", () => {
     const deps = {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async () => false,
+      probePresence: () => Promise.resolve(false),
       nowSec: () => NOW,
       offlineAfterSec: 90,
     };
@@ -111,7 +115,7 @@ describe("the liveness sweep", () => {
     const deps = {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async () => true,
+      probePresence: () => Promise.resolve(true),
       nowSec: () => NOW,
       offlineAfterSec: 90,
     };
@@ -145,9 +149,9 @@ describe("the liveness sweep", () => {
     await sweepLiveness(store, {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async (boxId) => {
+      probePresence: (boxId) => {
         probes.push(boxId);
-        return false;
+        return Promise.resolve(false);
       },
       nowSec: () => NOW,
       offlineAfterSec: 90,
@@ -173,9 +177,9 @@ describe("the liveness sweep", () => {
     await sweepLiveness(store, {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async (boxId) => {
+      probePresence: (boxId) => {
         probes.push(boxId);
-        return false;
+        return Promise.resolve(false);
       },
       nowSec: () => NOW,
       offlineAfterSec: 90,
@@ -198,9 +202,9 @@ describe("the liveness sweep", () => {
     await sweepLiveness(store, {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async (boxId) => {
+      probePresence: (boxId) => {
         probes.push(boxId);
-        return false;
+        return Promise.resolve(false);
       },
       nowSec: () => NOW,
       offlineAfterSec: 90,
@@ -221,9 +225,8 @@ describe("the liveness sweep", () => {
     await sweepLiveness(store, {
       telegram,
       ownerChatId: OWNER_CHAT,
-      probePresence: async () => {
-        throw new Error("the presence probe cannot run (misconfigured)");
-      },
+      probePresence: () =>
+        Promise.reject(new Error("the presence probe cannot run (misconfigured)")),
       nowSec: () => NOW,
       offlineAfterSec: 90,
     });
@@ -274,7 +277,7 @@ describe("the alarm", () => {
     // The brain's first request arms the alarm.
     await stub.fetch(new Request("https://do/backends"));
 
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       instance.putBox(SILENT_BOX);
       // A dedup row and a link from yesterday: both are pruned.
       instance.markUpdateSeen(4242, NOW - 90000);
@@ -286,9 +289,9 @@ describe("the alarm", () => {
       instance.alarmDeps = {
         telegram,
         ownerChatId: OWNER_CHAT,
-        probePresence: async (boxId: string) => {
+        probePresence: (boxId: string) => {
           probes.push(boxId);
-          return false;
+          return Promise.resolve(false);
         },
         nowSec: () => NOW,
       };
@@ -307,7 +310,7 @@ describe("the alarm", () => {
     expect(telegram.edits).toHaveLength(1);
     expect(telegram.edits[0].text).toContain("1.2.3.4");
 
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       // The box is marked: the owner was told it went dark.
       expect(instance.isSuspectedOffline("home")).toBe(true);
       // The prune ran: yesterday's dedup row and link are gone.
@@ -328,14 +331,14 @@ describe("the alarm", () => {
     const telegram = new RecordingTelegram();
 
     await stub.fetch(new Request("https://do/backends"));
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       instance.putLink(
         link({ token: "tok-ancient", state: "used", used_at: NOW - 90000, created_at: NOW - 90000 }),
       );
       instance.alarmDeps = {
         telegram,
         ownerChatId: OWNER_CHAT,
-        probePresence: async () => false,
+        probePresence: () => Promise.resolve(false),
         nowSec: () => NOW,
       };
     });
@@ -344,7 +347,7 @@ describe("the alarm", () => {
 
     // The prune came first: the old link is gone and was never edited.
     expect(telegram.edits).toEqual([]);
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       expect(instance.linkRow("tok-ancient")).toBeUndefined();
     });
   });
@@ -357,7 +360,7 @@ describe("the alarm", () => {
     const telegram = new RecordingTelegram();
 
     await stub.fetch(new Request("https://do/backends"));
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       // Three named links, oldest first, then a bulk of newer ones.
       instance.putLink(link({ token: "tok-old", message_id: 1, state: "used", used_at: NOW - 300, created_at: NOW - 300 }));
       instance.putLink(link({ token: "tok-mid", message_id: 2, state: "used", used_at: NOW - 250, created_at: NOW - 250 }));
@@ -370,7 +373,7 @@ describe("the alarm", () => {
       instance.alarmDeps = {
         telegram,
         ownerChatId: OWNER_CHAT,
-        probePresence: async () => false,
+        probePresence: () => Promise.resolve(false),
         nowSec: () => NOW,
       };
     });
@@ -382,7 +385,7 @@ describe("the alarm", () => {
     expect(telegram.edits[0].messageId).toBe(1);
     expect(telegram.edits[1].messageId).toBe(2);
     expect(telegram.edits[2].messageId).toBe(3);
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       // The oldest owed link was edited and marked.
       expect(instance.linkRow("tok-old")?.edited).toBe(1);
       // The link past the cap waits for the next tick.
@@ -399,7 +402,7 @@ describe("the alarm", () => {
     const probes: string[] = [];
 
     await stub.fetch(new Request("https://do/backends"));
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       instance.putBox(SILENT_BOX);
       // The owed-edit sweep breaks: the links cannot be read.
       instance.owedLinks = () => {
@@ -408,9 +411,9 @@ describe("the alarm", () => {
       instance.alarmDeps = {
         telegram,
         ownerChatId: OWNER_CHAT,
-        probePresence: async (boxId: string) => {
+        probePresence: (boxId: string) => {
           probes.push(boxId);
-          return false;
+          return Promise.resolve(false);
         },
         nowSec: () => NOW,
       };
@@ -430,15 +433,17 @@ describe("the alarm", () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-probe-seam"));
     const sent: string[] = [];
     const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      sent.push(String(input));
+    globalThis.fetch = (input: RequestInfo | URL) => {
+      sent.push(requestedUrl(input));
       // A Telegram answer that lands: a notice that went out would mark
       // the box, so the mark below is a second witness.
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
     try {
       // The brain's first request arms the alarm.
       await stub.fetch(new Request("https://do/backends"));
@@ -455,7 +460,7 @@ describe("the alarm", () => {
       // Nothing was asked and nothing was sent: the probe never reached
       // for the box, and the owner was not told it is dead.
       expect(sent).toEqual([]);
-      await inState(stub, async (instance: FleetState) => {
+      await inState(stub, (instance: FleetState) => {
         // The box stays unjudged: no mark, so the owner hears about it
         // once the brain can really ask.
         expect(instance.isSuspectedOffline("noseal")).toBe(false);
@@ -472,10 +477,10 @@ describe("the alarm", () => {
     const errors: string[] = [];
 
     await stub.fetch(new Request("https://do/backends"));
-    await inState(stub, async (instance: FleetState) => {
+    await inState(stub, (instance: FleetState) => {
       instance.alarmDeps = {
         // No Telegram client: the brain has nobody to tell.
-        probePresence: async () => false,
+        probePresence: () => Promise.resolve(false),
         nowSec: () => NOW,
       };
       const globals = globalThis as unknown as Record<string, unknown>;
@@ -487,7 +492,7 @@ describe("the alarm", () => {
     try {
       expect(await runDurableObjectAlarm(stub)).toBe(true);
     } finally {
-      await inState(stub, async () => {
+      await inState(stub, () => {
         const globals = globalThis as unknown as Record<string, unknown>;
         console.error = globals["__prevError"] as typeof console.error;
         delete globals["__prevError"];
@@ -525,14 +530,16 @@ const RELAY_STORE = {
 describe("the box relay", () => {
   it("calls the box over its pinned hostname with the sealed admin token", async () => {
     const calls: Array<{ url: string; authorization: string | null }> = [];
-    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input as string, init);
+    const fetcher = (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
       calls.push({ url: request.url, authorization: request.headers.get("authorization") });
-      return new Response('{"id":"home","epoch":1,"version":"dev","taps_24h":0}', {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+      return Promise.resolve(
+        new Response('{"id":"home","epoch":1,"version":"dev","taps_24h":0}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
 
     const relay = await relayToBox(RELAY_STORE, "home", BOX_API.presence, {
       sealKey: SEAL_KEY,
@@ -567,9 +574,7 @@ describe("the box relay", () => {
   });
 
   it("says a box that cannot be reached is unreachable", async () => {
-    const failing = (async () => {
-      throw new Error("connection refused");
-    }) as typeof fetch;
+    const failing: typeof fetch = () => Promise.reject(new Error("connection refused"));
 
     const relay = await relayToBox(RELAY_STORE, "home", BOX_API.presence, {
       sealKey: SEAL_KEY,
@@ -594,7 +599,7 @@ describe("the console routes", () => {
         { bootstrapSecret: "test-bootstrap-relay" },
       );
       expect(res.status).toBe(200);
-      return ((await res.json()) as { token: string }).token;
+      return (await res.json<{ token: string }>()).token;
     });
     const headers = { authorization: `Bearer ${token}` };
 

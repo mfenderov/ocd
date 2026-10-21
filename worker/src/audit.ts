@@ -18,7 +18,7 @@ import { BOX_API } from "./boxapi";
 export const AUDIT_DEADLINE_MS = 5_000;
 
 // Box row contract (binding, from Plan 1): snake_case JSON array.
-export interface BoxAuditRow {
+interface BoxAuditRow {
   at: number;
   actor: string;
   action: string;
@@ -28,14 +28,14 @@ export interface BoxAuditRow {
   ua: string;
 }
 
-export interface MergedAuditRow extends BoxAuditRow {
+interface MergedAuditRow extends BoxAuditRow {
   box: string;
   tainted: boolean;
 }
 
 // Last-synced marker for a box that could not be read. `at` repeats
 // `last_seen` so markers sort with events by time; `error` names the cause.
-export interface AuditErrorRow {
+interface AuditErrorRow {
   box: string;
   at: number;
   error: "box_timeout" | "box_unreachable" | "box_error" | "misconfigured";
@@ -72,7 +72,7 @@ export function parseAuditN(raw: string | null): number {
 
 // Internal per-box failure. Thrown inside the fan-out task, converted to an
 // AuditErrorRow by the allSettled driver — never escapes fetchAudits.
-export class BoxAuditError extends Error {
+class BoxAuditError extends Error {
   code: AuditErrorRow["error"];
   detail?: string;
   constructor(code: AuditErrorRow["error"], detail?: string) {
@@ -97,10 +97,10 @@ export class UnknownBoxError extends Error {
 
 function toMerged(boxId: string, tainted: boolean, raw: unknown): MergedAuditRow {
   const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
-  const str = (key: string): string => (typeof r[key] === "string" ? (r[key] as string) : "");
+  const str = (key: string): string => (typeof r[key] === "string" ? r[key] : "");
   return {
     box: boxId,
-    at: typeof r["at"] === "number" && Number.isFinite(r["at"]) ? (r["at"] as number) : 0,
+    at: typeof r["at"] === "number" && Number.isFinite(r["at"]) ? r["at"] : 0,
     actor: str("actor"),
     action: str("action"),
     device: str("device"),
@@ -171,7 +171,8 @@ async function boxAuditRows(res: Response): Promise<unknown[]> {
   if (!Array.isArray(raw)) {
     throw new BoxAuditError("box_error", "box_bad_json");
   }
-  return raw;
+  // The list is a list; what a row holds is unknown until it is read.
+  return raw as unknown[];
 }
 
 // One box's audit rows. Every failure the box can cause is a marker for

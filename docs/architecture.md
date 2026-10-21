@@ -384,7 +384,43 @@ npm run crap:self
 
 Both run in CI, and both fail the build when a function crosses the bar.
 
-**The dead code is measured too.** `deadcode` (the Go team's) walks the
+### The brain is linted too
+
+The compiler checks the types. The linter checks the shapes the types
+cannot see. The brain is linted with `@eslint/js`'s recommended rules,
+typescript-eslint's recommended rules, and the **type-aware** ones on top
+of them — the type-aware rules are the point: a promise nobody awaits, a
+promise handed over where a plain value is expected, a condition the
+types prove can never be false, and an `await` of something that is not a
+promise are all invisible to `tsc`.
+
+On top of the recommended sets there is a short list of the mistakes this
+codebase has actually made: `eqeqeq`, `no-var`, `prefer-const`,
+`object-shorthand`, `no-implicit-coercion`, `consistent-type-imports`,
+`no-explicit-any` and `no-non-null-assertion`.
+
+`no-console` is off on purpose: in a Worker the console **is** the log,
+and the brain logs to it on purpose.
+
+The type-aware rules need the project, so the config turns on
+`projectService`: every file is checked against the nearest tsconfig —
+`worker/tsconfig.json` for the brain and its tests,
+`worker/tools/tsconfig.json` for the tools, which run in node.
+
+The test files are exempt from the two assertion rules
+(`no-non-null-assertion`, `no-explicit-any`): a test may assert hard.
+
+```bash
+cd worker
+npm run lint     # the brain, the tests and the tools
+```
+
+It runs in CI — in the `worker` job and in the `tools` job — and it fails
+the build on any finding.
+
+### The Go half's dead code is measured too
+
+ `deadcode` (the Go team's) walks the
 program from its entry point and reports the functions it never reaches:
 
 ```bash
@@ -402,6 +438,34 @@ Durable Object: the types they share live in `worker/src/boxes.ts`, and
 `worker/test/architecture.test.ts` fails the build if one of them reaches
 back for `state.ts`. The transport (`worker/src/index.ts`) is the only layer
 allowed to know the application. In Go, nothing imports `internal/cli`.
+
+### The brain's dead code is measured too
+
+The linter sees the shape of the code; it does not see the code nobody
+uses. That is knip's job: the files, exports, types and dependencies that
+nothing reaches.
+
+The entry points are the ones that actually run, and each one is declared
+where it belongs: the Worker's handler (`worker/src/index.ts`, the `main`
+of `worker/wrangler.toml`), the tests (`worker/test/*.test.ts` and
+`worker/tools/crap/*.test.ts`, read from the two vitest configs) and the
+CRAP tool's command line (`worker/tools/crap/cli.ts`, the `crap` script).
+knip reads the npm scripts too, so the packages the scripts call —
+`vitest`, `typescript` for `tsc`, `wrangler` — count as used although no
+module imports them.
+
+The one thing knip cannot know is the platform: `cloudflare:test` and
+`cloudflare:workers` are the Workers runtime's own modules, not npm
+packages, so `worker/knip.jsonc` tells knip to leave them alone.
+
+```bash
+cd worker
+npm run knip
+```
+
+It runs in CI — in the `worker` job and in the `tools` job — and it fails
+the build on any finding: a file nothing imports, an export nothing names,
+a type nothing asks for, a dependency nobody uses.
 
 ## 8. Related documents
 

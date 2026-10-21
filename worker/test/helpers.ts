@@ -17,3 +17,14 @@ export function inState<R>(
   // type; the branded overload does not apply to a plain DurableObject.
   return runInDurableObject(stub, async (instance: FleetState) => fn(instance));
 }
+
+/**
+ * The URL a fetch call names.
+ *
+ * A Request carries its own URL, a string is one, and a URL stringifies
+ * to itself. Nothing here is stringified blindly: a Request would read
+ * as "[object Request]".
+ */
+export function requestedUrl(input: RequestInfo | URL): string {
+  return input instanceof Request ? input.url : String(input);
+}

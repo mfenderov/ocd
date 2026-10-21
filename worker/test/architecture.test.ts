@@ -11,11 +11,11 @@ import { describe, expect, it } from "vitest";
 //
 // The sources are read as text: the Workers runtime has no filesystem,
 // so the build inlines them.
-const sources = import.meta.glob("../src/**/*.ts", {
+const sources = import.meta.glob<string>("../src/**/*.ts", {
   query: "?raw",
   import: "default",
   eager: true,
-}) as Record<string, string>;
+});
 
 // The modules that may name the Durable Object. The whole path, not the
 // base name: a module that happens to be called state.ts somewhere else

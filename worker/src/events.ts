@@ -26,7 +26,7 @@ import { escapeHtml, type TelegramClient } from "./telegram";
 
 // One event a box pushed. A field the box did not send stays undefined:
 // a link event carries no audit fields, an audit row carries no link.
-export interface BoxEvent {
+interface BoxEvent {
   type: string;              // "link-used" | "link-expired" | "audit"
   token?: string;
   ip?: string;
@@ -72,7 +72,7 @@ export interface AuditRow {
 }
 
 // The link rows the message edits work on.
-export interface LinkStore {
+interface LinkStore {
   linkRow(token: string): LinkRow | undefined;
   putLink(row: LinkRow): void;
 }
@@ -353,7 +353,7 @@ async function editLink(
     // the edit when the brain has a token again.
     return;
   }
-  let landed = false;
+  let landed: boolean;
   try {
     landed = await telegram.editMessageText(link.chat_id, link.message_id, text);
   } catch (err) {

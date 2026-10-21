@@ -252,7 +252,7 @@ async function readEnvelope(res: Response): Promise<CfEnvelope | null> {
     if (typeof value !== "object" || value === null) {
       return null;
     }
-    return value as CfEnvelope;
+    return value;
   } catch {
     return null;
   }

@@ -37,7 +37,7 @@ function allFunctions(root: string, src: string, exclude: string[]): FunctionInf
 }
 
 /** The score of every function, with the coverage the report gives it. */
-export function scoreAll(functions: FunctionInfo[], report: CoverageReport): CrapEntry[] {
+function scoreAll(functions: FunctionInfo[], report: CoverageReport): CrapEntry[] {
   return functions.map((fn) =>
     entryFor(
       fn,
@@ -117,6 +117,3 @@ function describe(err: unknown): string {
 if (process.argv[1]?.endsWith("cli.ts")) {
   process.exit(main(process.argv.slice(2)));
 }
-
-/** The options a caller may want to read. */
-export type { Options };

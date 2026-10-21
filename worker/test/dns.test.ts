@@ -2,6 +2,7 @@
 // needs, and moves them when the box's tunnel changes.
 import { describe, expect, it } from "vitest";
 import { ensureBoxDns, type BoxDns } from "../src/dns";
+import { requestedUrl } from "./helpers";
 
 const ZONE = "zone-1";
 // The credential is a fake, but it looks like one on purpose: the writer
@@ -54,11 +55,12 @@ class FakeCloudflare {
   }
 
   get fetcher(): typeof fetch {
-    return (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input));
+    return (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(requestedUrl(input));
       const method = (init?.method ?? "GET").toUpperCase();
+      // The body is JSON text: the brain sends text, never a blob.
       const body = init?.body
-        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        ? (JSON.parse(init.body as string) as Record<string, unknown>)
         : null;
       this.calls.push({
         method,
@@ -67,60 +69,72 @@ class FakeCloudflare {
         body,
       });
       if (this.failWith) {
-        return this.reply(this.failWith.status, {
-          success: false,
-          errors: [{ code: this.failWith.code, message: "Unauthorized to access requested resource" }],
-          result: null,
-        });
+        return Promise.resolve(
+          this.reply(this.failWith.status, {
+            success: false,
+            errors: [{ code: this.failWith.code, message: "Unauthorized to access requested resource" }],
+            result: null,
+          }),
+        );
       }
       if (method === "GET") {
         if (this.listSaysFailure) {
-          return this.reply(200, {
-            success: false,
-            errors: [{ code: 1000, message: "the api refused the call" }],
-            result: null,
-          });
+          return Promise.resolve(
+            this.reply(200, {
+              success: false,
+              errors: [{ code: 1000, message: "the api refused the call" }],
+              result: null,
+            }),
+          );
         }
         if (this.listIsGarbage) {
-          return new Response("<html>gateway error</html>", {
-            status: 200,
-            headers: { "content-type": "text/html" },
-          });
+          return Promise.resolve(
+            new Response("<html>gateway error</html>", {
+              status: 200,
+              headers: { "content-type": "text/html" },
+            }),
+          );
         }
         // The API's default page size is 20: a zone with more records
         // than that answers with the first page only.
         const page = Number(url.searchParams.get("page") ?? "1");
         const perPage = 20;
         const start = (page - 1) * perPage;
-        return this.reply(200, {
-          success: true,
-          result: this.records.slice(start, start + perPage),
-          result_info: {
-            page,
-            per_page: perPage,
-            count: Math.min(perPage, Math.max(0, this.records.length - start)),
-            total_count: this.records.length,
-            total_pages: Math.max(1, Math.ceil(this.records.length / perPage)),
-          },
-        });
+        return Promise.resolve(
+          this.reply(200, {
+            success: true,
+            result: this.records.slice(start, start + perPage),
+            result_info: {
+              page,
+              per_page: perPage,
+              count: Math.min(perPage, Math.max(0, this.records.length - start)),
+              total_count: this.records.length,
+              total_pages: Math.max(1, Math.ceil(this.records.length / perPage)),
+            },
+          }),
+        );
       }
       const record = { id: `rec-${this.records.length + 1}`, ...body } as CfRecord;
       if (this.writeSaysFailure) {
-        return this.reply(200, {
-          success: false,
-          errors: [{ code: 81057, message: "the record already exists" }],
-          result: null,
-        });
+        return Promise.resolve(
+          this.reply(200, {
+            success: false,
+            errors: [{ code: 81057, message: "the record already exists" }],
+            result: null,
+          }),
+        );
       }
       if (this.writeIsGarbage) {
-        return new Response("<html>gateway error</html>", {
-          status: 200,
-          headers: { "content-type": "text/html" },
-        });
+        return Promise.resolve(
+          new Response("<html>gateway error</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          }),
+        );
       }
       if (method === "POST") {
         this.records.push(record);
-        return this.reply(200, { success: true, result: record });
+        return Promise.resolve(this.reply(200, { success: true, result: record }));
       }
       // PATCH: the record id is the last path segment.
       const id = url.pathname.split("/").pop();
@@ -128,8 +142,8 @@ class FakeCloudflare {
       if (index >= 0) {
         this.records[index] = { ...this.records[index], ...body };
       }
-      return this.reply(200, { success: true, result: this.records[index] ?? null });
-    }) as typeof fetch;
+      return Promise.resolve(this.reply(200, { success: true, result: this.records[index] ?? null }));
+    };
   }
 
   private reply(status: number, doc: unknown): Response {
@@ -473,10 +487,8 @@ describe("the brain's DNS writer", () => {
       { ...BOX, target: "" },
     );
 
-    expect(outcome).toEqual({
-      ok: false,
-      reason: expect.stringContaining("no tunnel target"),
-    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome).toHaveProperty("reason", expect.stringContaining("no tunnel target"));
     expect(cf.calls).toHaveLength(0);
   });
 });

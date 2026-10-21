@@ -45,20 +45,23 @@ class RecordingTelegram implements TelegramClient {
   readonly sent: Array<{ chatId: number; text: string; markup?: RecordedMarkup }> = [];
   readonly answered: string[] = [];
 
-  async sendMessage(chatId: number, text: string, opts?: { replyMarkup?: unknown }): Promise<{ message_id: number }> {
+  sendMessage(chatId: number, text: string, opts?: { replyMarkup?: unknown }): Promise<{ message_id: number }> {
     this.sent.push({ chatId, text, markup: opts?.replyMarkup as RecordedMarkup | undefined });
-    return { message_id: this.sent.length };
+    return Promise.resolve({ message_id: this.sent.length });
   }
 
-  async editMessageText(): Promise<boolean> {
-    return true;
+  editMessageText(): Promise<boolean> {
+    return Promise.resolve(true);
   }
 
-  async answerCallbackQuery(callbackId: string): Promise<void> {
+  answerCallbackQuery(callbackId: string): Promise<void> {
     this.answered.push(callbackId);
+    return Promise.resolve();
   }
 
-  async setWebhook(): Promise<void> {}
+  setWebhook(): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 // The deps the command layer is a pure function of: every fleet read is
@@ -114,32 +117,34 @@ function harness(options: HarnessOptions = {}): {
       }
       return options.boxes ?? [];
     },
-    mintLink: async (boxId) => {
+    mintLink: (boxId) => {
       calls.mintLink.push(boxId);
       if (options.mintFails) {
-        throw options.mintFails;
+        return Promise.reject(options.mintFails);
       }
-      return options.mintUrl ?? "https://tap.example/?t=tok-1";
+      return Promise.resolve(options.mintUrl ?? "https://tap.example/?t=tok-1");
     },
-    audit: async (boxId, limit) => {
+    audit: (boxId, limit) => {
       calls.audit.push({ boxId, limit });
-      return options.auditRows ?? [];
+      return Promise.resolve(options.auditRows ?? []);
     },
-    revoke: async (boxId) => {
+    revoke: (boxId) => {
       calls.revoke.push(boxId);
-      return options.revokeResult ?? { id: boxId, status: "revoked", epoch: 2 };
+      return Promise.resolve(options.revokeResult ?? { id: boxId, status: "revoked", epoch: 2 });
     },
-    revokeAll: async () => {
+    revokeAll: () => {
       calls.revokeAll += 1;
-      return options.revokeAllResults ?? [];
+      return Promise.resolve(options.revokeAllResults ?? []);
     },
-    issueEnrollCode: async (boxId) => {
+    issueEnrollCode: (boxId) => {
       calls.issueEnrollCode.push(boxId);
-      return { code: "CODE", command: `ocd onboard ${boxId} CODE` };
+      return Promise.resolve({ code: "CODE", command: `ocd onboard ${boxId} CODE` });
     },
-    boxStatus: async (boxId) => {
+    boxStatus: (boxId) => {
       calls.boxStatus.push(boxId);
-      return options.status ?? "service=http://127.0.0.1:49374 remote=? devices=2 mints24h=5";
+      return Promise.resolve(
+        options.status ?? "service=http://127.0.0.1:49374 remote=? devices=2 mints24h=5",
+      );
     },
     recordLink: (link) => {
       calls.recorded.push(link);

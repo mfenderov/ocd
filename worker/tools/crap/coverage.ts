@@ -8,14 +8,14 @@
  */
 
 /** One statement the coverage provider knows about. */
-export interface Statement {
+interface Statement {
   startLine: number;
   endLine: number;
   hits: number;
 }
 
 /** The coverage of one file. */
-export interface FileCoverage {
+interface FileCoverage {
   statements: Statement[];
   /** The hit count per function, by the function's name and start line. */
   functions: Map<string, number>;

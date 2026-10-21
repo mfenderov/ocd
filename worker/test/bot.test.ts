@@ -10,16 +10,16 @@ import {
 } from "../src/bot";
 import app, { type Env as EdgeEnv } from "../src/index";
 import type { TelegramClient } from "../src/telegram";
-import { inState } from "./helpers";
+import { inState, requestedUrl } from "./helpers";
 
 // The router answers one thing itself: a tap it drops. The command
 // layer owns every other reply. The client is here because the brain
 // owns every message.
 const TELEGRAM: TelegramClient = {
-  sendMessage: async () => ({ message_id: 1 }),
-  editMessageText: async () => true,
-  answerCallbackQuery: async () => {},
-  setWebhook: async () => {},
+  sendMessage: () => Promise.resolve({ message_id: 1 }),
+  editMessageText: () => Promise.resolve(true),
+  answerCallbackQuery: () => Promise.resolve(),
+  setWebhook: () => Promise.resolve(),
 };
 
 // The client that remembers the taps it answered: a tap that is not
@@ -29,12 +29,13 @@ function recordingTelegram(): { telegram: TelegramClient; answered: string[] } {
   return {
     answered,
     telegram: {
-      sendMessage: async () => ({ message_id: 1 }),
-      editMessageText: async () => true,
-      answerCallbackQuery: async (callbackId) => {
+      sendMessage: () => Promise.resolve({ message_id: 1 }),
+      editMessageText: () => Promise.resolve(true),
+      answerCallbackQuery: (callbackId) => {
         answered.push(callbackId);
+        return Promise.resolve();
       },
-      setWebhook: async () => {},
+      setWebhook: () => Promise.resolve(),
     },
   };
 }
@@ -57,8 +58,9 @@ function recordingDispatch(): { commands: BotCommand[]; dispatch: (cmd: BotComma
   const commands: BotCommand[] = [];
   return {
     commands,
-    dispatch: async (cmd) => {
+    dispatch: (cmd) => {
       commands.push(cmd);
+      return Promise.resolve();
     },
   };
 }
@@ -257,7 +259,7 @@ describe("the dedup", () => {
 
   it("remembers the updates the brain handled", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-tg-dedup"));
-    await inState(stub, async (instance) => {
+    await inState(stub, (instance) => {
       // New until it is recorded; then the retry is recognised.
       expect(instance.seenUpdate(42)).toBe(true);
       instance.markUpdateSeen(42, 1700000000);
@@ -454,15 +456,17 @@ describe("the DO's door", () => {
   it("answers 200 for an update that carries no command, and records it as seen", async () => {
     const sent: string[] = [];
     const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      sent.push(String(input));
+    globalThis.fetch = (input: RequestInfo | URL) => {
+      sent.push(requestedUrl(input));
       // A Telegram answer that lands: a reply that went out is a call
       // this test must see.
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
     try {
       const res = await SELF.fetch("https://fleet.local/tg/webhook", {
         method: "POST",
@@ -481,7 +485,7 @@ describe("the DO's door", () => {
       expect(sent).toEqual([]);
 
       const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-      await inState(stub, async (instance) => {
+      await inState(stub, (instance) => {
         // The update is recorded as seen: a retry would not run it again.
         expect(instance.seenUpdate(4242)).toBe(false);
       });

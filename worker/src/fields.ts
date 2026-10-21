@@ -21,7 +21,7 @@ export function optionalTextField(value: unknown): string | null | undefined {
 }
 
 // A field that must carry a string, empty or not.
-export function stringField(value: unknown): string | null {
+function stringField(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }

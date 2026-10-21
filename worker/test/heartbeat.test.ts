@@ -12,7 +12,7 @@ import {
   REENROLL_SEQ_THRESHOLD,
   shouldPingMismatch,
 } from "../src/heartbeat";
-import { inState } from "./helpers";
+import { inState, requestedUrl } from "./helpers";
 
 const TOKEN = "hb-test-secret-1";
 const ADMIN_TOKEN = "admin-test-secret-1";
@@ -26,7 +26,7 @@ beforeAll(async () => {
 
 function seedBox(id: string, overrides: Partial<BoxRow> = {}): Promise<BoxRow> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return inState(stub, async (instance) => {
+  return inState(stub, (instance) => {
     const box: BoxRow = {
       id,
       hostname: `${id}.example.com`,
@@ -48,7 +48,7 @@ function seedBox(id: string, overrides: Partial<BoxRow> = {}): Promise<BoxRow> {
 
 function readBox(id: string): Promise<BoxRow | undefined> {
   const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-  return inState(stub, async (instance) => instance.getBox(id));
+  return inState(stub, (instance) => instance.getBox(id));
 }
 
 function postHeartbeat(body: unknown, token: string | null = TOKEN): Promise<Response> {
@@ -131,7 +131,7 @@ describe("heartbeat ingest", () => {
   it("refuses fetches to unknown or heartbeat-supplied hostnames", async () => {
     await seedBox("hb-pin");
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    const registry = await inState(stub, async (instance) =>
+    const registry = await inState(stub, (instance) =>
       pinnedRegistry(instance.listBackends()),
     );
     expect(pinnedHostname(registry, "hb-pin")).toBe("hb-pin.example.com");
@@ -158,12 +158,12 @@ describe("heartbeat ingest", () => {
   it("resolves pinned hostnames from the DO and throws on unknown ids", async () => {
     await seedBox("hb-do");
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet"));
-    const hostname = await inState(stub, async (instance) =>
+    const hostname = await inState(stub, (instance) =>
       instance.pinnedHostname("hb-do"),
     );
     expect(hostname).toBe("hb-do.example.com");
     await expect(
-      inState(stub, async (instance) => instance.pinnedHostname("ghost")),
+      inState(stub, (instance) => instance.pinnedHostname("ghost")),
     ).rejects.toThrow();
   });
 });
@@ -211,7 +211,7 @@ describe("seq-reset re-enroll signal", () => {
   it("low incoming seq on stale_seq 409s with re_enroll_required + exactly one ping", async () => {
     const store = await resetStore("hb-reset", 500);
     const pings: string[] = [];
-    const res = await handleHeartbeat(hbRequest("hb-reset", 1), store, () => 1700000400, undefined, async (id: string) => {
+    const res = await handleHeartbeat(hbRequest("hb-reset", 1), store, () => 1700000400, undefined, (id: string) => {
       pings.push(reenrollPingText(id));
     });
     expect(res.status).toBe(409);
@@ -226,7 +226,7 @@ describe("seq-reset re-enroll signal", () => {
   it("threshold-boundary seq still signals; high stale_seq 409s silently", async () => {
     const store = await resetStore("hb-edge", 500);
     const pings: string[] = [];
-    const onReenroll = async (id: string) => {
+    const onReenroll = (id: string) => {
       pings.push(reenrollPingText(id));
     };
     const edge = await handleHeartbeat(hbRequest("hb-edge", REENROLL_SEQ_THRESHOLD), store, () => 1700000400, undefined, onReenroll);
@@ -253,10 +253,10 @@ describe("seq-reset re-enroll signal", () => {
       bad,
       store,
       () => 1700000400,
-      async (id: string) => {
+      (id: string) => {
         mismatches.push(id);
       },
-      async (id: string) => {
+      (id: string) => {
         pings.push(reenrollPingText(id));
       },
     );
@@ -284,17 +284,20 @@ describe("the owner's pings", () => {
   // The stub answers like the Bot API, so the ping really goes out.
   function countOwnerPings(): string[] {
     const sent: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
+    globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestedUrl(input);
       if (!url.includes("api.telegram.org")) {
-        throw new Error(`the test suite made an outbound fetch: ${url}`);
+        return Promise.reject(new Error(`the test suite made an outbound fetch: ${url}`));
       }
-      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+      // The body is JSON text: the brain sends text, never a blob.
+      const body = JSON.parse((init?.body ?? "{}") as string) as { text?: string };
       sent.push(body.text ?? "");
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
-        headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
     return sent;
   }
 

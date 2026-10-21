@@ -24,7 +24,7 @@ export interface UrlButton {
 }
 
 // One keyboard: rows of buttons.
-export type Button = InlineButton | UrlButton;
+type Button = InlineButton | UrlButton;
 export type Keyboard = Button[][];
 
 // The actions a button can carry: the brain's four taps. Mint a link,
