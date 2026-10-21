@@ -10,6 +10,7 @@ import {
   mismatchAlertText,
   parseHostSuffixes,
   telegramNotifier,
+  type DnsConfig,
   type EnrollConfig,
   type NotifyFn,
   type PendingRow,
@@ -192,6 +193,11 @@ interface FleetEnv {
   // The box the bot reaches when the owner says "/login" or "/status":
   // a Worker setting, not a fact about the fleet.
   PRIMARY_BOX?: string;
+  // The zone the brain owns the DNS of (a plain var) and the token that
+  // writes it (a secret). Without both the brain cannot write DNS, and
+  // every enrolment says so instead of pretending it did.
+  CLOUDFLARE_ZONE_ID?: string;
+  CLOUDFLARE_DNS_TOKEN?: string;
 }
 
 // The box the bot reaches by default. The design names "home".
@@ -235,6 +241,10 @@ export class FleetState implements DurableObject {
   private accessAud?: string;
   private allowedEmail?: string;
   private primaryBox: string;
+  // The brain's DNS credential: the zone it owns and the token that
+  // writes it. Both come from the Worker env; the token never leaves it.
+  private zoneId?: string;
+  private dnsToken?: string;
   private mismatchPinged = new Map<string, number>();
   // The alarm's dependencies: the client that carries the notices, the
   // chat they go to, the probe that asks a box whether it is there and
@@ -257,6 +267,8 @@ export class FleetState implements DurableObject {
     this.accessAud = env?.ACCESS_AUD;
     this.allowedEmail = env?.ACCESS_ALLOWED_EMAIL;
     this.primaryBox = env?.PRIMARY_BOX?.trim() || DEFAULT_PRIMARY_BOX;
+    this.zoneId = env?.CLOUDFLARE_ZONE_ID;
+    this.dnsToken = env?.CLOUDFLARE_DNS_TOKEN;
     this.alarmDeps = {
       telegram: this.telegramClient(),
       ownerChatId: parseOwnerChatId(this.ownerChatId),
@@ -442,7 +454,17 @@ export class FleetState implements DurableObject {
       baseUrl: this.baseUrl,
       sealKey: this.sealKey,
       hostSuffixes: parseHostSuffixes(this.hostSuffixes),
+      dns: this.dnsConfig(),
     };
+  }
+
+  // The brain's DNS credential, or nothing when the brain has none: an
+  // enrolment then reports the DNS it could not write.
+  private dnsConfig(): DnsConfig | undefined {
+    if (!this.zoneId || !this.dnsToken) {
+      return undefined;
+    }
+    return { zoneId: this.zoneId, token: this.dnsToken };
   }
 
   private accessConfig(): AccessConfig {

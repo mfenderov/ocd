@@ -26,6 +26,7 @@
 //     was handed a box it cannot write for (no tap host). The message
 //     names the status, the API's error code and what that code means
 //     here, never the credential.
+// The caller must catch: a throw is a DNS failure, never a failed enrol.
 const CF_API = "https://api.cloudflare.com/client/v4";
 
 // What Cloudflare's error codes mean, in the words the operator needs. A
