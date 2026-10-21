@@ -66,11 +66,7 @@ jobs:
         uses: cocogitto/cocogitto-action@v4
         with:
           command: bump
-          # --no-push: cocogotto pushes the version commit itself, and the
-          # step below pushes it again — two pushes race for the same ref
-          # and the release loses its tag. The step below pushes both the
-          # commit and the tag, so let it own the push.
-          args: --auto --no-push
+          args: --auto
           git-user: 'github-actions[bot]'
           git-user-email: 'github-actions[bot]@users.noreply.github.com'
       # Bot pushes made with GITHUB_TOKEN do not trigger push-event workflows,
