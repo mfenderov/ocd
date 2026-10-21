@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   fetchBox,
   fetchUrlPinned,
@@ -273,5 +273,116 @@ describe("mismatch ping dedup", () => {
     expect(shouldPingMismatch(seen, "box-1", 2_000, 900_000)).toBe(false);
     expect(shouldPingMismatch(seen, "box-2", 3_000, 900_000)).toBe(true);
     expect(shouldPingMismatch(seen, "box-1", 1_000 + 900_001, 900_000)).toBe(true);
+  });
+});
+
+describe("the owner's pings", () => {
+  const TOKEN = "hb-owner-ping-token";
+  const BOX = "hb-owner-ping";
+
+  // The owner's Telegram sink, counted: every send is one owner ping.
+  // The stub answers like the Bot API, so the ping really goes out.
+  function countOwnerPings(): string[] {
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.includes("api.telegram.org")) {
+        throw new Error(`the test suite made an outbound fetch: ${url}`);
+      }
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+      sent.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    return sent;
+  }
+
+  // The brain's own Durable Object, so the ping ledgers of a test are its
+  // own.
+  async function seedBoxIn(name: string, id: string, lastSeq: number): Promise<void> {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName(name));
+    await inState(stub, async (instance) => {
+      instance.putBox({
+        id,
+        hostname: `${id}.example.com`,
+        heartbeat_token_hash: await hashToken(TOKEN),
+        admin_token_hash: "",
+        admin_token_sealed: "",
+        tunnel_id: "",
+        epoch: 1,
+        last_seq: lastSeq,
+        last_ts: 9000,
+        last_seen: 1893499200,
+        enrolled: 1,
+      });
+    });
+  }
+
+  function beat(name: string, body: unknown, token: string = TOKEN): Promise<Response> {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName(name));
+    return stub.fetch(
+      new Request("https://do/heartbeat", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it("pings the owner once per window, then again after the window", async () => {
+    const sent = countOwnerPings();
+    await seedBoxIn("owner-ping-window", BOX, 500);
+
+    // Only Date is faked, so the brain's clock can be walked without
+    // waiting for it. The fake now is in the future: the brain's alarm
+    // never comes due while the test runs.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2030-01-01T12:00:00Z"));
+
+      // The box lost its DB: every heartbeat is rejected with the same
+      // 409, and the owner hears about it once — not once per heartbeat.
+      for (let i = 0; i < 5; i++) {
+        const res = await beat("owner-ping-window", { id: BOX, seq: 1, box_now: 9999, epoch: 1 });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: "stale_seq", code: "re_enroll_required" });
+      }
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain(BOX);
+      expect(sent[0]).not.toContain(TOKEN);
+
+      // The window closes: the next rejected heartbeat pings again.
+      vi.setSystemTime(new Date("2030-01-01T12:16:00Z"));
+      const later = await beat("owner-ping-window", { id: BOX, seq: 1, box_now: 9999, epoch: 1 });
+      expect(later.status).toBe(409);
+      expect(sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A wrong token and a lost DB are different facts about the same box.
+  // Each has its own ledger, so neither warning may silence the other.
+  it("a mismatch ping does not silence the seq-reset ping", async () => {
+    const sent = countOwnerPings();
+    await seedBoxIn("owner-ping-both", BOX, 500);
+
+    // The wrong token: the mismatch warning.
+    const wrong = await beat(
+      "owner-ping-both",
+      { id: BOX, seq: 1, box_now: 9999, epoch: 1 },
+      "not-the-box-token",
+    );
+    expect(wrong.status).toBe(401);
+
+    // The same box with the right token and a reset-looking seq: the
+    // seq-reset warning, which must not be swallowed by the first one.
+    const reset = await beat("owner-ping-both", { id: BOX, seq: 1, box_now: 9999, epoch: 1 });
+    expect(reset.status).toBe(409);
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain("Auth mismatch");
+    expect(sent[1]).toContain("seq reset suspected");
   });
 });

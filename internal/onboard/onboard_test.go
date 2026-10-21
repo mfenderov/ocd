@@ -162,6 +162,97 @@ func TestDoOnboardPendingThenApproved(t *testing.T) {
 	}
 }
 
+// The brain reports what it did about the box's DNS after the enrolment
+// committed. The owner is at the terminal pasting the command, so this
+// is where a DNS that could not be written belongs: the brain's own
+// report goes to Telegram, not to the box.
+func TestDoOnboardPrintsTheDNSFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"failed: the brain has no DNS credential"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	joined := strings.Join(steps, "\n")
+	if !strings.Contains(joined, "failed: the brain has no DNS credential") {
+		t.Fatalf("the onboard must name the DNS failure, got:\n%s", joined)
+	}
+}
+
+// A DNS the brain wrote is not news: the onboard says nothing about it.
+func TestDoOnboardSaysNothingWhenTheDNSCameOutOk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"ok"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	// Nothing about the DNS is said when the brain wrote the records:
+	// the owner has no business reading about it.
+	for _, step := range steps {
+		if strings.HasPrefix(step, "writing ") {
+			// The path carries the test name; it says nothing about DNS.
+			continue
+		}
+		if strings.Contains(strings.ToUpper(step), "DNS") {
+			t.Fatalf("a DNS that came out ok must stay quiet, got %q", step)
+		}
+	}
+}
+
+// A skip is "there was nothing to do": the brain had no tunnel to point
+// at. The brain says nothing about it to the owner, so the box must not
+// claim the opposite — the owner is not needed for a skip, and the line
+// must say what happened instead.
+func TestDoOnboardSaysTheBrainWroteNoDNSForASkip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"enrolled","id":"mac","dns":"skipped: no tunnel id recorded for mac — re-enrol to bind one"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	var steps []string
+	cfg := onboard.Config{
+		BoxID: "mac", WorkerURL: srv.URL, PublicHost: "oc-mac.example.com",
+		EnrollCode: "typed-code-9", EnvPath: dir + "/env", DBPath: dir + "/ocd.db",
+		Timeout: 10 * time.Second, PollInterval: time.Millisecond,
+	}
+	if err := onboard.DoOnboard(context.Background(), cfg, func(s string) { steps = append(steps, s) }); err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	joined := strings.Join(steps, "\n")
+	// The brain wrote no DNS, and the line says so.
+	if !strings.Contains(joined, "the brain wrote no DNS") {
+		t.Fatalf("a skip must say the brain wrote no DNS, got:\n%s", joined)
+	}
+	// A skip is not a breakage: the owner is not the one needed here.
+	if strings.Contains(joined, "the DNS needs you") {
+		t.Fatalf("a skip must not claim the owner is needed, got:\n%s", joined)
+	}
+	// The brain's own reason rides along.
+	if !strings.Contains(joined, "no tunnel id recorded for mac") {
+		t.Fatalf("the skip must carry the brain's reason, got:\n%s", joined)
+	}
+}
+
 func TestDoOnboardRejectsBadBoxID(t *testing.T) {
 	cfg := onboard.Config{BoxID: "Bad Box!"}
 	if err := onboard.DoOnboard(context.Background(), cfg, nil); err == nil {
@@ -251,15 +342,15 @@ func TestLoadEnvFile(t *testing.T) {
 func TestLoadEnvFileStripsSingleQuotes(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "env")
-	if err := os.WriteFile(p, []byte("OCD_TG_TOKEN='123:abc'\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("OCD_HEARTBEAT_TOKEN='hb-secret'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	vals, err := onboard.LoadEnvFile(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if vals["OCD_TG_TOKEN"] != "123:abc" {
-		t.Fatalf("single quotes must be stripped, got %q", vals["OCD_TG_TOKEN"])
+	if vals["OCD_HEARTBEAT_TOKEN"] != "hb-secret" {
+		t.Fatalf("single quotes must be stripped, got %q", vals["OCD_HEARTBEAT_TOKEN"])
 	}
 }
 

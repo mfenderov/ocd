@@ -12,6 +12,9 @@ new_sqlite_classes = ["FleetState"]
 
 [vars]
 ENROLL_BASE_URL = "https://ocd-fleet.fenderovlol.workers.dev"
+# The one zone the brain owns the DNS of. The API token that goes with it
+# is a Worker secret (CLOUDFLARE_DNS_TOKEN), never a var in this file.
+CLOUDFLARE_ZONE_ID = "99a12613dd9c5453eb4b692c260c1de6"
 # No ACCESS_* defaults here by design: unset means deny-all fail-closed
 # for browsers (see accessConfig in src/state.ts + src/index.ts). Set all
 # three via secrets/dashboard before deploy; test values live ONLY in

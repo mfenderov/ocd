@@ -65,18 +65,6 @@ func Status(ctx context.Context, st *store.Store, exec ctxExec) string {
 		st.CountRecentMints("", 24*time.Hour))
 }
 
-func StatusHTML(st *store.Store, exec execFunc) string {
-	addr, err := exec("opencode", "service", "status")
-	svc := firstLine(addr)
-	if err != nil {
-		svc = "DOWN: " + err.Error()
-	}
-	remote, _ := exec("opencode", "service", "get", "remote")
-	return fmt.Sprintf("📊 <b>Status</b>\n• service <code>%s</code>\n• relay <code>%s</code>\n• devices <code>%d</code>\n• mints 24h <code>%d</code>",
-		svc, firstLine(remote), len(st.ListDevices()),
-		st.CountRecentMints("", 24*time.Hour))
-}
-
 func firstLine(s string) string {
 	for i, c := range s {
 		if c == '\n' {

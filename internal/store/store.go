@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -135,34 +134,6 @@ func (s *Store) ExpireDevice(name string) error {
 	return err
 }
 
-type SeenClient struct {
-	IP    string
-	UA    string
-	Count int
-	Last  int64
-}
-
-// SeenClients lists real tapping clients from the audit trail: distinct
-// IP + UA pairs with tap counts. Ground truth, no manual entries.
-func (s *Store) SeenClients() []SeenClient {
-	rows, err := s.db.Query(`SELECT ip, ua, COUNT(*), MAX(at) FROM audit
-		WHERE action IN ('tapped','consumed') GROUP BY ip, ua ORDER BY MAX(at) DESC`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []SeenClient
-	for rows.Next() {
-		var c SeenClient
-		var ua sql.NullString
-		if err := rows.Scan(&c.IP, &ua, &c.Count, &c.Last); err == nil {
-			c.UA = ua.String
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 func (s *Store) migrateSeen() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS seen_updates(id INTEGER PRIMARY KEY, at INTEGER);`)
 	return err
@@ -178,20 +149,4 @@ func (s *Store) SeenUpdate(id int64) bool {
 	_, _ = s.db.Exec(`INSERT INTO seen_updates(id, at) VALUES(?,strftime('%s','now'))`, id)
 	_, _ = s.db.Exec(`DELETE FROM seen_updates WHERE at<strftime('%s','now')-?`, int64((24 * 60 * 60)))
 	return false
-}
-
-func FmtAgo(s int64) string {
-	if s < 0 {
-		return "never"
-	}
-	if s < 90 {
-		return "just now"
-	}
-	if s < 3600 {
-		return fmt.Sprintf("%dm ago", s/60)
-	}
-	if s < 86400 {
-		return fmt.Sprintf("%dh ago", s/3600)
-	}
-	return fmt.Sprintf("%dd ago", s/86400)
 }

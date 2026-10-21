@@ -1,8 +1,9 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "../src/botcommands";
+import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
-import type { BoxPublic } from "../src/state";
+import type { BoxPublic, BoxRow } from "../src/state";
 import type { TelegramClient } from "../src/telegram";
 import { inState } from "./helpers";
 
@@ -158,6 +159,39 @@ function box(overrides: Partial<BoxPublic> & { id: string }): BoxPublic {
     enrolled: 1,
     tombstoned: false,
     ...overrides,
+  };
+}
+
+// A box in the brain's own table: the row putBox writes.
+function boxRow(id: string, overrides: Partial<BoxRow> = {}): BoxRow {
+  return {
+    id,
+    hostname: `oc-tap-${id}.buyallmemes.com`,
+    heartbeat_token_hash: "hb-hash",
+    admin_token_hash: "admin-hash",
+    admin_token_sealed: "",
+    tunnel_id: "",
+    epoch: 1,
+    last_seq: 1,
+    last_ts: 0,
+    last_seen: 0,
+    enrolled: 1,
+    ...overrides,
+  };
+}
+
+// One row of the brain's history, as a box pushes it.
+function auditRow(box: string, at: number, action: string, ip: string): EventAuditRow {
+  return {
+    box,
+    at,
+    actor: `web:${ip}`,
+    action,
+    device: "",
+    ip,
+    result: "ok",
+    ua: "",
+    token: "",
   };
 }
 
@@ -636,31 +670,74 @@ describe("the Durable Object's dispatch", () => {
     expect(telegram.sent[0].text).not.toContain('{"error"');
   });
 
-  // Phase 1: the brain's own history is still empty (the boxes push their
-  // audit rows in Phase 2), so /faudit asks the boxes.
-  it("answers /faudit from the boxes, not from the brain's own table", async () => {
+  // The brain's own history: the rows the boxes pushed. /faudit answers
+  // from them, so a box that is offline — or gone for good — keeps its
+  // history.
+  it("answers /faudit from the brain's own history", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit"));
     const telegram = new RecordingTelegram();
 
     await inState(stub, async (instance) => {
-      instance.addAuditRow({
-        box: "home",
-        at: 1699999900,
-        actor: "web:1.2.3.4",
-        action: "tapped",
-        device: "",
-        ip: "1.2.3.4",
-        result: "ok",
-        ua: "",
-        token: "",
-      });
+      // The offline box: enrolled, but it went dark a day ago.
+      instance.putBox(boxRow("home", { last_seen: Math.floor(Date.now() / 1000) - 86_400 }));
+      // The row the offline box pushed before it went dark.
+      instance.addAuditRow(auditRow("home", 1699999900, "tapped", "1.2.3.4"));
+      // The replaced box: it is not enrolled any more, but its row stays.
+      instance.addAuditRow(auditRow("mac", 1699999800, "tapped", "5.6.7.8"));
+
+      await instance.dispatchCommand({ name: "/faudit", args: [], chatId: 7 }, telegram);
+      await instance.dispatchCommand({ name: "/faudit", args: ["mac"], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(2);
+    const all = telegram.sent[0].text;
+    // Both boxes' rows: the brain reads what it stored, not what a box
+    // answers now.
+    expect(all).toContain("tapped");
+    expect(all).toContain("1.2.3.4");
+    expect(all).toContain("5.6.7.8");
+    // Newest first: the home row is the later one.
+    expect(all.indexOf("1.2.3.4")).toBeLessThan(all.indexOf("5.6.7.8"));
+    // The fan-out's marker is gone: no box was read.
+    expect(all).not.toContain("error");
+
+    // The one box: only its rows.
+    const mac = telegram.sent[1].text;
+    expect(mac).toContain("mac");
+    expect(mac).toContain("5.6.7.8");
+    expect(mac).not.toContain("home");
+  });
+
+  // The taint is the box's state when it pushed the row: a row that
+  // happened while the box's revoke was pending stays marked. The brain's
+  // table is the only place that flag lives, so a row that lost it would
+  // be shown as a clean row — with nothing to catch it.
+  it("marks a history row whose revoke was pending when the box pushed it", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit-taint"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      instance.putBox(boxRow("home", { epoch: 1 }));
+      // The revoke is pending: the box's credentials are stale.
+      instance.putTombstone({ box_id: "home", epoch: 1 });
+      instance.addAuditRow(auditRow("home", 1699999900, "tapped", "1.2.3.4"));
 
       await instance.dispatchCommand({ name: "/faudit", args: [], chatId: 7 }, telegram);
     });
 
     expect(telegram.sent).toHaveLength(1);
-    // No box is enrolled, so the fan-out has nothing to read: the brain's
-    // own table is not the source yet.
+    expect(telegram.sent[0].text).toContain("revoke pending");
+  });
+
+  it("answers /faudit for a box with no rows", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-audit-empty"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      await instance.dispatchCommand({ name: "/faudit", args: ["gone"], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].text).toContain("No audit rows");
   });
 });

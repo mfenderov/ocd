@@ -1,3 +1,4 @@
+import { ensureBoxDns } from "./dns";
 import { hashToken, tokenMatches } from "./heartbeat";
 import { createTelegramClient, escapeHtml, TelegramError } from "./telegram";
 import type { BoxRow, DenialRow } from "./state";
@@ -57,7 +58,29 @@ export interface EnrollConfig {
   // trusted marks this request as owner-issued (authenticated with the
   // "enroll" scope). Set by the DO, never taken from the request body.
   trusted?: boolean;
+  // dns is the brain's Cloudflare credential for the zone it owns. The
+  // enrolment writes the box's two CNAMEs with it, right after the box
+  // row is committed. Unset = the brain cannot write DNS, and every
+  // enrolment says so instead of pretending it did.
+  dns?: DnsConfig;
 }
+
+// The brain's Cloudflare credential: the zone it owns and the token that
+// writes it. The fetcher rides in so a test can answer instead of
+// Cloudflare — the suite never talks to the network.
+export interface DnsConfig {
+  zoneId: string;
+  token: string;
+  fetcher?: typeof fetch;
+  // deadlineMs bounds one DNS step (the listing and the writes share
+  // it). Unset = DNS_DEADLINE_MS.
+  deadlineMs?: number;
+}
+
+// The DNS call gets 5s, like the audit's outbound call. The box waits
+// 15s for its enrolment answer, so a slow API must fail long before
+// that — and the owner's approve tap must not hang either.
+export const DNS_DEADLINE_MS = 5_000;
 
 export interface EnrollStore {
   getBox(id: string): BoxRow | undefined;
@@ -332,6 +355,22 @@ export function rotationPingText(id: string, now: number): string {
   return `🔑 <b>Admin token rotated</b> · <code>${escapeHtml(id)}</code> · ${when}`;
 }
 
+// The owner must hear about a DNS that could not be written: the box is
+// enrolled (the enrolment is the commit point) but its records are
+// missing, and only the owner can fix that.
+//
+// The reason never carries the credential — the DNS writer's errors name
+// the status and the API's code, never the token — and it comes from a
+// remote API, so it is escaped like every other value that reaches the
+// owner's chat.
+export function dnsFailureText(boxId: string, dns: string): string {
+  const reason = dns.startsWith("failed:") ? dns.slice("failed:".length).trim() : dns.trim();
+  return (
+    `🌐 <b>DNS needs you</b> · <code>${escapeHtml(boxId)}</code> enrolled, ` +
+    `but the brain could not write its DNS records: ${escapeHtml(reason)}`
+  );
+}
+
 // Owner ping, sent through the Telegram client — the one place that knows
 // the Bot API's shape. Bot token + owner chat id come from Worker env only
 // (see telegramNotifier). The contract is unchanged: the ping never throws,
@@ -442,13 +481,25 @@ export async function unsealAdminToken(secret: string, sealed: string): Promise<
 
 export type EnrollStatus = "pending" | "enrolled";
 
+// What an enrolment did. The dns field says what the brain did about the
+// box's two CNAMEs: "ok", "skipped: <reason>" or "failed: <reason>". It
+// rides on every enrolled response — a pending enrolment has no box yet,
+// so it has no DNS to report.
+export interface EnrollResult {
+  status: EnrollStatus;
+  id: string;
+  rotated: boolean;
+  trusted: boolean;
+  dns?: string;
+}
+
 export async function requestEnrollment(
   store: EnrollStore,
   body: EnrollBody,
   notify: NotifyFn,
   nowSec: () => number = defaultNowSec,
   config: EnrollConfig = {},
-): Promise<{ status: EnrollStatus; id: string; rotated: boolean; trusted: boolean }> {
+): Promise<EnrollResult> {
   const suffixes = config.hostSuffixes ?? DEFAULT_HOST_SUFFIXES;
   if (!isPinnedHostname(body.hostname, suffixes)) {
     throw new Error(`enroll: bad_request (hostname "${body.hostname}" not allowed)`);
@@ -466,7 +517,7 @@ export async function requestEnrollment(
       if (tunnelId !== known.tunnel_id) {
         store.putBox({ ...known, tunnel_id: tunnelId });
       }
-      return { status: "enrolled", id: body.id, rotated: false, trusted: true };
+      return enrolledResult(config, store, body.id, false, notify);
     }
     if (!config.sealKey) {
       throw new Error("enroll: seal key not configured");
@@ -478,7 +529,7 @@ export async function requestEnrollment(
       current = null; // unreadable binding counts as different: rotation heals it
     }
     if (current === body.admin_token) {
-      return { status: "enrolled", id: body.id, rotated: false, trusted: true };
+      return enrolledResult(config, store, body.id, false, notify);
     }
     const now = nowSec();
     store.putBox({
@@ -489,7 +540,7 @@ export async function requestEnrollment(
     // A rotation nobody hears about is a silent credential change: ping the
     // owner channel exactly like enrollment pings (id + time, never tokens).
     await notify(rotationPingText(body.id, now));
-    return { status: "enrolled", id: body.id, rotated: true, trusted: true };
+    return enrolledResult(config, store, body.id, true, notify);
   }
   if (!config.capSecret) {
     throw new Error("enroll: capability secret not configured");
@@ -508,11 +559,22 @@ export async function requestEnrollment(
       pending.hostname === body.hostname &&
       (await tokenMatches(body.enroll_token, pending.heartbeat_token_hash))
     ) {
+      // The box's claim is the truth about its tunnel: the brain issued
+      // the code before the box had one (the /enrollcode flow), so the
+      // pending row names no tunnel until the box claims. The claim's
+      // tunnel id rides into the box row the approval below writes; a
+      // claim that names none keeps the pending row's own.
+      const claimedTunnelId = body.tunnel_id ?? "";
+      const pendingTunnelId = claimedTunnelId !== "" ? claimedTunnelId : pending.tunnel_id;
+      let pendingSealed = pending.admin_token_sealed;
       if (body.admin_token !== undefined) {
         if (!config.sealKey) {
           throw new Error("enroll: seal key not configured");
         }
-        store.putPending({ ...pending, admin_token_sealed: await sealAdminToken(config.sealKey, body.admin_token) });
+        pendingSealed = await sealAdminToken(config.sealKey, body.admin_token);
+      }
+      if (pendingTunnelId !== pending.tunnel_id || pendingSealed !== pending.admin_token_sealed) {
+        store.putPending({ ...pending, tunnel_id: pendingTunnelId, admin_token_sealed: pendingSealed });
       }
       const knownNow = store.getBox(body.id);
       const sealedNow = store.getPending(body.id)?.admin_token_sealed ?? "";
@@ -521,7 +583,7 @@ export async function requestEnrollment(
         tokenHash: pending.heartbeat_token_hash,
         hostname: pending.hostname,
       });
-      return { status: "enrolled", id: body.id, rotated, trusted: true };
+      return enrolledResult(config, store, body.id, rotated, notify);
     }
   }
   let sealed = "";
@@ -569,6 +631,152 @@ export async function requestEnrollment(
     await notify(enrollPingText(body, { approve, deny }, exp));
   }
   return { status: "pending", id: body.id, rotated: false, trusted: config.trusted === true };
+}
+
+// The enrolled result, with the DNS the brain wrote (or did not). Every
+// enrolled response carries the DNS status: the box row is committed and
+// the DNS that follows it is reported, never rolled back.
+async function enrolledResult(
+  config: EnrollConfig,
+  store: EnrollStore,
+  id: string,
+  rotated: boolean,
+  notify: NotifyFn,
+): Promise<EnrollResult> {
+  return {
+    status: "enrolled",
+    id,
+    rotated,
+    trusted: true,
+    dns: await ensureDnsFor(config, store, id, notify),
+  };
+}
+
+// The DNS the brain owns for one box, ensured right after the enrolment
+// committed it, and the owner told when it failed.
+//
+// The enrolment is the commit point: the box row is already written and
+// nothing here rolls it back. Two ways to not write:
+//   - the box has no tunnel id to point at — there is nothing to do, so
+//     the status is a skip and the API is never called;
+//   - the brain cannot write (no credential, or the API refused) — the
+//     status is a failure that names the reason.
+//
+// A failure is told to the owner: the box's console is not the owner's
+// Telegram, and a box with no DNS resolves nothing while looking
+// perfectly healthy. A skip is not a failure — there was nothing to do —
+// and "ok" is not news. So exactly one message, and only for a failure.
+//
+// This is the one place every enrolment path goes through — the fast
+// path, the claim path and the approve tap all end here — so no path
+// can forget the report.
+async function ensureDnsFor(
+  config: EnrollConfig,
+  store: EnrollStore,
+  boxId: string,
+  notify: NotifyFn,
+): Promise<string> {
+  const dns = await writeBoxDns(config, store, boxId);
+  if (dns.startsWith("failed:")) {
+    await reportDnsFailure(boxId, dns, notify);
+  }
+  return dns;
+}
+
+// The owner is told about the DNS that could not be written, and the
+// report can never fail the enrolment.
+//
+// The enrolment is already committed: the box row is written and nothing
+// here rolls it back. A notifier that throws would escape into the
+// enrolment's own handler and turn a box that is enrolled into a 500 —
+// the box would report a failure for an enrolment that succeeded, and
+// would not write its env file. So the report is guarded: it fails
+// alone, and the reason goes to the log.
+async function reportDnsFailure(boxId: string, dns: string, notify: NotifyFn): Promise<void> {
+  try {
+    await notify(dnsFailureText(boxId, dns));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`enroll: the DNS failure was not reported (${reason})`);
+  }
+}
+
+// The DNS the brain owns for one box, written. The status says what
+// happened: "ok", "skipped: <reason>" or "failed: <reason>".
+//
+// The box's own row is the truth: it holds the pinned tap hostname and
+// the tunnel id.
+async function writeBoxDns(config: EnrollConfig, store: EnrollStore, boxId: string): Promise<string> {
+  try {
+    // Can this brain write DNS at all? A brain without the credential
+    // says so on every enrolment instead of pretending it did.
+    const dns = config.dns;
+    if (!dns) {
+      console.error(
+        "enroll: no DNS credential (CLOUDFLARE_DNS_TOKEN / CLOUDFLARE_ZONE_ID) — the box's records were not written",
+      );
+      return "failed: the brain has no DNS credential";
+    }
+    const box = store.getBox(boxId);
+    const tunnelId = (box?.tunnel_id ?? "").trim();
+    // No tunnel id means no target: a record that points nowhere is
+    // worse than no record at all, so the brain skips the write and
+    // names the box that needs a re-enrol.
+    if (!tunnelId) {
+      return `skipped: no tunnel id recorded for ${boxId} — re-enrol to bind one`;
+    }
+    const tapHost = box?.hostname ?? "";
+    const uiHost = uiHostFor(boxId, tapHost);
+    if (!uiHost) {
+      return `failed: the box's hostname "${tapHost}" names no domain to derive a UI host from`;
+    }
+    // The step gets a deadline: one signal for the listing and the
+    // writes, so a hung API is a reported failure instead of a hung
+    // request.
+    const fetcher = withDeadline(dns.fetcher ?? fetch, dns.deadlineMs ?? DNS_DEADLINE_MS);
+    const outcome = await ensureBoxDns(
+      { fetcher, zoneId: dns.zoneId, token: dns.token },
+      { tapHost, uiHost, target: `${tunnelId}.cfargotunnel.com` },
+    );
+    return outcome.ok ? "ok" : `skipped: ${outcome.reason}`;
+  } catch (err) {
+    // The API refused us (or the network failed). The enrolment stays
+    // committed: the response names the reason and the box keeps its
+    // rows.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`enroll: the box's DNS was not written (${reason})`);
+    return `failed: ${reason}`;
+  }
+}
+
+// The box's UI host: the tap host's domain with the box's own name in
+// front of it — oc-<box>.<suffix>. The same rule the box's onboarding
+// uses (internal/onboard/tunnel.go): the box id in front, the tap host's
+// domain behind it.
+//
+// Empty when the tap host names no domain: there is no UI host to
+// derive, and the brain must not write one record and call it done.
+function uiHostFor(boxId: string, tapHost: string): string {
+  const dot = tapHost.indexOf(".");
+  return dot > 0 ? `oc-${boxId}${tapHost.slice(dot)}` : "";
+}
+
+// The fetcher with a deadline. The seam stays where it was: dns.ts
+// takes a fetcher, and the caller decides how long it may take. One
+// signal for the whole step (the listing and the writes share it), and
+// an aborted call says so in the operator's words.
+function withDeadline(fetcher: typeof fetch, deadlineMs: number): typeof fetch {
+  const signal = AbortSignal.timeout(deadlineMs);
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    try {
+      return await fetcher(input, { ...init, signal });
+    } catch (err) {
+      if (signal.aborted) {
+        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`);
+      }
+      throw err;
+    }
+  };
 }
 
 async function noopNotify(): Promise<void> {}
@@ -692,6 +900,10 @@ export async function handleEnrollRequest(
       // the request lacked the "enroll" scope, so the box needs the
       // approve tap instead — the bot says so instead of failing later.
       trusted: result.trusted,
+      // What the brain did about the box's two CNAMEs after the
+      // enrolment committed. A pending enrolment has no box yet, so it
+      // carries no DNS status.
+      dns: result.dns,
     });
   } catch (err) {
     // Defense in depth: direct requestEnrollment callers hit the hostname
@@ -760,7 +972,11 @@ export async function handleEnrollApprove(
     if (!row) {
       return Response.json({ error: "no_pending" }, { status: 404 });
     }
-    return Response.json({ status: "approved", id: row.id, enrolled: true });
+    // The approval is an enrolment too: the brain writes the box's DNS
+    // right after it commits the box row — and tells the owner when it
+    // could not.
+    const dns = await ensureDnsFor(config, store, row.id, notify);
+    return Response.json({ status: "approved", id: row.id, enrolled: true, dns });
   } catch (err) {
     return forbiddenResponse(err) ?? Response.json({ error: "misconfigured" }, { status: 500 });
   }

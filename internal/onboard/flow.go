@@ -146,25 +146,33 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	say("requesting enrollment")
-	status, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
+	outcome, err := boxagent.EnrollBox(ctx, client, cfg.WorkerURL, cfg.BoxID, cfg.PublicHost, heartbeatToken, adminToken, boxagent.EnrollOptions{Quiet: cfg.Quiet, TunnelID: tunnelID})
 	if err != nil {
 		return err
 	}
-	if status == "enrolled" {
-		say("enrolled")
+	if outcome.Status == "enrolled" {
+		// The brain writes the box's DNS right after the enrolment
+		// commits. When it could not, the owner is looking at this
+		// terminal: say so, in the plan's words.
+		if line := dnsOutcome(outcome.DNS); line != "" {
+			say(line)
+		} else {
+			say("enrolled")
+		}
 		say("writing " + cfg.EnvPath)
 		return writeEnv(cfg, envVals)
 	}
 	if strings.TrimSpace(cfg.EnrollCode) != "" {
 		return fmt.Errorf("onboard: code rejected (expired or already used) — request a fresh /enrollcode")
 	}
+	// One line, one wait: the owner is told once that the approval is
+	// what the box is waiting for.
 	say("waiting for Telegram approval…")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("onboard: open store: %w", err)
 	}
 	defer st.Close()
-	say("waiting for Telegram approval…")
 	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	if err := WaitEnrolled(waitCtx, st, client, cfg.WorkerURL, cfg.BoxID, heartbeatToken, cfg.PollInterval); err != nil {
@@ -179,4 +187,25 @@ func DoOnboard(ctx context.Context, cfg Config, progress func(string)) error {
 // token the worker does not know (the "auth mismatch" clone warning).
 func writeEnv(cfg Config, envVals map[string]string) error {
 	return WriteEnvFile(cfg.EnvPath, envVals)
+}
+
+// dnsOutcome is the line the owner reads about the DNS the brain wrote
+// (or did not). Empty when it did: the owner is at the terminal pasting
+// the command, so this is where a failure belongs — and a success is
+// not news.
+//
+// The brain's own status is carried as it stands ("failed: …",
+// "skipped: …"), and the wording says what the status means: a failure
+// is a breakage and only the owner can fix it, a skip is "there was
+// nothing to do" — the brain wrote no DNS, and the owner is not the one
+// needed.
+func dnsOutcome(dns string) string {
+	dns = strings.TrimSpace(dns)
+	if dns == "" || dns == "ok" {
+		return ""
+	}
+	if strings.HasPrefix(dns, "skipped:") {
+		return "enrolled, but the brain wrote no DNS: " + dns
+	}
+	return "enrolled, but the DNS needs you: " + dns
 }

@@ -383,7 +383,8 @@ function fleetText(boxes: BoxPublic[], now: number): string {
   return lines.join("\n");
 }
 
-// The age of a last-seen timestamp, the Go store's FmtAgo.
+// The age of a last-seen timestamp, in the words the fleet list reads:
+// "never", "just now", "5m ago", "3h ago", "2d ago".
 function fmtAgo(seconds: number): string {
   if (seconds < 0) {
     return "never";

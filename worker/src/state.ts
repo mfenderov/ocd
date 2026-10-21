@@ -1,7 +1,7 @@
-import { fetchAudits, handleAudit, type AuditRow as BoxAuditRow } from "./audit";
+import { handleAudit } from "./audit";
 import { authorizeRequest, scopeForDoRoute, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
-import { runCommand, type AuditRow, type LinkRecord } from "./botcommands";
+import { runCommand, type LinkRecord } from "./botcommands";
 import { BOX_API, relayFailureStatus, relayToBox } from "./boxapi";
 import {
   handleEnrollApprove,
@@ -10,6 +10,7 @@ import {
   mismatchAlertText,
   parseHostSuffixes,
   telegramNotifier,
+  type DnsConfig,
   type EnrollConfig,
   type NotifyFn,
   type PendingRow,
@@ -20,7 +21,7 @@ import {
   type AuditRow as EventAuditRow,
   type LinkRow,
 } from "./events";
-import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, tokenMatches } from "./heartbeat";
+import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
 import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
 import {
@@ -192,6 +193,11 @@ interface FleetEnv {
   // The box the bot reaches when the owner says "/login" or "/status":
   // a Worker setting, not a fact about the fleet.
   PRIMARY_BOX?: string;
+  // The zone the brain owns the DNS of (a plain var) and the token that
+  // writes it (a secret). Without both the brain cannot write DNS, and
+  // every enrolment says so instead of pretending it did.
+  CLOUDFLARE_ZONE_ID?: string;
+  CLOUDFLARE_DNS_TOKEN?: string;
 }
 
 // The box the bot reaches by default. The design names "home".
@@ -235,7 +241,15 @@ export class FleetState implements DurableObject {
   private accessAud?: string;
   private allowedEmail?: string;
   private primaryBox: string;
+  // The brain's DNS credential: the zone it owns and the token that
+  // writes it. Both come from the Worker env; the token never leaves it.
+  private zoneId?: string;
+  private dnsToken?: string;
+  // The owner-ping ledgers: one message per box per condition per window.
+  // A wrong token and a lost DB are different facts, so they keep separate
+  // ledgers — neither may hide the other.
   private mismatchPinged = new Map<string, number>();
+  private reenrollPinged = new Map<string, number>();
   // The alarm's dependencies: the client that carries the notices, the
   // chat they go to, the probe that asks a box whether it is there and
   // the clock. The constructor fills them from the Worker env; a test
@@ -257,6 +271,8 @@ export class FleetState implements DurableObject {
     this.accessAud = env?.ACCESS_AUD;
     this.allowedEmail = env?.ACCESS_ALLOWED_EMAIL;
     this.primaryBox = env?.PRIMARY_BOX?.trim() || DEFAULT_PRIMARY_BOX;
+    this.zoneId = env?.CLOUDFLARE_ZONE_ID;
+    this.dnsToken = env?.CLOUDFLARE_DNS_TOKEN;
     this.alarmDeps = {
       telegram: this.telegramClient(),
       ownerChatId: parseOwnerChatId(this.ownerChatId),
@@ -278,8 +294,8 @@ export class FleetState implements DurableObject {
 
   // The brain's command seam: the Telegram router hands a command here
   // and the command layer answers it. The dependencies are the DO's own
-  // relays — the command layer never touches the state itself, so it
-  // stays a pure function of what it is given.
+  // relays and reads — the command layer never touches the state itself,
+  // so it stays a pure function of what it is given.
   //
   // The client rides in as an argument: the brain owns every message, and
   // the route that owns the token hands the client over.
@@ -288,7 +304,9 @@ export class FleetState implements DurableObject {
       telegram,
       listBoxes: () => this.listBackends(),
       mintLink: (boxId) => this.mintLink(boxId),
-      audit: (boxId, limit) => this.auditRows(boxId, limit),
+      // The history: the brain's own table. The boxes pushed these rows,
+      // so a box that is offline — or gone for good — keeps its history.
+      audit: async (boxId, limit) => this.auditLogRows(boxId, limit),
       revoke: (boxId) => this.revokeBox(boxId),
       revokeAll: () => this.revokeEveryBox(),
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
@@ -330,17 +348,6 @@ export class FleetState implements DurableObject {
       throw new Error("mint answered with no url");
     }
     return url;
-  }
-
-  // The audit: the boxes' rows, merged. The brain's own history (the
-  // audit_log table) is Phase 2's work: the boxes push their audit rows
-  // in that phase, and until then the bot reads the boxes — a working
-  // answer beats a spec-correct empty one.
-  private async auditRows(boxId: string, limit: number): Promise<AuditRow[]> {
-    const rows = await fetchAudits(this, { boxId: boxId || undefined, n: limit }, {
-      sealKey: this.sealKey,
-    });
-    return rows.map(commandAuditRow);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -442,7 +449,17 @@ export class FleetState implements DurableObject {
       baseUrl: this.baseUrl,
       sealKey: this.sealKey,
       hostSuffixes: parseHostSuffixes(this.hostSuffixes),
+      dns: this.dnsConfig(),
     };
+  }
+
+  // The brain's DNS credential, or nothing when the brain has none: an
+  // enrolment then reports the DNS it could not write.
+  private dnsConfig(): DnsConfig | undefined {
+    if (!this.zoneId || !this.dnsToken) {
+      return undefined;
+    }
+    return { zoneId: this.zoneId, token: this.dnsToken };
   }
 
   private accessConfig(): AccessConfig {
@@ -1002,6 +1019,7 @@ export class FleetState implements DurableObject {
           await notify(mismatchAlertText(id));
         },
         async (id: string) => {
+          if (!shouldPingReenroll(this.reenrollPinged, id, Date.now())) return;
           await notify(reenrollPingText(id));
         },
       );
@@ -1082,24 +1100,6 @@ export class FleetState implements DurableObject {
     }
     return new Response("Not Found", { status: 404 });
   }
-}
-
-// The box's audit rows as the command layer reads them: the layer wants
-// every field present, and a marker row (a box that could not be read)
-// carries no event fields.
-function commandAuditRow(row: BoxAuditRow): AuditRow {
-  return {
-    box: row.box,
-    at: row.at,
-    actor: "actor" in row ? row.actor : "",
-    action: "action" in row ? row.action : "",
-    device: "device" in row ? row.device : "",
-    ip: "ip" in row ? row.ip : "",
-    result: "result" in row ? row.result : "",
-    ua: "ua" in row ? row.ua : "",
-    tainted: row.tainted,
-    ...("error" in row ? { error: row.error } : {}),
-  };
 }
 
 // The enroll code: 32 random bytes, base64 (the Go bot's

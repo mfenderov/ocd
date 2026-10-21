@@ -42,12 +42,21 @@ type EnrollOptions struct {
 	TunnelID string
 }
 
-type enrollResponse struct {
+// EnrollOutcome is what the brain said about an enrollment. It is the
+// decoded answer, so the box reads one shape.
+type EnrollOutcome struct {
+	// Status is "enrolled" (the box is bound) or "pending" (it waits
+	// for the owner's approval).
 	Status string `json:"status"`
 	// Trusted reports whether the box may be claimed by typing the code.
 	// False means the request lacked the "enroll" scope, so the box needs
 	// the approve tap instead.
 	Trusted bool `json:"trusted"`
+	// DNS is what the brain did about the box's two CNAMEs after the
+	// enrollment committed: "ok", "skipped: <reason>" or
+	// "failed: <reason>". Empty on a pending enrollment — there is no
+	// box yet, so there is no DNS to report.
+	DNS string `json:"dns"`
 }
 
 // enrollURL tolerates the heartbeat-suffixed origin too: OCD_WORKER_URL
@@ -63,26 +72,21 @@ func enrollURL(base string) string {
 }
 
 // EnrollBox posts an enrollment request {id, hostname, enroll_token,
-// admin_token?} to the Worker and returns the status ("enrolled" fast path
-// when the box is known, "pending" awaiting owner approval). The enroll
-// token travels in the body: first contact has no bearer credentials yet.
-// Any non-200 is an error, no local retry.
-func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (string, error) {
-	status, _, err := EnrollBoxTrusted(ctx, client, workerURL, id, hostname, enrollToken, adminToken, opts)
-	return status, err
-}
-
-// EnrollBoxTrusted is EnrollBox plus the worker's trust flag: whether the
-// box may be claimed by typing the code.
-func EnrollBoxTrusted(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (string, bool, error) {
+// admin_token?} to the Worker and returns what the Worker said: the
+// status ("enrolled" fast path when the box is known, "pending" awaiting
+// owner approval), whether the box may be claimed by typing the code,
+// and what the brain did about the box's DNS. The enroll token travels
+// in the body: first contact has no bearer credentials yet. Any non-200
+// is an error, no local retry.
+func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (EnrollOutcome, error) {
 	if strings.TrimSpace(id) == "" {
-		return "", false, errors.New("boxagent: box id is empty; refusing to enroll without an id")
+		return EnrollOutcome{}, errors.New("boxagent: box id is empty; refusing to enroll without an id")
 	}
 	if strings.TrimSpace(hostname) == "" {
-		return "", false, errors.New("boxagent: hostname is empty; refusing to enroll without a hostname")
+		return EnrollOutcome{}, errors.New("boxagent: hostname is empty; refusing to enroll without a hostname")
 	}
 	if enrollToken == "" {
-		return "", false, errors.New("boxagent: enroll token is empty; refusing to enroll without a token")
+		return EnrollOutcome{}, errors.New("boxagent: enroll token is empty; refusing to enroll without a token")
 	}
 	payload, err := json.Marshal(enrollRequest{
 		ID:          id,
@@ -93,11 +97,11 @@ func EnrollBoxTrusted(ctx context.Context, client *http.Client, workerURL, id, h
 		Quiet:       opts.Quiet,
 	})
 	if err != nil {
-		return "", false, fmt.Errorf("boxagent: encode enroll: %w", err)
+		return EnrollOutcome{}, fmt.Errorf("boxagent: encode enroll: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, enrollURL(workerURL), bytes.NewReader(payload))
 	if err != nil {
-		return "", false, fmt.Errorf("boxagent: build enroll request: %w", err)
+		return EnrollOutcome{}, fmt.Errorf("boxagent: build enroll request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if opts.Bearer != "" {
@@ -111,18 +115,18 @@ func EnrollBoxTrusted(ctx context.Context, client *http.Client, workerURL, id, h
 	}
 	resp, err := withTimeout(client).Do(req)
 	if err != nil {
-		return "", false, fmt.Errorf("boxagent: post enroll: %w", err)
+		return EnrollOutcome{}, fmt.Errorf("boxagent: post enroll: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("boxagent: enroll worker replied %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return EnrollOutcome{}, fmt.Errorf("boxagent: enroll worker replied %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
-	var out enrollResponse
+	var out EnrollOutcome
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", false, fmt.Errorf("boxagent: decode enroll: %w", err)
+		return EnrollOutcome{}, fmt.Errorf("boxagent: decode enroll: %w", err)
 	}
 	if out.Status == "" {
-		return "", false, errors.New("boxagent: enroll worker omitted status")
+		return EnrollOutcome{}, errors.New("boxagent: enroll worker omitted status")
 	}
-	return out.Status, out.Trusted, nil
+	return out, nil
 }

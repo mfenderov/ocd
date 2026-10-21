@@ -16,7 +16,7 @@ if [ -f "$HOME/.ocd/env" ]; then
   # shellcheck disable=SC1091
   set -a; . "$HOME/.ocd/env"; set +a || log WARN "env file failed to source, continuing with defaults"
 else
-  log WARN "no ~/.ocd/env, daemon stage will be skipped"
+  log WARN "no ~/.ocd/env, the daemon starts with defaults (default database, admin off, heartbeat off)"
 fi
 
 log BOOT "=== boot start ==="
@@ -42,10 +42,13 @@ else
   log FAIL "cloudflared not on PATH"
 fi
 
-# Stage 3: dispenser daemon. Needs secrets; skipped cleanly without them.
-if [ -z "${OCD_TG_TOKEN:-}" ] || [ -z "${OCD_OWNER_ID:-}" ]; then
-  log FAIL "daemon skipped: OCD_TG_TOKEN/OCD_OWNER_ID unset (service+tunnel unaffected)"
-elif [ ! -x "$HOME/.local/bin/ocd" ]; then
+# Stage 3: dispenser daemon. The binary is the only thing it needs: the
+# DB path defaults to ~/.ocd/ocd.db, and the brain is optional — without
+# OCD_WORKER_URL the daemon still serves /pair and /healthz (and /_oc/*
+# when the admin token is set) and logs "heartbeat off". The tap
+# endpoint is not open for the world: /pair needs OCD_PAIR_OPEN=1 or a
+# Cloudflare Access JWT, or the browser gets 401 and no link ever works.
+if [ ! -x "$HOME/.local/bin/ocd" ]; then
   log FAIL "daemon skipped: ~/.local/bin/ocd missing"
 elif pgrep -f "ocd serve" >/dev/null 2>&1; then
   log OK "daemon already running"
@@ -80,7 +83,7 @@ else
 fi
 
 # Verify: each stage must answer. A started-but-deaf process is FAIL, not OK.
-# The daemon registers its webhook before listening, so allow it time.
+# The daemon needs a moment to bind its port before it answers.
 if command -v curl >/dev/null 2>&1; then
   ok=""
   for _ in 1 2 3 4 5 6; do

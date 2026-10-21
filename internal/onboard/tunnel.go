@@ -145,8 +145,13 @@ func apiTokenOrEnv(explicit string) string {
 }
 
 // RouteDNS points hostname at the tunnel (creates/updates the CNAME).
+//
+// The record may already be there — the brain writes these records too,
+// and a re-onboard routes them again. cloudflared refuses to create a
+// record that exists, so the route overwrites it: without the flag the
+// onboard aborts on a Cloudflare error the operator has no lever for.
 func RouteDNS(ctx context.Context, apiToken, tunnel, hostname string) error {
-	_, err := cloudflared(ctx, apiTokenOrEnv(apiToken), "tunnel", "route", "dns", tunnel, hostname)
+	_, err := cloudflared(ctx, apiTokenOrEnv(apiToken), "tunnel", "route", "dns", "--overwrite-dns", tunnel, hostname)
 	return err
 }
 

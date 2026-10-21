@@ -159,6 +159,31 @@ func TestSetupTunnelReusesIdenticalConfig(t *testing.T) {
 	}
 }
 
+// A re-onboard runs the DNS route again, and the brain owns these
+// records too: cloudflared refuses to create a record that already
+// exists, so the route must overwrite it. Otherwise the onboard aborts
+// on a Cloudflare error the operator has no lever for.
+func TestRouteDNSOverwritesAnExistingRecord(t *testing.T) {
+	dir := t.TempDir()
+	args := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + args + "'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "cloudflared"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	if err := onboard.RouteDNS(context.Background(), "token-1", "tun-1", "oc-tap-mac.buyallmemes.com"); err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	raw, err := os.ReadFile(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "--overwrite-dns") {
+		t.Fatalf("the route must overwrite an existing record, got args %q", strings.TrimSpace(string(raw)))
+	}
+}
+
 func TestEnsureLoginRequiresProof(t *testing.T) {
 	dir := t.TempDir()
 	if err := onboard.EnsureCloudflaredLogin(context.Background(), dir, "", false, io.Discard); err == nil {

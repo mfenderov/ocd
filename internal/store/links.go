@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 )
@@ -16,6 +17,11 @@ const linkTTL = 10 * time.Minute
 const brainLinkVia = "admin"
 
 type AuditRow struct {
+	// RowID is the row's place in the audit table. RecentAuditSince
+	// fills it: the sweep's watermark is the rowid of the last row it
+	// reported. It stays out of the JSON: the box's own API answers with
+	// the rows as they are, rowid included nowhere.
+	RowID  int64  `json:"-"`
 	At     int64  `json:"at"`
 	Actor  string `json:"actor"`
 	Action string `json:"action"`
@@ -170,4 +176,240 @@ func (s *Store) RecentAudit(n int) []AuditRow {
 		}
 	}
 	return out
+}
+
+// auditBatch is how many audit rows one read returns. The sweep pushes
+// them in one batch; the rows past the batch wait for the next sweep.
+const auditBatch = 100
+
+// RecentAuditSince returns the audit rows written after the given rowid,
+// oldest first, at most auditBatch of them. The rowid is the sweep's
+// watermark: the rows the brain has not seen yet, so a restart does not
+// re-send the whole history.
+func (s *Store) RecentAuditSince(rowid int64) ([]AuditRow, error) {
+	rows, err := s.db.Query(`SELECT rowid, at, actor, action, device, ip, result, ua FROM audit WHERE rowid > ? ORDER BY rowid LIMIT ?`, rowid, auditBatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditRow
+	for rows.Next() {
+		var r AuditRow
+		var ua sql.NullString
+		if err := rows.Scan(&r.RowID, &r.At, &r.Actor, &r.Action, &r.Device, &r.IP, &r.Result, &ua); err != nil {
+			return nil, err
+		}
+		r.UA = ua.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AuditWatermark returns the rowid of the last audit row the box
+// reported to the brain, 0 when it never reported one.
+//
+// The read can fail, and a failure is not "nothing reported yet": the
+// caller must not read it as 0, or it re-offers rows the brain already
+// has and sends the watermark backwards.
+func (s *Store) AuditWatermark() (int64, error) {
+	var v int64
+	err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	return v, nil
+}
+
+// AuditAnchor is the content of the row the watermark names: the row's
+// own (at, action).
+//
+// A rowid is a position, not an identity. The trail's rowids start over
+// when the trail is reset, so the same rowid can name a different row
+// after the reset — and the rows in between are then lost for good. The
+// anchor is the content, and the content is what tells the two apart.
+//
+// (at, action) is the identity because it is the brain's identity: the
+// brain keys its history on (box, at, action, token) and the box's rows
+// carry no token.
+type AuditAnchor struct {
+	At     int64
+	Action string
+}
+
+// WatermarkAnchor returns the anchor stored next to the audit
+// watermark: the content of the row the watermark names. False when no
+// anchor is stored — a database written before the anchor existed.
+func (s *Store) WatermarkAnchor() (AuditAnchor, bool, error) {
+	var anchor AuditAnchor
+	err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark_at'`).Scan(&anchor.At)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditAnchor{}, false, nil
+	}
+	if err != nil {
+		return AuditAnchor{}, false, err
+	}
+	// The action is text in an integer column: SQLite keeps it as text
+	// unless it reads as a number, and a number comes back as its
+	// digits — the same string either way.
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark_action'`).Scan(&anchor.Action); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AuditAnchor{}, false, nil
+		}
+		return AuditAnchor{}, false, err
+	}
+	return anchor, true, nil
+}
+
+// auditRowMatches reports whether the row with the given rowid still
+// carries the given content. False when the row is gone: the trail lost
+// it, or it was reset and a different row took its place.
+//
+// It is unexported on purpose: the store's callers ask the question
+// through AuditWatermarkStale, which is the answer they want.
+func (s *Store) auditRowMatches(rowid int64, anchor AuditAnchor) (bool, error) {
+	at, action, found, err := s.auditRowContent(rowid)
+	if err != nil || !found {
+		return false, err
+	}
+	return at == anchor.At && action == anchor.Action, nil
+}
+
+// auditRowContent returns the content of the audit row with that
+// rowid — its (at, action) — and whether the row is there at all.
+func (s *Store) auditRowContent(rowid int64) (int64, string, bool, error) {
+	var at int64
+	var action string
+	err := s.db.QueryRow(`SELECT at, action FROM audit WHERE rowid=?`, rowid).Scan(&at, &action)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return at, action, true, nil
+}
+
+// LastAuditRowID returns the rowid of the newest row in the audit
+// trail, 0 when the trail is empty.
+//
+// It is what the fallback check asks (see AuditWatermarkStale): for a
+// database with no anchor, a watermark past the trail's newest row is
+// stale, because the trail lost the row the watermark names — the old
+// rows were pruned, or the trail was reset and its rowids started over.
+// A database with an anchor does not come here: the anchor names the
+// row itself, which is the stronger question.
+func (s *Store) LastAuditRowID() (int64, error) {
+	var v int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM audit`).Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// AuditWatermarkStale reports whether the watermark points at a row the
+// brain has not seen.
+//
+// The watermark is a rowid, and a rowid alone cannot answer that: a
+// trail that was reset and refilled hands the same rowid to a different
+// row, and the rows in between are lost for good. So the row's own
+// content is stored next to the watermark when it is set, and the
+// watermark is stale when the row is gone or is not the row the brain
+// saw.
+//
+// The anchor names the row at the watermark's own position. It says
+// nothing about the rows before it: a trail that was refilled with rows
+// that happen to reproduce the anchor's (at, action) at the watermark's
+// rowid keeps those earlier rows unpushed. That needs the same second
+// and the same action at exactly that rowid, so the hole is narrow —
+// but it is there.
+//
+// A watermark with no anchor (a trail reported before the anchor
+// existed) falls back to the numeric check: a watermark past the trail's
+// last rowid is stale. That is the check that was there before, so an
+// old database is no worse off than it was: it keeps the old check
+// until its next successful push writes the anchor, and from then on
+// the anchor decides.
+func (s *Store) AuditWatermarkStale() (bool, error) {
+	rowid, err := s.AuditWatermark()
+	if err != nil {
+		return false, err
+	}
+	if rowid == 0 {
+		// Nothing was reported yet: the push starts at the beginning of
+		// the trail, whatever it holds.
+		return false, nil
+	}
+	anchor, ok, err := s.WatermarkAnchor()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		// No anchor: the database predates it. The numeric check is the
+		// only thing there is.
+		last, err := s.LastAuditRowID()
+		if err != nil {
+			return false, err
+		}
+		return rowid > last, nil
+	}
+	same, err := s.auditRowMatches(rowid, anchor)
+	if err != nil {
+		return false, err
+	}
+	return !same, nil
+}
+
+// SetAuditWatermark moves the watermark forward to the given rowid: the
+// rowid of the last audit row the brain has.
+//
+// The watermark never moves backwards: a rowid below the stored one is
+// ignored. A lower one would re-offer rows the brain already has.
+//
+// The row's own content is stored next to it: the anchor that says "the
+// row this watermark points at is still the row the brain has" (see
+// AuditWatermarkStale, and the hole that check leaves). Both move in
+// one statement, or not at all.
+//
+// The sweep writes it only after a successful push: a failed push leaves
+// the watermark where it was, so the next sweep offers the same rows
+// again and no row is lost.
+func (s *Store) SetAuditWatermark(rowid int64) error {
+	current, err := s.AuditWatermark()
+	if err != nil {
+		return err
+	}
+	if rowid <= current {
+		// The watermark never moves backwards, and the anchor stays with
+		// the row it belongs to.
+		return nil
+	}
+	// The anchor: the row's own content, read here, where the row is. A
+	// row that is not there leaves the anchor empty, and a missing row
+	// is stale too.
+	at, action, found, err := s.auditRowContent(rowid)
+	if err != nil {
+		return err
+	}
+	if !found {
+		at, action = 0, ""
+	}
+	_, err = s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',?),('audit_watermark_at',?),('audit_watermark_action',?)
+		ON CONFLICT(k) DO UPDATE SET v=CASE WHEN k='audit_watermark' THEN MAX(v,excluded.v) ELSE excluded.v END`, rowid, at, action)
+	return err
+}
+
+// RepairAuditWatermark puts the watermark back to the start of the
+// trail, and drops the anchor with it. The trail was reset — its
+// rowids started over — so the stored watermark points at a row that is
+// not the row the brain has, and the push would be silent for good. The
+// trail's rows are offered again and the brain's dedup collapses the
+// ones it already has.
+func (s *Store) RepairAuditWatermark() error {
+	if _, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',0) ON CONFLICT(k) DO UPDATE SET v=0`); err != nil {
+		return err
+	}
+	// The anchor named a row the watermark no longer names: it goes with
+	// it. A watermark with no anchor falls back to the numeric check.
+	_, err := s.db.Exec(`DELETE FROM meta WHERE k IN ('audit_watermark_at','audit_watermark_action')`)
+	return err
 }

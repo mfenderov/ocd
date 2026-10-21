@@ -52,6 +52,228 @@ func TestAuditOnAClosedStoreDoesNotPanic(t *testing.T) {
 	}
 }
 
+// The sweep pushes the audit rows the brain has not seen yet. It reads
+// them by rowid: the watermark is the rowid of the last row reported, so
+// a restart does not re-send the whole history.
+func TestRecentAuditSince(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	first := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	second := st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	third := st.AuditUA("tg:owner", "link_issued", "mac", "", "ok", "")
+
+	rows, err := st.RecentAuditSince(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want all three rows, got %d: %+v", len(rows), rows)
+	}
+	wantActions := []string{"tapped", "tap_denied", "link_issued"}
+	for i, want := range wantActions {
+		if rows[i].Action != want {
+			t.Fatalf("want %q in row %d, got %q", want, i, rows[i].Action)
+		}
+	}
+	if rows[0].RowID != first || rows[1].RowID != second || rows[2].RowID != third {
+		t.Fatalf("want the rowids %d, %d, %d, got %d, %d, %d", first, second, third, rows[0].RowID, rows[1].RowID, rows[2].RowID)
+	}
+	if rows[0].UA != "curl/8" {
+		t.Fatalf("want the user agent kept, got %q", rows[0].UA)
+	}
+
+	rows, err = st.RecentAuditSince(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want only the row after the second one, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Action != "link_issued" {
+		t.Fatalf("want the last row, got %q", rows[0].Action)
+	}
+}
+
+// The watermark is the rowid of the last audit row the box reported. It
+// starts at 0: nothing reported yet.
+func TestAuditWatermark(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Fatalf("want no watermark before the first push, got %d", got)
+	}
+	if err := st.SetAuditWatermark(42); err != nil {
+		t.Fatal(err)
+	}
+	got, err = st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 42 {
+		t.Fatalf("want the watermark 42, got %d", got)
+	}
+}
+
+// The watermark only moves forward. A rowid below the stored one is
+// ignored: a lower watermark would re-offer rows the brain already has
+// and send the box's history backwards.
+func TestAuditWatermarkNeverMovesBackwards(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAuditWatermark(rowid - 1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != rowid {
+		t.Fatalf("want the watermark to stay at %d, got %d", rowid, got)
+	}
+}
+
+// The trail was reset and its rowids started over: the stored watermark
+// points past every row. The repair puts the watermark back at the
+// start of the trail, so the push continues instead of going silent.
+func TestRepairAuditWatermark(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetAuditWatermark(5000); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairAuditWatermark(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Fatalf("want the watermark repaired to the start of the trail, got %d", got)
+	}
+}
+
+// The watermark is anchored to the row it names: the row's own content
+// is stored next to it, so the box can tell "the same row" from "the
+// same number". A rowid is a position, not an identity.
+func TestAuditWatermarkAnchorsItsRow(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	anchor, ok, err := st.WatermarkAnchor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("want the anchor stored with the watermark")
+	}
+	rows, err := st.RecentAuditSince(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %d", len(rows))
+	}
+	if anchor.At != rows[0].At || anchor.Action != rows[0].Action {
+		t.Fatalf("want the anchor to name the row (%d, %q), got (%d, %q)", rows[0].At, rows[0].Action, anchor.At, anchor.Action)
+	}
+	// The row is still the row: the watermark is not stale.
+	stale, err := st.AuditWatermarkStale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale {
+		t.Fatal("want a live watermark to be fresh")
+	}
+}
+
+// The anchor stays with the row the watermark names: a watermark that
+// does not move does not take the anchor with it.
+func TestAuditAnchorDoesNotMoveBackwards(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	first := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	second := st.AuditUA("web:1.2.3.4", "tap_denied", "", "1.2.3.4", "used-or-expired", "")
+	if err := st.SetAuditWatermark(second); err != nil {
+		t.Fatal(err)
+	}
+	anchor, ok, err := st.WatermarkAnchor()
+	if err != nil || !ok {
+		t.Fatalf("want the anchor stored, ok=%v err=%v", ok, err)
+	}
+	// A lower watermark is ignored: the anchor must keep naming the row
+	// the watermark names.
+	if err := st.SetAuditWatermark(first); err != nil {
+		t.Fatal(err)
+	}
+	after, ok, err := st.WatermarkAnchor()
+	if err != nil || !ok {
+		t.Fatalf("want the anchor stored, ok=%v err=%v", ok, err)
+	}
+	if after != anchor {
+		t.Fatalf("want the anchor left on %+v, got %+v", anchor, after)
+	}
+	watermark, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != second {
+		t.Fatalf("want the watermark left at %d, got %d", second, watermark)
+	}
+}
+
+// The repair puts the watermark back to the start of the trail, and the
+// anchor goes with it: the watermark names no row any more.
+func TestRepairAuditWatermarkDropsTheAnchor(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairAuditWatermark(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.WatermarkAnchor(); err != nil || ok {
+		t.Fatalf("want the anchor dropped, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestAuditRowMarshalSnakeCaseKeys(t *testing.T) {
 	row := store.AuditRow{At: 1, Actor: "a", Action: "b", Device: "c", IP: "d", Result: "e", UA: "f"}
 	raw, err := json.Marshal(row)

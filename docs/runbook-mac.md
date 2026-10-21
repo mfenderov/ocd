@@ -45,9 +45,11 @@ message; there is no approve link to tap.
 - Tunnel `oc-<box>` in `~/.cloudflared/config.yml`, routing
   `oc-tap-<box>.buyallmemes.com` (tap links) and `oc-<box>.buyallmemes.com`.
   `ocd serve` supervises cloudflared itself (`OCD_MANAGE_TUNNEL=1`).
-- No Telegram bot on this box. The single bot lives on the primary box;
-  a second bot would fight it over updates. This box still answers the
-  fleet API and mints tap links on request.
+- No Telegram bot on this box. The bot lives in the brain — the
+  Cloudflare Worker — so no box hosts one and there is no second bot to
+  fight over Telegram updates. This box still answers the brain's
+  relays (mint, revoke, audit, presence, status) and mints tap links on
+  request.
 
 ## opencode v2 (the editor this box serves)
 
@@ -73,6 +75,7 @@ sudo systemsetup -setcomputersleep Never   # on adapter, lid open
 
 ## Checking it
 
-- `/fleet` in the primary bot's DM lists every box with live state.
+- `/fleet` in the bot's DM (the brain's bot, the only one) lists every box
+  with live state.
 - `/flink <box>` mints a tap link for that box.
 - On the Mac: `curl -s https://oc-tap-<box>.buyallmemes.com/healthz` → `ok`.
