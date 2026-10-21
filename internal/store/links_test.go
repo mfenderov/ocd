@@ -105,14 +105,71 @@ func TestAuditWatermark(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if got := st.AuditWatermark(); got != 0 {
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
 		t.Fatalf("want no watermark before the first push, got %d", got)
 	}
 	if err := st.SetAuditWatermark(42); err != nil {
 		t.Fatal(err)
 	}
-	if got := st.AuditWatermark(); got != 42 {
+	got, err = st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 42 {
 		t.Fatalf("want the watermark 42, got %d", got)
+	}
+}
+
+// The watermark only moves forward. A rowid below the stored one is
+// ignored: a lower watermark would re-offer rows the brain already has
+// and send the box's history backwards.
+func TestAuditWatermarkNeverMovesBackwards(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rowid := st.AuditUA("web:1.2.3.4", "tapped", "mac", "1.2.3.4", "ok", "curl/8")
+	if err := st.SetAuditWatermark(rowid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAuditWatermark(rowid - 1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != rowid {
+		t.Fatalf("want the watermark to stay at %d, got %d", rowid, got)
+	}
+}
+
+// The trail was reset and its rowids started over: the stored watermark
+// points past every row. The repair puts the watermark back at the
+// start of the trail, so the push continues instead of going silent.
+func TestRepairAuditWatermark(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetAuditWatermark(5000); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairAuditWatermark(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.AuditWatermark()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Fatalf("want the watermark repaired to the start of the trail, got %d", got)
 	}
 }
 

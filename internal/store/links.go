@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 )
@@ -206,19 +207,52 @@ func (s *Store) RecentAuditSince(rowid int64) ([]AuditRow, error) {
 
 // AuditWatermark returns the rowid of the last audit row the box
 // reported to the brain, 0 when it never reported one.
-func (s *Store) AuditWatermark() int64 {
+//
+// The read can fail, and a failure is not "nothing reported yet": the
+// caller must not read it as 0, or it re-offers rows the brain already
+// has and sends the watermark backwards.
+func (s *Store) AuditWatermark() (int64, error) {
 	var v int64
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v); err != nil {
-		return 0
+	err := s.db.QueryRow(`SELECT v FROM meta WHERE k='audit_watermark'`).Scan(&v)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
 	}
-	return v
+	return v, nil
 }
 
-// SetAuditWatermark records the rowid of the last audit row the brain
-// has. The sweep writes it only after a successful push: a failed push
-// leaves the watermark where it was, so the next sweep offers the same
-// rows again and no row is lost.
+// LastAuditRowID returns the rowid of the newest row in the audit
+// trail, 0 when the trail is empty.
+//
+// A watermark past it is stale: the trail was reset and its rowids
+// started over, so the watermark points past every row that follows.
+func (s *Store) LastAuditRowID() (int64, error) {
+	var v int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM audit`).Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// SetAuditWatermark moves the watermark forward to the given rowid: the
+// rowid of the last audit row the brain has.
+//
+// The watermark never moves backwards: a rowid below the stored one is
+// ignored. A lower one would re-offer rows the brain already has.
+//
+// The sweep writes it only after a successful push: a failed push leaves
+// the watermark where it was, so the next sweep offers the same rows
+// again and no row is lost.
 func (s *Store) SetAuditWatermark(rowid int64) error {
-	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, rowid)
+	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',?) ON CONFLICT(k) DO UPDATE SET v=MAX(v,excluded.v)`, rowid)
+	return err
+}
+
+// RepairAuditWatermark puts the watermark back to the start of the
+// trail. The trail was reset — its rowids started over — so the stored
+// watermark points past every row that follows and the push would be
+// silent for good. The trail's rows are offered again and the brain's
+// dedup collapses the ones it already has.
+func (s *Store) RepairAuditWatermark() error {
+	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('audit_watermark',0) ON CONFLICT(k) DO UPDATE SET v=0`)
 	return err
 }

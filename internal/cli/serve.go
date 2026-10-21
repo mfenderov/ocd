@@ -155,6 +155,34 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 	}
 }
 
+// auditPushFrom returns the rowid the audit push continues after.
+//
+// The watermark is the rowid of the last audit row the brain has. A
+// watermark past the trail's last row is stale: the trail was reset and
+// its rowids started over, so the watermark points past every row that
+// follows and the push would be silent for good. The watermark is
+// repaired then — it goes back to the start of the trail — and the
+// trail's rows are offered again. The brain's dedup collapses the rows
+// it already has.
+func auditPushFrom(w io.Writer, st *store.Store) (int64, error) {
+	watermark, err := st.AuditWatermark()
+	if err != nil {
+		return 0, err
+	}
+	last, err := st.LastAuditRowID()
+	if err != nil {
+		return 0, err
+	}
+	if watermark <= last {
+		return watermark, nil
+	}
+	_, _ = fmt.Fprintln(w, "audit trail was reset: the watermark is repaired")
+	if err := st.RepairAuditWatermark(); err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
+
 // sweepAuditRows pushes the audit rows the brain has not seen yet: the
 // box's own record of what happened. The watermark says how far the box
 // got, and it moves only after a successful push: a failed push leaves it
@@ -164,7 +192,15 @@ func sweepDeadLinks(ctx context.Context, w io.Writer, st *store.Store, cfg boxag
 // The push is best effort, like the dead-link push: a brain outage is
 // logged, never fatal.
 func sweepAuditRows(ctx context.Context, w io.Writer, st *store.Store, cfg boxagent.BrainConfig, client *http.Client) {
-	rows, err := st.RecentAuditSince(st.AuditWatermark())
+	watermark, err := auditPushFrom(w, st)
+	if err != nil {
+		// The box does not know where it left off. Pushing anyway would
+		// re-offer rows the brain already has and move the watermark
+		// backwards, so this sweep skips and the next one tries again.
+		_, _ = fmt.Fprintln(w, "audit push skipped:", err)
+		return
+	}
+	rows, err := st.RecentAuditSince(watermark)
 	if err != nil {
 		_, _ = fmt.Fprintln(w, "audit rows read failed:", err)
 		return
