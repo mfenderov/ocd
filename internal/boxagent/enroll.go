@@ -79,15 +79,49 @@ func enrollURL(base string) string {
 // in the body: first contact has no bearer credentials yet. Any non-200
 // is an error, no local retry.
 func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (EnrollOutcome, error) {
+	if err := checkEnrollInput(id, hostname, enrollToken); err != nil {
+		return EnrollOutcome{}, err
+	}
+	ctx, cancel := enrollContext(ctx)
+	defer cancel()
+	req, err := newEnrollRequest(ctx, workerURL, id, hostname, enrollToken, adminToken, opts)
+	if err != nil {
+		return EnrollOutcome{}, err
+	}
+	resp, err := withTimeout(client).Do(req)
+	if err != nil {
+		return EnrollOutcome{}, fmt.Errorf("boxagent: post enroll: %w", err)
+	}
+	defer resp.Body.Close()
+	return readEnrollOutcome(resp)
+}
+
+// checkEnrollInput refuses an enrolment without the identity it needs:
+// the brain binds the box to what the request carries.
+func checkEnrollInput(id, hostname, enrollToken string) error {
 	if strings.TrimSpace(id) == "" {
-		return EnrollOutcome{}, errors.New("boxagent: box id is empty; refusing to enroll without an id")
+		return errors.New("boxagent: box id is empty; refusing to enroll without an id")
 	}
 	if strings.TrimSpace(hostname) == "" {
-		return EnrollOutcome{}, errors.New("boxagent: hostname is empty; refusing to enroll without a hostname")
+		return errors.New("boxagent: hostname is empty; refusing to enroll without a hostname")
 	}
 	if enrollToken == "" {
-		return EnrollOutcome{}, errors.New("boxagent: enroll token is empty; refusing to enroll without a token")
+		return errors.New("boxagent: enroll token is empty; refusing to enroll without a token")
 	}
+	return nil
+}
+
+// enrollContext bounds the enrolment: a request without a deadline of
+// its own gets the enrolment timeout.
+func enrollContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, enrollTimeout)
+}
+
+// newEnrollRequest is the request the enrolment sends.
+func newEnrollRequest(ctx context.Context, workerURL, id, hostname, enrollToken, adminToken string, opts EnrollOptions) (*http.Request, error) {
 	payload, err := json.Marshal(enrollRequest{
 		ID:          id,
 		Hostname:    hostname,
@@ -97,27 +131,28 @@ func EnrollBox(ctx context.Context, client *http.Client, workerURL, id, hostname
 		Quiet:       opts.Quiet,
 	})
 	if err != nil {
-		return EnrollOutcome{}, fmt.Errorf("boxagent: encode enroll: %w", err)
+		return nil, fmt.Errorf("boxagent: encode enroll: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, enrollURL(workerURL), bytes.NewReader(payload))
 	if err != nil {
-		return EnrollOutcome{}, fmt.Errorf("boxagent: build enroll request: %w", err)
+		return nil, fmt.Errorf("boxagent: build enroll request: %w", err)
 	}
+	setEnrollHeaders(req, opts)
+	return req, nil
+}
+
+// setEnrollHeaders says what the request is: a JSON body, and the
+// bearer when the caller has one.
+func setEnrollHeaders(req *http.Request, opts EnrollOptions) {
 	req.Header.Set("Content-Type", "application/json")
 	if opts.Bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+opts.Bearer)
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, enrollTimeout)
-		defer cancel()
-		req = req.WithContext(ctx)
-	}
-	resp, err := withTimeout(client).Do(req)
-	if err != nil {
-		return EnrollOutcome{}, fmt.Errorf("boxagent: post enroll: %w", err)
-	}
-	defer resp.Body.Close()
+}
+
+// readEnrollOutcome is what the worker answered: the outcome, or the
+// error it replied with.
+func readEnrollOutcome(resp *http.Response) (EnrollOutcome, error) {
 	if resp.StatusCode != http.StatusOK {
 		return EnrollOutcome{}, fmt.Errorf("boxagent: enroll worker replied %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
