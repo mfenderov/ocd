@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.23.2 - 2026-10-22
+#### Bug Fixes
+- (**ci**) the CRAP gate scans the Go sources, not the repo - (02c10f7) - mfenderov
+
+- - -
+
 ## v0.23.1 - 2026-10-22
 #### Bug Fixes
 - (**worker**) the architecture gate derives the adapters instead of naming them - (04c2a47) - mfenderov
