@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.23.1 - 2026-10-22
+#### Bug Fixes
+- (**worker**) the architecture gate derives the adapters instead of naming them - (04c2a47) - mfenderov
+#### Documentation
+- the components, and the arrows between them - (697918a) - mfenderov
+#### Refactoring
+- (**worker**) the domain names its ports, and the graph has no cycles - (9481b08) - mfenderov
+- (**worker**) the box channel is an adapter, and the domain asks in its own words - (7ec1c71) - mfenderov
+- (**worker**) the import graph has no cycles - (3c0d633) - mfenderov
+- (**worker**) the domain names its ports, the adapters keep them - (effe246) - mfenderov
+
+- - -
+
 ## v0.23.0 - 2026-10-21
 #### Features
 - (**worker**) the brain is linted, and the linter is a gate - (ee87c08) - mfenderov
