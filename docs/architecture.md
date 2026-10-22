@@ -492,11 +492,14 @@ repositories, no use-case objects. Three rules instead:
    never a re-export that leaves the cycle in place.
 
 `worker/test/architecture.test.ts` enforces two of the three: no domain
-module may import an outbound adapter (`telegram.ts`, `dns.ts`,
-`boxapi.ts`), and the import graph must have no cycles. It also keeps the
-rule above it: no module but the transport may import the Durable Object.
-The first rule is a judgement — whether a port is named in the domain's
-words — and the review is what holds it.
+module may import an outbound adapter, and the import graph must have no
+cycles. The adapters are derived from the tree, never written down: a
+module that performs an outbound call is an adapter, whatever it is
+called and wherever it lives, so a fifth adapter needs no edit to the
+test — the next run of the rule sees it. It also keeps the rule above
+it: no module but the transport may import the Durable Object. The first
+rule is a judgement — whether a port is named in the domain's words —
+and the review is what holds it.
 
 The Go half holds the same line, and the linter keeps it: `cmd/ocd` →
 `internal/cli` → the use cases → `internal/store` and `internal/boxagent`.
