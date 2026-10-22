@@ -1,6 +1,6 @@
 import { parseCallback } from "./botbuttons";
 import { hashToken, tokenMatches } from "./heartbeat";
-import { createTelegramClient, type TelegramClient } from "./telegram";
+import type { TelegramClient } from "./ports";
 
 // The header Telegram sends the secret token in. It is the only
 // credential the webhook carries: the route path holds none.
@@ -247,9 +247,12 @@ export function parseOwnerChatId(raw?: string): number | undefined {
 // the log. A brain without a token, an owner chat or a webhook secret
 // cannot work, and the route says so out loud instead of dropping
 // every update silently.
-export function resolveBrainConfig(env: BotEnv): BotConfig | undefined {
+//
+// The client rides in: the wiring (state.ts) builds it — this is the
+// one place that knows the Bot API's shape — and hands it over.
+export function resolveBrainConfig(env: BotEnv, telegram: TelegramClient | undefined): BotConfig | undefined {
   const ownerChatId = parseOwnerChatId(env.ownerChatId);
-  if (!env.botToken) {
+  if (!env.botToken || !telegram) {
     console.error("bot: TELEGRAM_BOT_TOKEN not configured");
     return undefined;
   }
@@ -262,7 +265,7 @@ export function resolveBrainConfig(env: BotEnv): BotConfig | undefined {
     return undefined;
   }
   return {
-    telegram: createTelegramClient(env.botToken),
+    telegram,
     ownerChatId,
     secret: env.webhookSecret,
   };

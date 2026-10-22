@@ -1,7 +1,8 @@
 // The brain's DNS writer: it lists the zone, creates the two CNAMEs a box
 // needs, and moves them when the box's tunnel changes.
 import { describe, expect, it } from "vitest";
-import { ensureBoxDns, type BoxDns } from "../src/dns";
+import { ensureBoxDns } from "../src/dns";
+import type { BoxDns } from "../src/ports";
 import { requestedUrl } from "./helpers";
 
 const ZONE = "zone-1";

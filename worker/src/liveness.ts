@@ -1,5 +1,6 @@
-import { escapeHtml, type TelegramClient } from "./telegram";
+import { escapeHtml } from "./html";
 import type { BoxPublic } from "./boxes";
+import type { TelegramClient } from "./ports";
 
 // The liveness sweep: the brain notices a box that stopped talking.
 //

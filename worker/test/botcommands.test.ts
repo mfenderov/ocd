@@ -4,7 +4,7 @@ import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "..
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
-import type { TelegramClient } from "../src/telegram";
+import type { TelegramClient } from "../src/ports";
 import { inState } from "./helpers";
 
 // One row of the fleet's history, the shape the brain's audit answers with.
@@ -56,10 +56,6 @@ class RecordingTelegram implements TelegramClient {
 
   answerCallbackQuery(callbackId: string): Promise<void> {
     this.answered.push(callbackId);
-    return Promise.resolve();
-  }
-
-  setWebhook(): Promise<void> {
     return Promise.resolve();
   }
 }

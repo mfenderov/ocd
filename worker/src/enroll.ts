@@ -1,7 +1,7 @@
-import { ensureBoxDns } from "./dns";
 import { optionalTextField, textField } from "./fields";
 import { hashToken, tokenMatches } from "./heartbeat";
-import { createTelegramClient, escapeHtml, TelegramError } from "./telegram";
+import { escapeHtml } from "./html";
+import type { DnsOutcome, DnsWriter, NotifyFn } from "./ports";
 import type { BoxRow, DenialRow } from "./boxes";
 
 // Enrollment request body (box JSON contract, snake_case): a box that wants
@@ -59,29 +59,11 @@ export interface EnrollConfig {
   // trusted marks this request as owner-issued (authenticated with the
   // "enroll" scope). Set by the DO, never taken from the request body.
   trusted?: boolean;
-  // dns is the brain's Cloudflare credential for the zone it owns. The
-  // enrolment writes the box's two CNAMEs with it, right after the box
-  // row is committed. Unset = the brain cannot write DNS, and every
-  // enrolment says so instead of pretending it did.
-  dns?: DnsConfig;
+  // dns writes the box's two CNAMEs, right after the box row is
+  // committed. Unset = the brain cannot write DNS, and every enrolment
+  // says so instead of pretending it did.
+  dns?: DnsWriter;
 }
-
-// The brain's Cloudflare credential: the zone it owns and the token that
-// writes it. The fetcher rides in so a test can answer instead of
-// Cloudflare — the suite never talks to the network.
-export interface DnsConfig {
-  zoneId: string;
-  token: string;
-  fetcher?: typeof fetch;
-  // deadlineMs bounds one DNS step (the listing and the writes share
-  // it). Unset = DNS_DEADLINE_MS.
-  deadlineMs?: number;
-}
-
-// The DNS call gets 5s, like the audit's outbound call. The box waits
-// 15s for its enrolment answer, so a slow API must fail long before
-// that — and the owner's approve tap must not hang either.
-const DNS_DEADLINE_MS = 5_000;
 
 export interface EnrollStore {
   getBox(id: string): BoxRow | undefined;
@@ -92,10 +74,6 @@ export interface EnrollStore {
   getDenial(id: string): DenialRow | undefined;
   putDenial(row: DenialRow): void;
 }
-
-// Owner ping sink. Contract: never throws, never logs secrets —
-// sendTelegramMessage below already swallows transport/API failures.
-export type NotifyFn = (text: string) => Promise<void>;
 
 // Enrollment intake only accepts real fleet hostnames: multi-label DNS names
 // under one of the allowed suffixes (default *.buyallmemes.com). IP
@@ -451,52 +429,6 @@ export function dnsFailureText(boxId: string, dns: string): string {
     `🌐 <b>DNS needs you</b> · <code>${escapeHtml(boxId)}</code> enrolled, ` +
     `but the brain could not write its DNS records: ${escapeHtml(reason)}`
   );
-}
-
-// Owner ping, sent through the Telegram client — the one place that knows
-// the Bot API's shape. Bot token + owner chat id come from Worker env only
-// (see telegramNotifier). The contract is unchanged: the ping never throws,
-// a failure is reported as false, and the log carries the reason alone —
-// never the URL (it embeds the token), the body, or the chat id.
-export async function sendTelegramMessage(
-  botToken: string,
-  chatId: string,
-  text: string,
-  fetcher: typeof fetch = fetch,
-): Promise<boolean> {
-  // The env carries the chat id as a string, the client takes a number —
-  // the Go bot parses its owner id the same way.
-  const chat = Number(chatId);
-  if (!Number.isInteger(chat)) {
-    console.error("enroll: telegram send failed (bad chat id)");
-    return false;
-  }
-  const client = createTelegramClient(botToken, fetcher);
-  try {
-    await client.sendMessage(chat, text);
-    return true;
-  } catch (err) {
-    const reason = err instanceof TelegramError ? err.reason : "unknown error";
-    console.error(`enroll: telegram send failed (${reason})`);
-    return false;
-  }
-}
-
-export function telegramNotifier(
-  botToken: string | undefined,
-  chatId: string | undefined,
-  fetcher: typeof fetch = fetch,
-): NotifyFn {
-  if (!botToken || !chatId) {
-    // The notifier still answers with a promise: the caller awaits it.
-    return () => {
-      console.error("enroll: telegram not configured; ping dropped");
-      return Promise.resolve();
-    };
-  }
-  return async (text: string) => {
-    await sendTelegramMessage(botToken, chatId, text, fetcher);
-  };
 }
 
 function defaultNowSec(): number {
@@ -902,17 +834,14 @@ async function dnsStatus(config: EnrollConfig, store: EnrollStore, boxId: string
 
 // The box's two CNAMEs, written with the brain's credential.
 async function writeRecords(
-  dns: DnsConfig,
+  writer: DnsWriter,
   hosts: { tapHost: string; uiHost: string; tunnelId: string },
-): Promise<{ ok: boolean; reason?: string }> {
-  // The step gets a deadline: one signal for the listing and the
-  // writes, so a hung API is a reported failure instead of a hung
-  // request.
-  const fetcher = withDeadline(dns.fetcher ?? fetch, dns.deadlineMs ?? DNS_DEADLINE_MS);
-  return ensureBoxDns(
-    { fetcher, zoneId: dns.zoneId, token: dns.token },
-    { tapHost: hosts.tapHost, uiHost: hosts.uiHost, target: `${hosts.tunnelId}.cfargotunnel.com` },
-  );
+): Promise<DnsOutcome> {
+  return writer({
+    tapHost: hosts.tapHost,
+    uiHost: hosts.uiHost,
+    target: `${hosts.tunnelId}.cfargotunnel.com`,
+  });
 }
 
 // The box's UI host: the tap host's domain with the box's own name in
@@ -925,24 +854,6 @@ async function writeRecords(
 function uiHostFor(boxId: string, tapHost: string): string {
   const dot = tapHost.indexOf(".");
   return dot > 0 ? `oc-${boxId}${tapHost.slice(dot)}` : "";
-}
-
-// The fetcher with a deadline. The seam stays where it was: dns.ts
-// takes a fetcher, and the caller decides how long it may take. One
-// signal for the whole step (the listing and the writes share it), and
-// an aborted call says so in the operator's words.
-function withDeadline(fetcher: typeof fetch, deadlineMs: number): typeof fetch {
-  const signal = AbortSignal.timeout(deadlineMs);
-  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    try {
-      return await fetcher(input, { ...init, signal });
-    } catch (err) {
-      if (signal.aborted) {
-        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`, { cause: err });
-      }
-      throw err;
-    }
-  };
 }
 
 async function noopNotify(): Promise<void> {}

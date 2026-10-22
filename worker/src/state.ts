@@ -3,17 +3,15 @@ import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
-import { BOX_API, relayFailureStatus, relayToBox } from "./boxapi";
+import { boxRelayer, relayFailureStatus } from "./boxapi";
+import { boxDnsWriter } from "./dns";
 import {
   handleEnrollApprove,
   handleEnrollDeny,
   handleEnrollRequest,
   mismatchAlertText,
   parseHostSuffixes,
-  telegramNotifier,
-  type DnsConfig,
   type EnrollConfig,
-  type NotifyFn,
   type PendingRow,
 } from "./enroll";
 import {
@@ -25,6 +23,7 @@ import {
 import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
 import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
 import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
+import { BOX_API, type BoxRelayer, type DnsWriter, type NotifyFn, type TelegramClient } from "./ports";
 import {
   handleRevoke,
   handleRevokeAll,
@@ -33,7 +32,7 @@ import {
   type RevokeResult,
 } from "./revoke";
 import { exact, findRoute, optionalId, optionalSingleId, type Route } from "./routes";
-import { createTelegramClient, type TelegramClient } from "./telegram";
+import { createTelegramClient, telegramNotifier } from "./telegram";
 import {
   handleDeleteToken,
   handleMintToken,
@@ -255,6 +254,9 @@ export class FleetState implements DurableObject {
   // hands in its own, so the sweep runs without Telegram and without the
   // network.
   alarmDeps: AlarmDeps;
+  // The relay the brain asks a box through: the box port, spoken by the
+  // adapter. The wiring builds it and hands it to the brain.
+  readonly relay: BoxRelayer;
   // The routes the DO answers: the table the router looks up. Public so
   // the tests can read the scope each route needs off it.
   readonly routes: DoRoute[];
@@ -275,6 +277,7 @@ export class FleetState implements DurableObject {
     this.primaryBox = env?.PRIMARY_BOX?.trim() || DEFAULT_PRIMARY_BOX;
     this.zoneId = env?.CLOUDFLARE_ZONE_ID;
     this.dnsToken = env?.CLOUDFLARE_DNS_TOKEN;
+    this.relay = boxRelayer(this, { sealKey: this.sealKey });
     this.alarmDeps = {
       telegram: this.telegramClient(),
       ownerChatId: parseOwnerChatId(this.ownerChatId),
@@ -285,7 +288,7 @@ export class FleetState implements DurableObject {
   }
 
   private notifier(): NotifyFn {
-    return telegramNotifier(this.botToken, this.ownerChatId);
+    return telegramNotifier(this.telegramClient(), this.ownerChatId);
   }
 
   // The brain's Telegram client: the brain owns every message, and the
@@ -393,7 +396,7 @@ export class FleetState implements DurableObject {
   // text. The brain does not parse it — the command layer prints what
   // the box said.
   private async boxStatus(boxId: string): Promise<string> {
-    const relay = await relayToBox(this, boxId, BOX_API.status, { sealKey: this.sealKey });
+    const relay = await this.relay(boxId, BOX_API.status);
     if (!relay.answered) {
       throw new Error(
         relay.reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${relay.reason})`,
@@ -414,7 +417,7 @@ export class FleetState implements DurableObject {
   // throws here, so the sweep leaves the box unjudged instead of
   // reporting a box the brain never asked.
   private async probePresence(boxId: string): Promise<boolean> {
-    const relay = await relayToBox(this, boxId, BOX_API.presence, { sealKey: this.sealKey });
+    const relay = await this.relay(boxId, BOX_API.presence);
     if (relay.answered) {
       return true;
     }
@@ -427,7 +430,7 @@ export class FleetState implements DurableObject {
   // The relay's answer: the box's own body, or the reason the box was
   // not reached.
   private async relayRoute(boxId: string, path: string): Promise<Response> {
-    const relay = await relayToBox(this, boxId, path, { sealKey: this.sealKey });
+    const relay = await this.relay(boxId, path);
     if (!relay.answered) {
       return Response.json({ error: relay.reason }, { status: relayFailureStatus(relay.reason) });
     }
@@ -452,17 +455,17 @@ export class FleetState implements DurableObject {
       baseUrl: this.baseUrl,
       sealKey: this.sealKey,
       hostSuffixes: parseHostSuffixes(this.hostSuffixes),
-      dns: this.dnsConfig(),
+      dns: this.dnsWriter(),
     };
   }
 
-  // The brain's DNS credential, or nothing when the brain has none: an
+  // The brain's DNS writer, or nothing when the brain has none: an
   // enrolment then reports the DNS it could not write.
-  private dnsConfig(): DnsConfig | undefined {
+  private dnsWriter(): DnsWriter | undefined {
     if (!this.zoneId || !this.dnsToken) {
       return undefined;
     }
-    return { zoneId: this.zoneId, token: this.dnsToken };
+    return boxDnsWriter({ zoneId: this.zoneId, token: this.dnsToken });
   }
 
   private accessConfig(): AccessConfig {
@@ -1020,11 +1023,14 @@ export class FleetState implements DurableObject {
   // that is not configured fails loud (500) instead of dropping every
   // update silently.
   private async telegramRoute(request: Request): Promise<Response> {
-    const brain = resolveBrainConfig({
-      botToken: this.botToken,
-      ownerChatId: this.ownerChatId,
-      webhookSecret: this.webhookSecret,
-    });
+    const brain = resolveBrainConfig(
+      {
+        botToken: this.botToken,
+        ownerChatId: this.ownerChatId,
+        webhookSecret: this.webhookSecret,
+      },
+      this.telegramClient(),
+    );
     if (!brain) {
       return Response.json({ error: "misconfigured" }, { status: 500 });
     }

@@ -1,7 +1,7 @@
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { BoxRow } from "./boxes";
-import { BOX_API } from "./boxapi";
+import { BOX_API } from "./ports";
 
 // Mint relay: console POST /api/backends/:id/link → box POST /admin/mint.
 // One idempotency key per console request: the console's own

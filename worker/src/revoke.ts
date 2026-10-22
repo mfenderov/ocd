@@ -2,7 +2,7 @@ import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { TombstoneRow } from "./mint";
 import type { BoxRow } from "./boxes";
-import { BOX_API } from "./boxapi";
+import { BOX_API } from "./ports";
 
 // Revoke relay: console POST /api/backends/:id/revoke (or POST
 // /api/revoke-all) → box POST /admin/revoke with {"confirm": true}.

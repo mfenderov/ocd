@@ -2,7 +2,7 @@ import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import { isTainted, type TombstoneRow } from "./mint";
 import type { BoxRow } from "./boxes";
-import { BOX_API } from "./boxapi";
+import { BOX_API } from "./ports";
 
 // Audit merge: console GET /api/audit?box=&n= fans out in parallel to each
 // enrolled box's GET /admin/audit?n= over pinned hostnames only. Per-box

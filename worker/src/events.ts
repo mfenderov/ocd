@@ -1,5 +1,6 @@
 import { extractBearer } from "./heartbeat";
-import { escapeHtml, type TelegramClient } from "./telegram";
+import { escapeHtml } from "./html";
+import type { TelegramClient } from "./ports";
 
 // The box event ingest: POST /api/events → the brain's links and history.
 //

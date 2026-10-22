@@ -10,7 +10,8 @@ import {
 } from "./botbuttons";
 import type { RevokeResult } from "./revoke";
 import type { BoxPublic } from "./boxes";
-import { escapeHtml, type TelegramClient } from "./telegram";
+import { escapeHtml } from "./html";
+import type { TelegramClient } from "./ports";
 
 // The brain's command layer: one Telegram command in, one message out.
 //

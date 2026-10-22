@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTelegramClient, escapeHtml } from "../src/telegram";
+import { createTelegramClient } from "../src/telegram";
 
 interface FetchCall {
   url: string;
@@ -186,12 +186,5 @@ describe("telegram client", () => {
     expect(cause.message).not.toContain("SECRET-TOKEN");
     expect(String(cause.stack)).not.toContain("SECRET-TOKEN");
     expect((cause.cause as Error).message).not.toContain("SECRET-TOKEN");
-  });
-
-  it("escapeHtml escapes the characters html parse mode cares about", () => {
-    expect(escapeHtml("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
-    // The double quote too: a value that lands inside an href="…"
-    // attribute must not end that attribute.
-    expect(escapeHtml('a "quoted" url')).toBe("a &quot;quoted&quot; url");
   });
 });

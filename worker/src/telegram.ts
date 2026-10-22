@@ -1,31 +1,35 @@
-// Telegram Bot API client for the brain: the one place that knows the Bot
-// API's HTTP shape. (The enrollment notifier in enroll.ts sends through
-// this client too.) Every call POSTs JSON to
-// https://api.telegram.org/bot<token>/<method> and rejects when the API
-// answers ok:false, so the caller decides what a failed message means:
-// the owner ping sink swallows it, the brain logs it.
+// Telegram Bot API client for the brain: the one place that knows the
+// Bot API's HTTP shape — and the one place the client is built. The
+// notifier that tells the owner something rides on it too.
+//
+// Every call POSTs JSON to https://api.telegram.org/bot<token>/<method>
+// and rejects when the API answers ok:false, so the caller decides what
+// a failed message means: the owner ping sink swallows it, the brain
+// logs it.
 //
 // The token rides in the URL, so it is scrubbed out of everything this
 // module reports: the error's message, its stack, the cause chain and
 // Telegram's own description. A cause that is neither an Error nor a
-// string is passed through as it came in. The errors name the method and,
-// when Telegram answered, its status and its own description.
+// string is passed through as it came in. The errors name the method
+// and, when Telegram answered, its status and its own description.
+import { messageFailureReason, type MessageFailure, type NotifyFn, type TelegramClient } from "./ports";
 
 const API_BASE = "https://api.telegram.org";
 
 // The brain's messages are HTML-parse-mode like the Go bot's — that is
-// why escapeHtml exists. The link previews stay off like the Go bot's
-// link messages: a preview makes Telegram fetch the URL and show it as a
-// card, and the tap links are one-time secrets.
+// why the brain escapes every value it sends (see html.ts). The link
+// previews stay off like the Go bot's link messages: a preview makes
+// Telegram fetch the URL and show it as a card, and the tap links are
+// one-time secrets.
 const RENDER_OPTS = {
   parse_mode: "HTML",
   link_preview_options: { is_disabled: true },
 };
 
-export interface TelegramClient {
-  sendMessage(chatId: number, text: string, opts?: { replyMarkup?: unknown }): Promise<{ message_id: number }>;
-  editMessageText(chatId: number, messageId: number, text: string): Promise<boolean>;
-  answerCallbackQuery(callbackId: string, text?: string): Promise<void>;
+// The client the adapter builds: the port's three operations and the
+// one the brain's front door needs — registering the webhook. The port
+// says nothing about that one: the domain never registers the webhook.
+export interface TelegramApi extends TelegramClient {
   setWebhook(url: string, secret: string): Promise<void>;
 }
 
@@ -39,7 +43,10 @@ interface TelegramEnvelope {
 // "network", "status 429" — so a caller that logs the reason alone never
 // logs the response body. Telegram's own description is in the message,
 // not in the reason.
-export class TelegramError extends Error {
+//
+// The class is the adapter's own: the domain reads the failure through
+// the port (messageFailureReason), never through this class.
+class TelegramError extends Error implements MessageFailure {
   readonly method: string;
   readonly reason: string;
 
@@ -83,19 +90,7 @@ function redactToken(err: unknown, token: string, depth = 0): unknown {
   return err;
 }
 
-// escapeHtml escapes the characters Telegram's HTML parse mode reads as
-// markup: the three the Go bot's esc helper handles, and the double
-// quote — a value that lands inside an href="…" attribute must not end
-// that attribute.
-export function escapeHtml(raw: string): string {
-  return raw
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-export function createTelegramClient(token: string, fetcher: typeof fetch = fetch): TelegramClient {
+export function createTelegramClient(token: string, fetcher: typeof fetch = fetch): TelegramApi {
   // One Bot API call: POST the body, read the envelope, and turn every
   // refusal into a rejected promise.
   async function call<T>(method: string, body: Record<string, unknown>): Promise<T> {
@@ -172,5 +167,58 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
         allowed_updates: ["message", "callback_query"],
       });
     },
+  };
+}
+
+// Owner ping, sent through the Telegram client — the one place that
+// knows the Bot API's shape. The contract is unchanged: the ping never
+// throws, a failure is reported as false, and the log carries the
+// reason alone — never the URL (it embeds the token), the body, or the
+// chat id.
+//
+// The log says "enroll:" because the notifier is the enrolment's ping
+// sink — the same sink the heartbeat's warnings use. The wording is
+// left as it was: a log line's text is not the brain's answer, and
+// changing it would change what the operator greps for.
+export async function sendTelegramMessage(
+  client: TelegramClient,
+  chatId: string,
+  text: string,
+): Promise<boolean> {
+  // The env carries the chat id as a string, the client takes a number —
+  // the Go bot parses its owner id the same way.
+  const chat = Number(chatId);
+  if (!Number.isInteger(chat)) {
+    console.error("enroll: telegram send failed (bad chat id)");
+    return false;
+  }
+  try {
+    await client.sendMessage(chat, text);
+    return true;
+  } catch (err) {
+    console.error(`enroll: telegram send failed (${messageFailureReason(err)})`);
+    return false;
+  }
+}
+
+// The notifier the brain hands to the domain: it tells the owner, and
+// it never throws.
+//
+// A brain without a client has nobody to tell: the ping is dropped and
+// the log says so. The client itself is built by the wiring
+// (state.ts) — this module only speaks it.
+export function telegramNotifier(
+  client: TelegramClient | undefined,
+  chatId: string | undefined,
+): NotifyFn {
+  if (!client || !chatId) {
+    // The notifier still answers with a promise: the caller awaits it.
+    return () => {
+      console.error("enroll: telegram not configured; ping dropped");
+      return Promise.resolve();
+    };
+  }
+  return async (text: string) => {
+    await sendTelegramMessage(client, chatId, text);
   };
 }

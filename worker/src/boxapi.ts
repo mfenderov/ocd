@@ -1,43 +1,20 @@
-// Box API paths the Worker calls on an enrolled box.
+// The box relay: the adapter behind the box port.
 //
-// The prefix avoids "/admin" on purpose: Cloudflare's managed WAF rules
-// challenge any path containing that segment (a WordPress-admin
-// heuristic), and the challenge page answers instead of the box — which
-// broke every worker→box relay. A path the edge does not second-guess
-// keeps the relay working; the endpoints stay bearer-gated either way.
+// The relay takes the sealed admin token, the box's pinned hostname and
+// a short deadline, and says whether the box answered.
 //
-// This module also owns the call itself: the relay takes the sealed
-// admin token, the box's pinned hostname and a short deadline, and says
-// whether the box answered.
+// The endpoints the brain asks for are the protocol it speaks with a
+// box, so they live in the ports module (BOX_API): the domain names
+// them, and this module speaks them.
 import { unsealAdminToken } from "./enroll";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { BoxRow } from "./boxes";
-
-export const BOX_API = {
-  mint: "/_oc/mint",
-  revoke: "/_oc/revoke",
-  audit: "/_oc/audit",
-  presence: "/_oc/presence",
-  status: "/_oc/status",
-} as const;
+import type { BoxRelay, BoxRelayer, RelayFailure } from "./ports";
 
 // Box reads get 3s: a dead box must not hold a request open. The mint
 // relay's 15s is far too long for a presence probe — the owner would
 // wait behind a box that is already gone.
 export const BOX_READ_DEADLINE_MS = 3_000;
-
-// Why a relay never reached the box.
-export type RelayFailure =
-  | "unknown_box"
-  | "misconfigured"
-  | "box_timeout"
-  | "box_unreachable";
-
-// The outcome of one relay: the box answered (with a status and a body),
-// or it did not (and why not).
-export type BoxRelay =
-  | { answered: true; status: number; body: string; contentType: string }
-  | { answered: false; reason: RelayFailure };
 
 export interface BoxRelayStore {
   getBox(id: string): BoxRow | undefined;
@@ -114,6 +91,12 @@ async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<
     return null;
   }
   return adminToken;
+}
+
+// The relay the brain asks a box through: the box port, spoken by this
+// adapter. The wiring (state.ts) builds it and hands it to the brain.
+export function boxRelayer(store: BoxRelayStore, deps: BoxRelayDeps = {}): BoxRelayer {
+  return (boxId: string, path: string) => relayToBox(store, boxId, path, deps);
 }
 
 // The status each failed relay reason answers with.

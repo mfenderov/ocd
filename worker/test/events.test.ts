@@ -5,7 +5,7 @@ import { handleEvents, type LinkRow } from "../src/events";
 import { hashToken } from "../src/heartbeat";
 import app, { type Env as EdgeEnv } from "../src/index";
 import type { FleetState } from "../src/state";
-import type { TelegramClient } from "../src/telegram";
+import type { TelegramClient } from "../src/ports";
 import { inState } from "./helpers";
 
 // The box's heartbeat secret: the same secret the heartbeat uses, and the
@@ -43,10 +43,6 @@ class RecordingTelegram implements TelegramClient {
   }
 
   answerCallbackQuery(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  setWebhook(): Promise<void> {
     return Promise.resolve();
   }
 }

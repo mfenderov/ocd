@@ -2,13 +2,13 @@ import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import { boxState } from "../src/botbuttons";
-import { BOX_API, BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
+import { BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
 import { sealAdminToken } from "../src/enroll";
 import { sweepLiveness, type LivenessStore } from "../src/liveness";
 import type { FleetState } from "../src/state";
 import type { LinkRow } from "../src/events";
 import { handleMintToken } from "../src/tokens";
-import type { TelegramClient } from "../src/telegram";
+import { BOX_API, type TelegramClient } from "../src/ports";
 import { inState, requestedUrl } from "./helpers";
 
 // The brain's clock in the tests: a fixed second, so "200 seconds ago"
@@ -71,10 +71,6 @@ class RecordingTelegram implements TelegramClient {
   }
 
   answerCallbackQuery(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  setWebhook(): Promise<void> {
     return Promise.resolve();
   }
 }

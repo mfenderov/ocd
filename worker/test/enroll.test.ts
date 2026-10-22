@@ -19,15 +19,16 @@ import {
   requestEnrollment,
   sealAdminToken,
   rotationPingText,
-  sendTelegramMessage,
   unsealAdminToken,
   verifyCapability,
   type CapabilityBinding,
   type EnrollConfig,
   type EnrollStore,
-  type NotifyFn,
   type PendingRow,
 } from "../src/enroll";
+import { boxDnsWriter } from "../src/dns";
+import { createTelegramClient, sendTelegramMessage } from "../src/telegram";
+import type { NotifyFn } from "../src/ports";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
 import { requestedUrl } from "./helpers";
@@ -467,7 +468,7 @@ describe("telegram ping (Bot API, through the client)", () => {
       );
     }) as typeof fetch;
     // The env carries the chat id as a string; the client sends a number.
-    const ok = await sendTelegramMessage("bot-secret-1", "42", "hello", fetcher);
+    const ok = await sendTelegramMessage(createTelegramClient("bot-secret-1", fetcher), "42", "hello");
     expect(ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.telegram.org/botbot-secret-1/sendMessage");
@@ -483,9 +484,9 @@ describe("telegram ping (Bot API, through the client)", () => {
   it("never throws and never logs secrets on transport or API failure", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const apiFail: typeof fetch = () => Promise.resolve(new Response("nope", { status: 429 }));
-    await expect(sendTelegramMessage("bot-secret-9", "9", "t", apiFail)).resolves.toBe(false);
+    await expect(sendTelegramMessage(createTelegramClient("bot-secret-9", apiFail), "9", "t")).resolves.toBe(false);
     const netFail: typeof fetch = () => Promise.reject(new Error("down"));
-    await expect(sendTelegramMessage("bot-secret-9", "9", "t", netFail)).resolves.toBe(false);
+    await expect(sendTelegramMessage(createTelegramClient("bot-secret-9", netFail), "9", "t")).resolves.toBe(false);
     const logged = error.mock.calls.map((args) => args.map(String).join(" ")).join("\n");
     expect(logged).not.toContain("bot-secret-9");
     expect(logged).not.toContain("api.telegram.org");
@@ -501,7 +502,7 @@ describe("telegram ping (Bot API, through the client)", () => {
       );
     }) as typeof fetch;
 
-    await expect(sendTelegramMessage("bot-secret-1", "not-a-chat-id", "hello", fetcher)).resolves.toBe(false);
+    await expect(sendTelegramMessage(createTelegramClient("bot-secret-1", fetcher), "not-a-chat-id", "hello")).resolves.toBe(false);
     expect(calls).toHaveLength(0);
   });
 });
@@ -1439,7 +1440,7 @@ describe("the enrolment writes the box's DNS", () => {
       sealKey: SEAL_KEY,
       trusted: true,
       baseUrl: "https://fleet.test",
-      dns: { zoneId: ZONE, token: TOKEN, fetcher, deadlineMs },
+      dns: boxDnsWriter({ zoneId: ZONE, token: TOKEN, fetcher, deadlineMs }),
     };
   }
 
@@ -1734,7 +1735,7 @@ describe("the DNS failure reaches the owner", () => {
     sealKey: SEAL_KEY,
     trusted: true,
     baseUrl: "https://fleet.test",
-    dns: { zoneId: ZONE, token: TOKEN, fetcher },
+    dns: boxDnsWriter({ zoneId: ZONE, token: TOKEN, fetcher }),
   });
 
   it("a failed DNS tells the owner once: the box is enrolled, the DNS needs them", async () => {

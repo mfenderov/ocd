@@ -1,4 +1,4 @@
-// The brain's DNS writer.
+// The brain's DNS writer: the adapter behind the DNS port.
 //
 // After a box enrols, the brain owns the two CNAMEs that send the box's
 // tap host and its UI host to the box's tunnel:
@@ -27,7 +27,26 @@
 //     names the status, the API's error code and what that code means
 //     here, never the credential.
 // The caller must catch: a throw is a DNS failure, never a failed enrol.
+import type { BoxDns, DnsOutcome, DnsWriter } from "./ports";
+
 const CF_API = "https://api.cloudflare.com/client/v4";
+
+// The DNS call gets 5s, like the audit's outbound call. The box waits
+// 15s for its enrolment answer, so a slow API must fail long before
+// that — and the owner's approve tap must not hang either.
+const DNS_DEADLINE_MS = 5_000;
+
+// What the writer needs: the zone the brain owns and the credential
+// that writes it. The fetcher rides in so a test can answer instead of
+// Cloudflare — the suite never talks to the network.
+export interface DnsWriterDeps {
+  zoneId: string;
+  token: string;
+  fetcher?: typeof fetch;
+  // deadlineMs bounds one DNS step (the listing and the writes share
+  // it). Unset = DNS_DEADLINE_MS.
+  deadlineMs?: number;
+}
 
 // What Cloudflare's error codes mean, in the words the operator needs. A
 // code alone is a lookup, and the API's own free text is not echoed: it
@@ -38,19 +57,6 @@ const API_ERROR_MEANINGS: Record<number, string | undefined> = {
   9109: "this credential may not write the zone's DNS",
   10000: "the credential was refused",
 };
-
-// The two hostnames the brain owns for one box, and where they point.
-export interface BoxDns {
-  tapHost: string;    // oc-tap-<box>.buyallmemes.com
-  uiHost: string;     // oc-<box>.buyallmemes.com
-  target: string;     // <tunnel-id>.cfargotunnel.com
-}
-
-// What the ensure did. The names are the record names, so the caller can
-// say which of the two moved.
-export type DnsOutcome =
-  | { ok: true; created: string[]; updated: string[] }
-  | { ok: false; reason: string };
 
 // One DNS record as the API reports it. Only the fields the writer needs.
 interface DnsRecord {
@@ -212,6 +218,37 @@ async function listRecords(
       return records;
     }
   }
+}
+
+// The writer the domain gets: the DNS port, spoken by this adapter.
+//
+// The wiring (state.ts) builds it from the Worker's credential and hands
+// it to the enrolment. Each call gets its own deadline: the listing and
+// the writes of one write share a signal, and the next write gets a
+// fresh one.
+export function boxDnsWriter(deps: DnsWriterDeps): DnsWriter {
+  return async (box: BoxDns): Promise<DnsOutcome> => {
+    const fetcher = withDeadline(deps.fetcher ?? fetch, deps.deadlineMs ?? DNS_DEADLINE_MS);
+    return ensureBoxDns({ fetcher, zoneId: deps.zoneId, token: deps.token }, box);
+  };
+}
+
+// The fetcher with a deadline. The seam stays where it was: the writer
+// takes a fetcher, and the caller decides how long it may take. One
+// signal for the whole step (the listing and the writes share it), and
+// an aborted call says so in the operator's words.
+function withDeadline(fetcher: typeof fetch, deadlineMs: number): typeof fetch {
+  const signal = AbortSignal.timeout(deadlineMs);
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    try {
+      return await fetcher(input, { ...init, signal });
+    } catch (err) {
+      if (signal.aborted) {
+        throw new Error(`the cloudflare api did not answer within ${deadlineMs}ms`, { cause: err });
+      }
+      throw err;
+    }
+  };
 }
 
 // One API call. A non-2xx is an error; the envelope's own success flag is
