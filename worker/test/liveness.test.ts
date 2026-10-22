@@ -2,13 +2,13 @@ import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import { boxState } from "../src/botbuttons";
-import { BOX_API, BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
-import { sealAdminToken } from "../src/enroll";
+import { boxAdapter, BOX_READ_DEADLINE_MS } from "../src/boxapi";
+import { sealAdminToken, unsealAdminToken } from "../src/sealedtoken";
 import { sweepLiveness, type LivenessStore } from "../src/liveness";
 import type { FleetState } from "../src/state";
 import type { LinkRow } from "../src/events";
 import { handleMintToken } from "../src/tokens";
-import type { TelegramClient } from "../src/telegram";
+import type { OwnerChat } from "../src/owner";
 import { inState, requestedUrl } from "./helpers";
 
 // The brain's clock in the tests: a fixed second, so "200 seconds ago"
@@ -56,25 +56,21 @@ class FakeStore implements LivenessStore {
 }
 
 // The client that remembers the messages the brain sent.
-class RecordingTelegram implements TelegramClient {
+class RecordingTelegram implements OwnerChat {
   readonly messages: Array<{ chatId: number; text: string }> = [];
   readonly edits: Array<{ chatId: number; messageId: number; text: string }> = [];
 
-  sendMessage(chatId: number, text: string): Promise<{ message_id: number }> {
+  say(chatId: number, text: string): Promise<{ id: number }> {
     this.messages.push({ chatId, text });
-    return Promise.resolve({ message_id: this.messages.length });
+    return Promise.resolve({ id: this.messages.length });
   }
 
-  editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
+  replace(chatId: number, messageId: number, text: string): Promise<boolean> {
     this.edits.push({ chatId, messageId, text });
     return Promise.resolve(true);
   }
 
-  answerCallbackQuery(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  setWebhook(): Promise<void> {
+  answerTap(): Promise<void> {
     return Promise.resolve();
   }
 }
@@ -527,6 +523,16 @@ const RELAY_STORE = {
   getBox: (id: string): BoxRow | undefined => (id === RELAY_BOX.id ? RELAY_BOX : undefined),
 };
 
+// The admin token the brain carries to the box: sealed at rest, opened
+// at call time.
+async function relayToken(): Promise<string> {
+  const token = await unsealAdminToken(SEAL_KEY, SEALED_ADMIN);
+  if (token === null) {
+    throw new Error("the sealed admin token did not unseal");
+  }
+  return token;
+}
+
 describe("the box relay", () => {
   it("calls the box over its pinned hostname with the sealed admin token", async () => {
     const calls: Array<{ url: string; authorization: string | null }> = [];
@@ -541,12 +547,9 @@ describe("the box relay", () => {
       );
     };
 
-    const relay = await relayToBox(RELAY_STORE, "home", BOX_API.presence, {
-      sealKey: SEAL_KEY,
-      fetcher,
-    });
+    const relay = await boxAdapter(RELAY_STORE, { fetcher }).presence("home", await relayToken());
 
-    expect(relay.answered).toBe(true);
+    expect(relay.kind).toBe("answered");
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://oc-tap-home.buyallmemes.com/_oc/presence");
     // The admin token is sealed in the brain and plaintext only on the
@@ -564,24 +567,20 @@ describe("the box relay", () => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       })) as typeof fetch;
 
-    const relay = await relayToBox(RELAY_STORE, "home", BOX_API.presence, {
-      sealKey: SEAL_KEY,
-      deadlineMs: 20,
-      fetcher: hanging,
-    });
+    const relay = await boxAdapter(RELAY_STORE, { deadlineMs: 20, fetcher: hanging }).presence(
+      "home",
+      await relayToken(),
+    );
 
-    expect(relay).toEqual({ answered: false, reason: "box_timeout" });
+    expect(relay).toEqual({ kind: "silent", reason: "box_timeout" });
   });
 
   it("says a box that cannot be reached is unreachable", async () => {
     const failing: typeof fetch = () => Promise.reject(new Error("connection refused"));
 
-    const relay = await relayToBox(RELAY_STORE, "home", BOX_API.presence, {
-      sealKey: SEAL_KEY,
-      fetcher: failing,
-    });
+    const relay = await boxAdapter(RELAY_STORE, { fetcher: failing }).presence("home", await relayToken());
 
-    expect(relay).toEqual({ answered: false, reason: "box_unreachable" });
+    expect(relay).toEqual({ kind: "silent", reason: "box_unreachable" });
   });
 });
 

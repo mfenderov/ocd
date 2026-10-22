@@ -1,7 +1,8 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { BoxRow } from "../src/boxes";
-import { sealAdminToken } from "../src/enroll";
+import { sealAdminToken } from "../src/sealedtoken";
+import { boxAdapter } from "../src/boxapi";
 import { handleHeartbeat, hashToken } from "../src/heartbeat";
 import app from "../src/index";
 import {
@@ -12,7 +13,7 @@ import {
   revokeOneBox,
   type RevokeStore,
 } from "../src/revoke";
-import type { TombstoneRow } from "../src/mint";
+import type { TombstoneRow } from "../src/tombstone";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";
 
@@ -113,8 +114,8 @@ describe("revoke confirm gate (unit)", () => {
     for (const body of [{}, { confirm: false }, { confirm: "yes" }, null, []]) {
       const res = await handleRevoke("rev-confirm", confirmRequest("/x", body), store, {
         sealKey: SEAL_KEY,
-        fetcher: epochFetcher(2, calls),
-      });
+        box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }),
+    });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: "confirm_required" });
     }
@@ -128,8 +129,8 @@ describe("revoke confirm gate (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleRevokeAll(confirmRequest("/x", {}), store, {
       sealKey: SEAL_KEY,
-      fetcher: epochFetcher(2, calls),
-    });
+      box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }),
+   });
     expect(res.status).toBe(400);
     expect(calls).toHaveLength(0);
   });
@@ -154,8 +155,8 @@ describe("revoke single box (unit)", () => {
     const calls: FetchCall[] = [];
     const result = await revokeOneBox("rev-ok", store, {
       sealKey: SEAL_KEY,
-      fetcher: epochFetcher(2, calls),
-    });
+      box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }),
+   });
     expect(result).toMatchObject({ id: "rev-ok", status: "revoked", epoch: 2 });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://rev-ok.example.com/_oc/revoke");
@@ -171,8 +172,8 @@ describe("revoke single box (unit)", () => {
     await seedBox(store, "rev-off", 1);
     const result = await revokeOneBox("rev-off", store, {
       sealKey: SEAL_KEY,
-      fetcher: offlineFetcher,
-    });
+      box: boxAdapter(store, { fetcher: offlineFetcher }),
+   });
     expect(result).toMatchObject({ id: "rev-off", status: "tombstoned", epoch: 1 });
     expect(store.getTombstone("rev-off")).toEqual({ box_id: "rev-off", epoch: 1 });
   });
@@ -186,8 +187,7 @@ describe("revoke single box (unit)", () => {
       })) as typeof fetch;
     const result = await revokeOneBox("rev-timeout", store, {
       sealKey: SEAL_KEY,
-      fetcher: hanging,
-      deadlineMs: 20,
+      box: boxAdapter(store, { fetcher: hanging, deadlineMs: 20 }),
     });
     expect(result).toMatchObject({ id: "rev-timeout", status: "tombstoned", epoch: 3 });
     expect(store.getTombstone("rev-timeout")).toEqual({ box_id: "rev-timeout", epoch: 3 });
@@ -206,7 +206,7 @@ describe("revoke single box (unit)", () => {
       await seedBox(store, "rev-badepoch", 1);
       const fetcher: typeof fetch = () =>
         Promise.resolve(new Response(body, { status: 200, headers: { "content-type": "application/json" } }));
-      const result = await revokeOneBox("rev-badepoch", store, { sealKey: SEAL_KEY, fetcher });
+      const result = await revokeOneBox("rev-badepoch", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
       expect(result).toMatchObject({
         id: "rev-badepoch",
         status: "tombstoned",
@@ -224,8 +224,8 @@ describe("revoke single box (unit)", () => {
     const calls: FetchCall[] = [];
     const result = await revokeOneBox("rev-keep", store, {
       sealKey: SEAL_KEY,
-      fetcher: epochFetcher(2, calls),
-    });
+      box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }),
+   });
     expect(result).toMatchObject({ id: "rev-keep", status: "revoked", epoch: 2 });
     expect(store.getTombstone("rev-keep")).toEqual({ box_id: "rev-keep", epoch: 5 });
   });
@@ -236,8 +236,8 @@ describe("revoke single box (unit)", () => {
     store.putTombstone({ box_id: "rev-keep-off", epoch: 5 });
     const result = await revokeOneBox("rev-keep-off", store, {
       sealKey: SEAL_KEY,
-      fetcher: offlineFetcher,
-    });
+      box: boxAdapter(store, { fetcher: offlineFetcher }),
+   });
     expect(result).toMatchObject({ id: "rev-keep-off", status: "tombstoned", epoch: 1 });
     expect(store.getTombstone("rev-keep-off")).toEqual({ box_id: "rev-keep-off", epoch: 5 });
   });
@@ -252,8 +252,7 @@ describe("revoke single box (unit)", () => {
       })) as typeof fetch;
     const result = await revokeOneBox("rev-keep-timeout", store, {
       sealKey: SEAL_KEY,
-      fetcher: hanging,
-      deadlineMs: 20,
+      box: boxAdapter(store, { fetcher: hanging, deadlineMs: 20 }),
     });
     expect(result).toMatchObject({ id: "rev-keep-timeout", status: "tombstoned", epoch: 3 });
     expect(store.getTombstone("rev-keep-timeout")).toEqual({ box_id: "rev-keep-timeout", epoch: 7 });
@@ -265,7 +264,7 @@ describe("revoke single box (unit)", () => {
     store.putTombstone({ box_id: "rev-keep-badepoch", epoch: 5 });
     const fetcher: typeof fetch = () =>
       Promise.resolve(new Response("ok", { status: 200, headers: { "content-type": "application/json" } }));
-    const result = await revokeOneBox("rev-keep-badepoch", store, { sealKey: SEAL_KEY, fetcher });
+    const result = await revokeOneBox("rev-keep-badepoch", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(result).toMatchObject({
       id: "rev-keep-badepoch",
       status: "tombstoned",
@@ -280,8 +279,8 @@ describe("revoke single box (unit)", () => {
     const calls: FetchCall[] = [];
     const result = await revokeOneBox("ghost", store, {
       sealKey: SEAL_KEY,
-      fetcher: epochFetcher(2, calls),
-    });
+      box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }),
+   });
     expect(result).toMatchObject({ id: "ghost", status: "unknown_box" });
     expect(calls).toHaveLength(0);
   });
@@ -290,7 +289,7 @@ describe("revoke single box (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "rev-err", 1);
     const fetcher: typeof fetch = () => Promise.resolve(new Response("mint first", { status: 409 }));
-    const result = await revokeOneBox("rev-err", store, { sealKey: SEAL_KEY, fetcher });
+    const result = await revokeOneBox("rev-err", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(result).toMatchObject({ id: "rev-err", status: "box_error", box_status: 409 });
     expect(store.getTombstone("rev-err")).toBeUndefined();
   });
@@ -302,7 +301,7 @@ describe("revoke single box (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "rev-530", 3);
     const fetcher: typeof fetch = () => Promise.resolve(new Response("error code: 1016", { status: 530 }));
-    const result = await revokeOneBox("rev-530", store, { sealKey: SEAL_KEY, fetcher });
+    const result = await revokeOneBox("rev-530", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(result).toMatchObject({ id: "rev-530", status: "tombstoned", epoch: 3, box_status: 530 });
     expect(result.detail).toContain("box_unreachable");
     expect(store.getTombstone("rev-530")).toEqual({ box_id: "rev-530", epoch: 3 });
@@ -316,7 +315,7 @@ describe("revoke single box (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "rev-502", 3);
     const fetcher: typeof fetch = () => Promise.resolve(new Response("revoke failed\n", { status: 502 }));
-    const result = await revokeOneBox("rev-502", store, { sealKey: SEAL_KEY, fetcher });
+    const result = await revokeOneBox("rev-502", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(result).toMatchObject({ id: "rev-502", status: "tombstoned", epoch: 3, box_status: 502 });
     expect(result.detail).toContain("box_revoke_failed");
     expect(result.detail).toContain("revoke failed");
@@ -329,14 +328,14 @@ describe("revoke single box (unit)", () => {
     await seedBox(store, "rev-noseal", 1);
     const calls: FetchCall[] = [];
     expect(
-      await revokeOneBox("rev-noseal", store, { fetcher: epochFetcher(2, calls) }),
+      await revokeOneBox("rev-noseal", store, { box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }) }),
     ).toMatchObject({ status: "misconfigured" });
     const box = store.getBox("rev-noseal");
     if (box) {
       store.boxes.set("rev-noseal", { ...box, admin_token_sealed: "" });
     }
     expect(
-      await revokeOneBox("rev-noseal", store, { sealKey: SEAL_KEY, fetcher: epochFetcher(2, calls) }),
+      await revokeOneBox("rev-noseal", store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: epochFetcher(2, calls) }) }),
     ).toMatchObject({ status: "misconfigured" });
     expect(calls).toHaveLength(0);
     expect(store.getTombstone("rev-noseal")).toBeUndefined();
@@ -354,7 +353,7 @@ describe("revoke-all (unit)", () => {
       }
       return Promise.resolve(Response.json({ epoch: 2 }));
     }) as typeof fetch;
-    const results = await revokeAllBoxes(store, { sealKey: SEAL_KEY, fetcher });
+    const results = await revokeAllBoxes(store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(results).toEqual([
       { id: "rev-all-off", status: "tombstoned", epoch: 4, detail: "box_unreachable" },
       { id: "rev-all-on", status: "revoked", epoch: 2 },

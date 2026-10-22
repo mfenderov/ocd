@@ -38,20 +38,20 @@ describe("the fleet board", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveLength(3);
-    expect(rows[0][0].text).toContain("home");
-    expect(rows[0][0].text).toContain("🟢");
-    expect(rows[0][1].text).toContain("mac");
+    expect(rows[0][0].label).toContain("home");
+    expect(rows[0][0].label).toContain("🟢");
+    expect(rows[0][1].label).toContain("mac");
     // The offline box is marked, not hidden.
-    expect(rows[0][1].text).toContain("🔴");
-    expect(rows[0][2].text).toContain("vm");
-    expect(rows[0][2].text).toContain("🟢");
+    expect(rows[0][1].label).toContain("🔴");
+    expect(rows[0][2].label).toContain("vm");
+    expect(rows[0][2].label).toContain("🟢");
   });
 
   it("marks a box whose revoke is pending", () => {
     const rows = fleetBoard([box({ id: "mac", tombstoned: true })], NOW);
 
-    expect(rows[0][0].text).toContain("🟠");
-    expect(rows[0][0].text).toContain("mac");
+    expect(rows[0][0].label).toContain("🟠");
+    expect(rows[0][0].label).toContain("mac");
   });
 
   // The board reads the clock its caller gives it, not the wall clock:
@@ -60,9 +60,9 @@ describe("the fleet board", () => {
     const boxes = [box({ id: "home" })];
     // Seen ten seconds before the caller's clock, so it is ok — even
     // though the wall clock says the box has been silent for years.
-    expect(fleetBoard(boxes, NOW)[0][0].text).toContain("🟢");
+    expect(fleetBoard(boxes, NOW)[0][0].label).toContain("🟢");
     // The same box, read an hour later, is offline.
-    expect(fleetBoard(boxes, NOW + 3600)[0][0].text).toContain("🔴");
+    expect(fleetBoard(boxes, NOW + 3600)[0][0].label).toContain("🔴");
   });
 
   // The button's payload names the box it acts on, so a tap knows which
@@ -70,7 +70,7 @@ describe("the fleet board", () => {
   it("names the box the button acts on", () => {
     const rows = fleetBoard([box({ id: "mac" })], NOW);
 
-    expect(rows[0][0].callback_data).toBe("link:mac");
+    expect(rows[0][0]).toMatchObject({ tap: "link:mac" });
   });
 
   it("has no buttons when no box is enrolled", () => {
@@ -116,8 +116,8 @@ describe("the Open button", () => {
   // The link travels as the button's target, never as visible text.
   it("carries the link", () => {
     expect(openButton("🚀 Open mac", "https://tap.example/?t=tok-1")).toEqual({
-      text: "🚀 Open mac",
-      url: "https://tap.example/?t=tok-1",
+      label: "🚀 Open mac",
+      link: "https://tap.example/?t=tok-1",
     });
   });
 });

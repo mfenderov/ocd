@@ -1,5 +1,6 @@
-import { escapeHtml, type TelegramClient } from "./telegram";
+import { escapeHtml } from "./html";
 import type { BoxPublic } from "./boxes";
+import type { OwnerChat } from "./owner";
 
 // The liveness sweep: the brain notices a box that stopped talking.
 //
@@ -46,7 +47,7 @@ export interface LivenessStore {
 }
 
 export interface LivenessDeps {
-  telegram: TelegramClient;
+  telegram: OwnerChat;
   // The chat the notice goes to: the owner's, and only the owner's. The
   // brain talks to one chat, so the sweep names it here.
   ownerChatId: number;
@@ -138,7 +139,7 @@ async function announceRecovery(store: LivenessStore, deps: LivenessDeps, boxId:
 // and the next sweep tries again.
 async function notify(deps: LivenessDeps, text: string): Promise<boolean> {
   try {
-    await deps.telegram.sendMessage(deps.ownerChatId, text);
+    await deps.telegram.say(deps.ownerChatId, text);
     return true;
   } catch (err) {
     console.error(`liveness: the notice failed (${errorText(err)})`);

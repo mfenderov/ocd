@@ -1,33 +1,15 @@
-import { unsealAdminToken } from "./enroll";
-import { fetchBox, pinnedRegistry } from "./heartbeat";
+import { unsealAdminToken } from "./sealedtoken";
+import type { Box, BoxSilence, MintAnswer } from "./box";
 import type { BoxRow } from "./boxes";
-import { BOX_API } from "./boxapi";
+import { isTainted, type TombstoneRow } from "./tombstone";
 
-// Mint relay: console POST /api/backends/:id/link → box POST /admin/mint.
-// One idempotency key per console request: the console's own
+// Mint relay: console POST /api/backends/:id/link → the box mints its own
+// tap code. One idempotency key per console request: the console's own
 // `Idempotency-Key` header (its retry chain) passes through verbatim; when
-// absent the Worker generates one so the box never sees a keyless mint (it
-// 400s those). Box 429/502 surface verbatim; tainted-epoch boxes are refused
-// before any fetch. Plaintext admin tokens and keys are never logged.
-
-// Box calls get 15s (mint execs a password rotation server-side).
-const MINT_DEADLINE_MS = 15_000;
-
-// Pending-revoke marker. Invariant for Task 5 (revoke): tombstone.epoch is
-// the greatest stale epoch — a box is tainted while its heartbeat epoch has
-// not rotated past it, clean once it exceeds it. Table lives here minimally
-// so Task 5 only adds the revoke write path, never a second table.
-export interface TombstoneRow {
-  box_id: string;
-  epoch: number;
-}
-
-export function isTainted(boxEpoch: number, tombstone: TombstoneRow | undefined): boolean {
-  if (!tombstone) {
-    return false;
-  }
-  return boxEpoch <= tombstone.epoch;
-}
+// absent the box client generates one so the box never sees a keyless mint
+// (it 400s those). Box 429/502 surface verbatim; tainted-epoch boxes are
+// refused before any call. Plaintext admin tokens and keys are never
+// logged.
 
 export interface MintStore {
   getBox(id: string): BoxRow | undefined;
@@ -36,26 +18,26 @@ export interface MintStore {
 
 export interface MintDeps {
   sealKey?: string;
-  fetcher?: typeof fetch;
-  deadlineMs?: number;
-  generateKey?: () => string;
+  // The box: the port the brain asks a box through. The wiring builds
+  // it; the mint never builds a client of its own.
+  box: Box;
 }
 
-function defaultGenerateKey(): string {
-  return crypto.randomUUID();
-}
+// The type the console's link answer carries. The link is text, and the
+// box's own refusal is text too.
+const LINK_CONTENT_TYPE = "text/plain;charset=utf-8";
 
 export async function handleMintLink(
   boxId: string,
   consoleKey: string | null,
   store: MintStore,
-  deps: MintDeps = {},
+  deps: MintDeps,
 ): Promise<Response> {
   const box = store.getBox(boxId);
   if (!box || box.enrolled !== 1) {
     return Response.json({ error: "unknown_box" }, { status: 404 });
   }
-  // Taint gate first: no unseal, no fetch for boxes with a pending revoke.
+  // Taint gate first: no unseal, no call for boxes with a pending revoke.
   if (isTainted(box.epoch, store.getTombstone(boxId))) {
     return Response.json({ error: "tainted" }, { status: 409 });
   }
@@ -63,12 +45,7 @@ export async function handleMintLink(
   if (adminToken instanceof Response) {
     return adminToken;
   }
-  const signal = AbortSignal.timeout(deps.deadlineMs ?? MINT_DEADLINE_MS);
-  const boxRes = await callBox(box, boxId, adminToken, consoleKey, deps, signal);
-  if (!boxRes) {
-    return unreachable(signal);
-  }
-  return boxAnswer(boxRes);
+  return mintAnswer(await deps.box.mintLink(boxId, adminToken, consoleKey));
 }
 
 // The admin token the relay carries, or the answer that says it cannot:
@@ -96,54 +73,36 @@ async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<
   return adminToken;
 }
 
-// The call to the box: the mint itself, with the console's idempotency
-// key (one per console request, so a retry never mints twice). Null when
-// the box was not reached.
-async function callBox(
-  box: BoxRow,
-  boxId: string,
-  adminToken: string,
-  consoleKey: string | null,
-  deps: MintDeps,
-  signal: AbortSignal,
-): Promise<Response | null> {
-  const key = consoleKey && consoleKey.length > 0 ? consoleKey : (deps.generateKey ?? defaultGenerateKey)();
-  try {
-    return await fetchBox(
-      pinnedRegistry([box]),
-      boxId,
-      BOX_API.mint,
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${adminToken}`, "idempotency-key": key },
-        signal,
-      },
-      deps.fetcher,
-    );
-  } catch {
-    return null;
+// The console's answer to the mint: the link the box minted, the box's
+// own refusal, or the reason the box did not answer.
+function mintAnswer(answer: MintAnswer): Response {
+  if (answer.kind === "minted") {
+    return new Response(answer.link, {
+      status: 200,
+      headers: { "content-type": LINK_CONTENT_TYPE },
+    });
   }
+  if (answer.kind === "refused") {
+    // Non-200 relays verbatim: the box's own status and its own body
+    // (covers box 429/502).
+    return new Response(answer.message.said, {
+      status: answer.message.status,
+      headers: { "content-type": LINK_CONTENT_TYPE },
+    });
+  }
+  return silenceAnswer(answer.reason);
 }
 
 // The answer for a box that was not reached: it timed out, or it is gone.
-function unreachable(signal: AbortSignal): Response {
-  if (signal.aborted) {
+function silenceAnswer(reason: BoxSilence): Response {
+  if (reason === "misconfigured") {
+    return Response.json({ error: "misconfigured" }, { status: 500 });
+  }
+  if (reason === "box_timeout") {
     return Response.json({ error: "box_timeout" }, { status: 504 });
   }
-  return Response.json({ error: "box_unreachable" }, { status: 502 });
-}
-
-// The box's own answer: its body, with its status.
-async function boxAnswer(boxRes: Response): Promise<Response> {
-  if (boxRes.status === 200) {
-    return new Response(await boxRes.text(), {
-      status: 200,
-      headers: { "content-type": "text/plain;charset=utf-8" },
-    });
+  if (reason === "box_unreachable") {
+    return Response.json({ error: "box_unreachable" }, { status: 502 });
   }
-  // Non-200 relays verbatim: status + body (covers box 429/502).
-  return new Response(boxRes.body, {
-    status: boxRes.status,
-    headers: { "content-type": boxRes.headers.get("content-type") ?? "text/plain;charset=utf-8" },
-  });
+  return Response.json({ error: "unknown_box" }, { status: 404 });
 }

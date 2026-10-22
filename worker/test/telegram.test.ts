@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTelegramClient, escapeHtml } from "../src/telegram";
+import { createTelegramClient } from "../src/telegram";
 
 interface FetchCall {
   url: string;
@@ -26,9 +26,9 @@ describe("telegram client", () => {
     const calls: FetchCall[] = [];
     const client = createTelegramClient("TOKEN", stubFetcher(200, OK_MESSAGE, calls));
 
-    const sent = await client.sendMessage(7, "hi");
+    const sent = await client.say(7, "hi");
 
-    expect(sent).toEqual({ message_id: 42 });
+    expect(sent).toEqual({ id: 42 });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.telegram.org/botTOKEN/sendMessage");
     expect(calls[0].init.method).toBe("POST");
@@ -45,12 +45,16 @@ describe("telegram client", () => {
   it("sendMessage carries the reply markup only when the caller has buttons", async () => {
     const calls: FetchCall[] = [];
     const client = createTelegramClient("TOKEN", stubFetcher(200, OK_MESSAGE, calls));
-    const markup = { inline_keyboard: [[{ text: "Open", callback_data: "link:mac" }]] };
+    // The brain's buttons, in the Bot API's shape: the adapter owns that
+    // translation, the brain only says what a button does.
+    const buttons = [[{ label: "Open", tap: "link:mac" }]];
 
-    await client.sendMessage(7, "hi", { replyMarkup: markup });
-    await client.sendMessage(7, "hi");
+    await client.say(7, "hi", buttons);
+    await client.say(7, "hi");
 
-    expect(sentBody(calls[0])["reply_markup"]).toEqual(markup);
+    expect(sentBody(calls[0])["reply_markup"]).toEqual({
+      inline_keyboard: [[{ text: "Open", callback_data: "link:mac" }]],
+    });
     expect(sentBody(calls[1])["reply_markup"]).toBeUndefined();
   });
 
@@ -62,7 +66,7 @@ describe("telegram client", () => {
       stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: 42, chat: { id: 7 } } }), calls),
     );
 
-    const edited = await client.editMessageText(7, 42, "✅ done");
+    const edited = await client.replace(7, 42, "✅ done");
 
     expect(edited).toBe(true);
     expect(calls).toHaveLength(1);
@@ -75,13 +79,13 @@ describe("telegram client", () => {
 
   it("sendMessage rejects when the answer carries no message id", async () => {
     const noResult = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true }), []));
-    await expect(noResult.sendMessage(7, "hi")).rejects.toThrow(/no message id/);
+    await expect(noResult.say(7, "hi")).rejects.toThrow(/no message id/);
 
     const wrongType = createTelegramClient(
       "TOKEN",
       stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: "42" } }), []),
     );
-    await expect(wrongType.sendMessage(7, "hi")).rejects.toThrow(/no message id/);
+    await expect(wrongType.say(7, "hi")).rejects.toThrow(/no message id/);
   });
 
   it("editMessageText reads both answer shapes: the Message and the true", async () => {
@@ -90,25 +94,25 @@ describe("telegram client", () => {
       "TOKEN",
       stubFetcher(200, JSON.stringify({ ok: true, result: { message_id: 42, chat: { id: 7 } } }), []),
     );
-    await expect(chatEdit.editMessageText(7, 42, "done")).resolves.toBe(true);
+    await expect(chatEdit.replace(7, 42, "done")).resolves.toBe(true);
 
     // An inline-message edit answers `true`. This method never issues
     // one, but the shape must not read as a failure.
     const inlineEdit = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), []));
-    await expect(inlineEdit.editMessageText(7, 42, "done")).resolves.toBe(true);
+    await expect(inlineEdit.replace(7, 42, "done")).resolves.toBe(true);
 
     const notEdited = createTelegramClient(
       "TOKEN",
       stubFetcher(200, JSON.stringify({ ok: true, result: false }), []),
     );
-    await expect(notEdited.editMessageText(7, 42, "done")).resolves.toBe(false);
+    await expect(notEdited.replace(7, 42, "done")).resolves.toBe(false);
   });
 
   it("answerCallbackQuery posts the callback id and the toast text", async () => {
     const calls: FetchCall[] = [];
     const client = createTelegramClient("TOKEN", stubFetcher(200, JSON.stringify({ ok: true, result: true }), calls));
 
-    await client.answerCallbackQuery("cb-1", "done");
+    await client.answerTap("cb-1", "done");
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.telegram.org/botTOKEN/answerCallbackQuery");
@@ -139,7 +143,7 @@ describe("telegram client", () => {
       stubFetcher(400, JSON.stringify({ ok: false, description: "nope" }), []),
     );
 
-    await expect(client.sendMessage(7, "hi")).rejects.toThrow(/nope/);
+    await expect(client.say(7, "hi")).rejects.toThrow(/nope/);
   });
 
   it("a failure never names the token", async () => {
@@ -148,7 +152,7 @@ describe("telegram client", () => {
       stubFetcher(401, JSON.stringify({ ok: false, description: "Unauthorized" }), []),
     );
 
-    const err = await client.sendMessage(7, "hi").then(
+    const err = await client.say(7, "hi").then(
       () => null,
       (e: unknown) => e,
     );
@@ -162,7 +166,7 @@ describe("telegram client", () => {
     const down: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const client = createTelegramClient("TOKEN", down);
 
-    await expect(client.sendMessage(7, "hi")).rejects.toThrow(/sendMessage/);
+    await expect(client.say(7, "hi")).rejects.toThrow(/sendMessage/);
   });
 
   it("a network failure keeps the cause for debugging, but never the token", async () => {
@@ -171,7 +175,7 @@ describe("telegram client", () => {
     const down: typeof fetch = () => Promise.reject(outer);
     const client = createTelegramClient("SECRET-TOKEN", down);
 
-    const err = await client.sendMessage(7, "hi").then(
+    const err = await client.say(7, "hi").then(
       () => null,
       (e: unknown) => e,
     );
@@ -186,12 +190,5 @@ describe("telegram client", () => {
     expect(cause.message).not.toContain("SECRET-TOKEN");
     expect(String(cause.stack)).not.toContain("SECRET-TOKEN");
     expect((cause.cause as Error).message).not.toContain("SECRET-TOKEN");
-  });
-
-  it("escapeHtml escapes the characters html parse mode cares about", () => {
-    expect(escapeHtml("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
-    // The double quote too: a value that lands inside an href="…"
-    // attribute must not end that attribute.
-    expect(escapeHtml('a "quoted" url')).toBe("a &quot;quoted&quot; url");
   });
 });

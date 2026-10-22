@@ -5,12 +5,11 @@ import {
   linkMenu,
   openButton,
   stateDot,
-  type InlineButton,
-  type Keyboard,
 } from "./botbuttons";
 import type { RevokeResult } from "./revoke";
 import type { BoxPublic } from "./boxes";
-import { escapeHtml, type TelegramClient } from "./telegram";
+import { escapeHtml } from "./html";
+import type { OwnerButtons, OwnerChat, SentMessage } from "./owner";
 
 // The brain's command layer: one Telegram command in, one message out.
 //
@@ -67,7 +66,7 @@ export interface LinkRecord {
 // carries the answers, the fleet state to read and the relays to call.
 // The Durable Object supplies them; the layer never reaches for one.
 export interface CommandDeps {
-  telegram: TelegramClient;
+  telegram: OwnerChat;
   listBoxes: () => BoxPublic[];
   mintLink: (boxId: string) => Promise<string>;   // the tap URL
   audit: (boxId: string, limit: number) => Promise<AuditRow[]>;
@@ -86,7 +85,7 @@ export interface CommandDeps {
 // minted link.
 interface Reply {
   text: string;
-  keyboard?: Keyboard;
+  keyboard?: OwnerButtons;
   // The minted link this reply carries, when it carries one: the brain
   // has to find that message again to edit it when the link is spent.
   link?: { url: string; box: string };
@@ -175,9 +174,9 @@ async function sendReply(
   cmd: BotCommand,
   reply: Reply,
   deps: CommandDeps,
-): Promise<{ message_id: number } | undefined> {
+): Promise<SentMessage | undefined> {
   try {
-    return await deps.telegram.sendMessage(cmd.chatId, reply.text, replyOptions(reply));
+    return await deps.telegram.say(cmd.chatId, reply.text, replyButtons(reply));
   } catch (err) {
     console.error(`bot: the reply failed (${errorText(err)})`);
     return undefined;
@@ -192,7 +191,7 @@ async function sendReply(
 function recordReplyLink(
   cmd: BotCommand,
   reply: Reply,
-  sent: { message_id: number },
+  sent: SentMessage,
   deps: CommandDeps,
 ): void {
   if (!reply.link) {
@@ -203,7 +202,7 @@ function recordReplyLink(
     return;
   }
   try {
-    deps.recordLink({ token, box: reply.link.box, chatId: cmd.chatId, messageId: sent.message_id });
+    deps.recordLink({ token, box: reply.link.box, chatId: cmd.chatId, messageId: sent.id });
   } catch (err) {
     console.error(`bot: the link was not recorded (${errorText(err)})`);
   }
@@ -224,19 +223,19 @@ function linkToken(url: string): string {
 // owner would never learn what the tap did.
 async function answerTap(deps: CommandDeps, callbackId: string): Promise<void> {
   try {
-    await deps.telegram.answerCallbackQuery(callbackId);
+    await deps.telegram.answerTap(callbackId);
   } catch (err) {
     console.error(`bot: the tap was not answered (${errorText(err)})`);
   }
 }
 
-// The reply's markup: Telegram refuses an empty keyboard, so a fleet
+// The reply's buttons: Telegram refuses an empty keyboard, so a fleet
 // with no boxes sends the text alone.
-function replyOptions(reply: Reply): { replyMarkup?: unknown } {
+function replyButtons(reply: Reply): OwnerButtons | undefined {
   if (!reply.keyboard || reply.keyboard.length === 0) {
-    return {};
+    return undefined;
   }
-  return { replyMarkup: { inline_keyboard: reply.keyboard } };
+  return reply.keyboard;
 }
 
 // commandName strips the @botname suffix a group chat adds, so
@@ -262,7 +261,7 @@ function linkCommand(_cmd: BotCommand, deps: CommandDeps): Reply {
 // The board's reply: the fleet's text and the keyboard under it. One
 // clock for both, so the label and the text can never call the same box
 // ok and offline.
-function boardReply(board: (boxes: BoxPublic[], now: number) => InlineButton[][], deps: CommandDeps): Reply {
+function boardReply(board: (boxes: BoxPublic[], now: number) => OwnerButtons, deps: CommandDeps): Reply {
   const boxes = deps.listBoxes();
   const now = nowSec();
   return { text: fleetText(boxes, now), keyboard: board(boxes, now) };

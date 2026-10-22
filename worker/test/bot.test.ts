@@ -9,33 +9,31 @@ import {
   type BotStore,
 } from "../src/bot";
 import app, { type Env as EdgeEnv } from "../src/index";
-import type { TelegramClient } from "../src/telegram";
+import type { OwnerChat } from "../src/owner";
 import { inState, requestedUrl } from "./helpers";
 
 // The router answers one thing itself: a tap it drops. The command
 // layer owns every other reply. The client is here because the brain
 // owns every message.
-const TELEGRAM: TelegramClient = {
-  sendMessage: () => Promise.resolve({ message_id: 1 }),
-  editMessageText: () => Promise.resolve(true),
-  answerCallbackQuery: () => Promise.resolve(),
-  setWebhook: () => Promise.resolve(),
+const TELEGRAM: OwnerChat = {
+  say: () => Promise.resolve({ id: 1 }),
+  replace: () => Promise.resolve(true),
+  answerTap: () => Promise.resolve(),
 };
 
 // The client that remembers the taps it answered: a tap that is not
 // answered leaves the owner's button spinning.
-function recordingTelegram(): { telegram: TelegramClient; answered: string[] } {
+function recordingTelegram(): { telegram: OwnerChat; answered: string[] } {
   const answered: string[] = [];
   return {
     answered,
     telegram: {
-      sendMessage: () => Promise.resolve({ message_id: 1 }),
-      editMessageText: () => Promise.resolve(true),
-      answerCallbackQuery: (callbackId) => {
+      say: () => Promise.resolve({ id: 1 }),
+      replace: () => Promise.resolve(true),
+      answerTap: (callbackId) => {
         answered.push(callbackId);
         return Promise.resolve();
       },
-      setWebhook: () => Promise.resolve(),
     },
   };
 }
@@ -362,11 +360,14 @@ describe("the owner chat id", () => {
 
 describe("the brain config", () => {
   it("resolves the token, the owner chat and the webhook secret", () => {
-    const config = resolveBrainConfig({
-      botToken: "TOKEN",
-      ownerChatId: "7",
-      webhookSecret: "s3cret",
-    });
+    const config = resolveBrainConfig(
+      {
+        botToken: "TOKEN",
+        ownerChatId: "7",
+        webhookSecret: "s3cret",
+      },
+      TELEGRAM,
+    );
 
     expect(config?.ownerChatId).toBe(7);
     expect(config?.secret).toBe("s3cret");
@@ -374,10 +375,10 @@ describe("the brain config", () => {
   });
 
   it("refuses a brain that is not configured", () => {
-    expect(resolveBrainConfig({ ownerChatId: "7", webhookSecret: "s3cret" })).toBeUndefined();
-    expect(resolveBrainConfig({ botToken: "TOKEN", webhookSecret: "s3cret" })).toBeUndefined();
-    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "7" })).toBeUndefined();
-    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "abc", webhookSecret: "s" })).toBeUndefined();
+    expect(resolveBrainConfig({ ownerChatId: "7", webhookSecret: "s3cret" }, TELEGRAM)).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", webhookSecret: "s3cret" }, TELEGRAM)).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "7" }, TELEGRAM)).toBeUndefined();
+    expect(resolveBrainConfig({ botToken: "TOKEN", ownerChatId: "abc", webhookSecret: "s" }, TELEGRAM)).toBeUndefined();
   });
 });
 

@@ -2,8 +2,10 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { BoxRow } from "../src/boxes";
 import { hashToken } from "../src/heartbeat";
-import { sealAdminToken } from "../src/enroll";
-import { handleMintLink, isTainted, type MintStore, type TombstoneRow } from "../src/mint";
+import { sealAdminToken } from "../src/sealedtoken";
+import { boxAdapter } from "../src/boxapi";
+import { handleMintLink, type MintStore } from "../src/mint";
+import { isTainted, type TombstoneRow } from "../src/tombstone";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";
 
@@ -81,13 +83,13 @@ describe("mint relay idempotency (unit)", () => {
     const fetcher = stubFetcher(200, "https://proxy.example/?t=tok-1", calls);
     const first = await handleMintLink("mint-retry", "console-key-abc", store, {
       sealKey: SEAL_KEY,
-      fetcher,
+      box: boxAdapter(store, { fetcher }),
     });
     expect(first.status).toBe(200);
     expect(await first.text()).toBe("https://proxy.example/?t=tok-1");
     const second = await handleMintLink("mint-retry", "console-key-abc", store, {
       sealKey: SEAL_KEY,
-      fetcher,
+      box: boxAdapter(store, { fetcher }),
     });
     expect(second.status).toBe(200);
     expect(await second.text()).toBe("https://proxy.example/?t=tok-1");
@@ -103,8 +105,8 @@ describe("mint relay idempotency (unit)", () => {
     await seedBox(store, "mint-gen");
     const calls: FetchCall[] = [];
     const fetcher = stubFetcher(200, "https://proxy.example/?t=tok-2", calls);
-    await handleMintLink("mint-gen", null, store, { sealKey: SEAL_KEY, fetcher });
-    await handleMintLink("mint-gen", null, store, { sealKey: SEAL_KEY, fetcher });
+    await handleMintLink("mint-gen", null, store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
+    await handleMintLink("mint-gen", null, store, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     const keys = calls.map((c) => new Headers(c.init.headers).get("idempotency-key"));
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBeTruthy();
@@ -120,7 +122,7 @@ describe("mint relay idempotency (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleMintLink("mint-taint", "console-key-x", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls) }),
     });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: "tainted" });
@@ -135,7 +137,7 @@ describe("mint relay idempotency (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleMintLink("mint-healed", "console-key-y", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(200, "https://proxy.example/?t=tok-3", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(200, "https://proxy.example/?t=tok-3", calls) }),
     });
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
@@ -147,7 +149,7 @@ describe("mint relay idempotency (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleMintLink("mint-429", "console-key-z", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(429, "wait a bit before next link", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(429, "wait a bit before next link", calls) }),
     });
     expect(res.status).toBe(429);
     expect(await res.text()).toBe("wait a bit before next link");
@@ -158,7 +160,7 @@ describe("mint relay idempotency (unit)", () => {
     await seedBox(store, "mint-502");
     const res = await handleMintLink("mint-502", "console-key-z", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(502, "mint failed", []),
+      box: boxAdapter(store, { fetcher: stubFetcher(502, "mint failed", []) }),
     });
     expect(res.status).toBe(502);
     expect(await res.text()).toBe("mint failed");
@@ -169,7 +171,7 @@ describe("mint relay idempotency (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleMintLink("ghost", "console-key-z", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls) }),
     });
     expect(res.status).toBe(404);
     expect(calls).toHaveLength(0);
@@ -184,14 +186,13 @@ describe("mint relay idempotency (unit)", () => {
       })) as typeof fetch;
     const timedOut = await handleMintLink("mint-timeout", "k1", store, {
       sealKey: SEAL_KEY,
-      fetcher: hanging,
-      deadlineMs: 20,
+      box: boxAdapter(store, { fetcher: hanging, deadlineMs: 20 }),
     });
     expect(timedOut.status).toBe(504);
     const down: typeof fetch = () => Promise.reject(new Error("conn refused"));
     const unreachable = await handleMintLink("mint-timeout", "k2", store, {
       sealKey: SEAL_KEY,
-      fetcher: down,
+      box: boxAdapter(store, { fetcher: down }),
     });
     expect(unreachable.status).toBe(502);
   });
@@ -201,7 +202,7 @@ describe("mint relay idempotency (unit)", () => {
     await seedBox(store, "mint-noseal");
     const calls: FetchCall[] = [];
     const noKey = await handleMintLink("mint-noseal", "k", store, {
-      fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls) }),
     });
     expect(noKey.status).toBe(500);
     expect(calls).toHaveLength(0);
@@ -211,7 +212,7 @@ describe("mint relay idempotency (unit)", () => {
     }
     const noToken = await handleMintLink("mint-noseal", "k", store, {
       sealKey: SEAL_KEY,
-      fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls),
+      box: boxAdapter(store, { fetcher: stubFetcher(200, "https://proxy.example/?t=nope", calls) }),
     });
     expect(noToken.status).toBe(500);
     expect(calls).toHaveLength(0);

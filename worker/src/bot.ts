@@ -1,6 +1,6 @@
 import { parseCallback } from "./botbuttons";
 import { hashToken, tokenMatches } from "./heartbeat";
-import { createTelegramClient, type TelegramClient } from "./telegram";
+import type { OwnerChat } from "./owner";
 
 // The header Telegram sends the secret token in. It is the only
 // credential the webhook carries: the route path holds none.
@@ -54,7 +54,7 @@ export interface BotDeps {
   // The brain's Telegram client: the brain owns every reply, and the
   // command layer answers with this client. The router uses it for one
   // thing only — answering a tap it drops.
-  telegram: TelegramClient;
+  telegram: OwnerChat;
   store: BotStore;
   ownerChatId: number;
   dispatch: (cmd: BotCommand) => Promise<void>;
@@ -72,7 +72,7 @@ export interface BotEnv {
 // secret (TELEGRAM_WEBHOOK_SECRET) — the same value registered as
 // Telegram's secret_token.
 export interface BotConfig {
-  telegram: TelegramClient;
+  telegram: OwnerChat;
   ownerChatId: number;
   secret: string;
 }
@@ -192,7 +192,7 @@ async function answerDroppedTap(update: BotUpdate, deps: BotDeps): Promise<void>
     return;
   }
   try {
-    await deps.telegram.answerCallbackQuery(callbackId);
+    await deps.telegram.answerTap(callbackId);
   } catch (err) {
     console.error(`bot: the dropped tap was not answered (${String(err)})`);
   }
@@ -247,9 +247,12 @@ export function parseOwnerChatId(raw?: string): number | undefined {
 // the log. A brain without a token, an owner chat or a webhook secret
 // cannot work, and the route says so out loud instead of dropping
 // every update silently.
-export function resolveBrainConfig(env: BotEnv): BotConfig | undefined {
+//
+// The client rides in: the wiring (state.ts) builds it — this is the
+// one place that knows the Bot API's shape — and hands it over.
+export function resolveBrainConfig(env: BotEnv, telegram: OwnerChat | undefined): BotConfig | undefined {
   const ownerChatId = parseOwnerChatId(env.ownerChatId);
-  if (!env.botToken) {
+  if (!env.botToken || !telegram) {
     console.error("bot: TELEGRAM_BOT_TOKEN not configured");
     return undefined;
   }
@@ -262,7 +265,7 @@ export function resolveBrainConfig(env: BotEnv): BotConfig | undefined {
     return undefined;
   }
   return {
-    telegram: createTelegramClient(env.botToken),
+    telegram,
     ownerChatId,
     secret: env.webhookSecret,
   };

@@ -1,13 +1,10 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { BoxRow } from "../src/boxes";
+import { fetchBox, fetchUrlPinned, pinnedHostname, pinnedRegistry } from "../src/boxclient";
 import {
-  fetchBox,
-  fetchUrlPinned,
   handleHeartbeat,
   hashToken,
-  pinnedHostname,
-  pinnedRegistry,
   reenrollPingText,
   REENROLL_SEQ_THRESHOLD,
   shouldPingMismatch,
