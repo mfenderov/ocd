@@ -2,7 +2,7 @@
 // needs, and moves them when the box's tunnel changes.
 import { describe, expect, it } from "vitest";
 import { ensureBoxDns } from "../src/dns";
-import type { BoxDns } from "../src/ports";
+import type { BoxDns } from "../src/records";
 import { requestedUrl } from "./helpers";
 
 const ZONE = "zone-1";

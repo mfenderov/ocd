@@ -2,7 +2,8 @@ import { optionalTextField, textField } from "./fields";
 import { hashToken, tokenMatches } from "./heartbeat";
 import { escapeHtml } from "./html";
 import { sealAdminToken, unsealAdminToken } from "./sealedtoken";
-import type { DnsOutcome, DnsWriter, NotifyFn } from "./ports";
+import type { NotifyFn } from "./owner";
+import type { DnsOutcome, DnsWriter } from "./records";
 import type { BoxRow, DenialRow } from "./boxes";
 
 // Enrollment request body (box JSON contract, snake_case): a box that wants

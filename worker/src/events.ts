@@ -1,6 +1,6 @@
 import { extractBearer } from "./heartbeat";
 import { escapeHtml } from "./html";
-import type { TelegramClient } from "./ports";
+import type { OwnerChat } from "./owner";
 
 // The box event ingest: POST /api/events → the brain's links and history.
 //
@@ -101,7 +101,7 @@ export interface OwedEditStore extends LinkStore {
 // the events and marks the links — only the edit needs Telegram — and
 // the edits stay owed until the alarm sweep drives them.
 export interface EventDeps {
-  telegram?: TelegramClient;
+  telegram?: OwnerChat;
   verifyBox: (id: string, token: string) => Promise<boolean>;
 }
 
@@ -347,7 +347,7 @@ async function editLink(
   link: LinkRow,
   text: string,
   store: LinkStore,
-  telegram: TelegramClient | undefined,
+  telegram: OwnerChat | undefined,
 ): Promise<void> {
   if (!telegram) {
     // No Telegram client: the link stays owed, and the alarm sweep drives
@@ -356,7 +356,7 @@ async function editLink(
   }
   let landed: boolean;
   try {
-    landed = await telegram.editMessageText(link.chat_id, link.message_id, text);
+    landed = await telegram.replace(link.chat_id, link.message_id, text);
   } catch (err) {
     console.error(`events: the edit failed (${errorText(err)})`);
     return;
@@ -382,7 +382,7 @@ const MAX_OWED_EDITS = 50;
 // cannot survive a Telegram outage.
 export async function sweepOwedEdits(
   store: OwedEditStore,
-  deps: { telegram?: TelegramClient },
+  deps: { telegram?: OwnerChat },
 ): Promise<void> {
   const telegram = deps.telegram;
   if (!telegram) {

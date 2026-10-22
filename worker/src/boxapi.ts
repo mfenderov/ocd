@@ -1,115 +1,258 @@
-// The box relay: the adapter behind the box port.
+// The box adapter: the box port, spoken.
 //
-// The relay takes the sealed admin token, the box's pinned hostname and
-// a short deadline, and says whether the box answered.
+// The brain asks a box for things in its own words; this module says
+// how the box hears it: the paths, the bearer, the idempotency key,
+// the query strings and the deadlines. The HTTP itself lives in
+// boxclient.ts, the one place that reaches a box.
 //
-// The endpoints the brain asks for are the protocol it speaks with a
-// box, so they live in the ports module (BOX_API): the domain names
-// them, and this module speaks them.
-import { unsealAdminToken } from "./sealedtoken";
-import { fetchBox, pinnedRegistry } from "./heartbeat";
+// The admin token is the brain's: it seals it at enrolment and unseals
+// it at call time. The adapter only carries it.
+import { fetchBox, pinnedRegistry } from "./boxclient";
 import type { BoxRow } from "./boxes";
-import type { BoxRelay, BoxRelayer, RelayFailure } from "./ports";
+import type {
+  AuditAnswer,
+  Box,
+  BoxMessage,
+  BoxReply,
+  BoxSilence,
+  MintAnswer,
+  RevokeAnswer,
+} from "./box";
+
+// The endpoints the brain asks for. The paths are the protocol the
+// brain speaks with a box, so they live here, with the module that
+// speaks them — not with the domain that asks.
+//
+// The prefix avoids "/admin" on purpose: Cloudflare's managed WAF rules
+// challenge any path containing that segment (a WordPress-admin
+// heuristic), and the challenge page answers instead of the box — which
+// broke every worker→box relay. A path the edge does not second-guess
+// keeps the relay working; the endpoints stay bearer-gated either way.
+const BOX_API = {
+  mint: "/_oc/mint",
+  revoke: "/_oc/revoke",
+  audit: "/_oc/audit",
+  presence: "/_oc/presence",
+  status: "/_oc/status",
+} as const;
 
 // Box reads get 3s: a dead box must not hold a request open. The mint
 // relay's 15s is far too long for a presence probe — the owner would
 // wait behind a box that is already gone.
 export const BOX_READ_DEADLINE_MS = 3_000;
 
-export interface BoxRelayStore {
-  getBox(id: string): BoxRow | undefined;
-}
+// The mint and the revoke exec a password rotation server-side, so
+// they get the time the rotation needs.
+const BOX_WRITE_DEADLINE_MS = 15_000;
 
-export interface BoxRelayDeps {
-  sealKey?: string;
+// The audit is a small SQLite scan server-side.
+export const AUDIT_DEADLINE_MS = 5_000;
+
+// What the adapter needs: the rows it reads the box's hostname from,
+// and the transport the calls go through.
+export interface BoxAdapterDeps {
   fetcher?: typeof fetch;
+  // deadlineMs bounds one call. Unset = the call's own deadline.
   deadlineMs?: number;
 }
 
-// The relay: one call to the box, over its pinned hostname, with the
-// sealed admin token and a short deadline.
-//
-// The admin token is decrypted at call time only (the same rule the mint
-// and audit relays follow) and is never logged. A box that answers with
-// an error status still answered: the relay hands the status and the
-// body back, and the caller decides what an error means.
-export async function relayToBox(
-  store: BoxRelayStore,
-  boxId: string,
-  path: string,
-  deps: BoxRelayDeps = {},
-): Promise<BoxRelay> {
-  const box = store.getBox(boxId);
-  if (!box || box.enrolled !== 1) {
-    return { answered: false, reason: "unknown_box" };
-  }
-  const adminToken = await adminTokenFor(deps.sealKey, box);
-  if (adminToken === null) {
-    return { answered: false, reason: "misconfigured" };
-  }
-  const signal = AbortSignal.timeout(deps.deadlineMs ?? BOX_READ_DEADLINE_MS);
-  let boxRes: Response;
-  try {
-    boxRes = await fetchBox(
-      pinnedRegistry([box]),
-      boxId,
-      path,
-      { headers: { authorization: `Bearer ${adminToken}` }, signal },
-      deps.fetcher,
-    );
-  } catch {
-    return { answered: false, reason: signal.aborted ? "box_timeout" : "box_unreachable" };
-  }
+// The rows the adapter reads: the box it is talking to.
+export interface BoxStore {
+  getBox(id: string): BoxRow | undefined;
+}
+
+// One call to a box: what to ask, and how long the box may take.
+interface BoxCall {
+  path: string;
+  method?: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: string;
+  deadlineMs: number;
+}
+
+// The outcome of one call: the box answered, or it did not.
+type CallOutcome =
+  | { kind: "answered"; res: Response }
+  | { kind: "silent"; reason: BoxSilence };
+
+// The box the brain asks: the port, spoken by this adapter. The wiring
+// (state.ts) builds it and hands it to the brain.
+export function boxAdapter(store: BoxStore, deps: BoxAdapterDeps = {}): Box {
   return {
-    answered: true,
-    status: boxRes.status,
-    body: await boxRes.text(),
-    contentType: boxRes.headers.get("content-type") ?? "text/plain;charset=utf-8",
+    mintLink: (boxId, adminToken, consoleKey) => mintLink(store, boxId, adminToken, consoleKey, deps),
+    auditRows: (boxId, adminToken, n) => auditRows(store, boxId, adminToken, n, deps),
+    revoke: (boxId, adminToken) => revoke(store, boxId, adminToken, deps),
+    status: (boxId, adminToken) => ask(store, boxId, adminToken, BOX_API.status, deps),
+    presence: (boxId, adminToken) => ask(store, boxId, adminToken, BOX_API.presence, deps),
   };
 }
 
-// The admin token the relay carries, or null when the brain cannot read
-// it: no seal key, a binding it cannot read, or a box with no admin
-// token bound.
+// The mint: the box mints its own tap code.
 //
-// The admin token is decrypted at call time only (the same rule the mint
-// and audit relays follow) and is never logged.
-async function adminTokenFor(sealKey: string | undefined, box: BoxRow): Promise<string | null> {
-  if (!sealKey) {
-    console.error("relay: seal key not configured");
-    return null;
+// The console's idempotency key rides along, so a retry never mints
+// twice; when the console sends none, the adapter mints one — the box
+// 400s a keyless mint.
+async function mintLink(
+  store: BoxStore,
+  boxId: string,
+  adminToken: string,
+  consoleKey: string | null,
+  deps: BoxAdapterDeps,
+): Promise<MintAnswer> {
+  const call = await callBox(store, boxId, adminToken, {
+    path: BOX_API.mint,
+    method: "POST",
+    headers: { "idempotency-key": idempotencyKey(consoleKey) },
+    deadlineMs: deps.deadlineMs ?? BOX_WRITE_DEADLINE_MS,
+  }, deps);
+  if (call.kind === "silent") {
+    return { kind: "silent", reason: call.reason };
   }
-  let adminToken: string | null;
+  if (call.res.status === 200) {
+    return { kind: "minted", link: await call.res.text() };
+  }
+  return { kind: "refused", message: await refusal(call.res) };
+}
+
+// The key the box sees: the console's own, or one the adapter mints.
+function idempotencyKey(consoleKey: string | null): string {
+  if (consoleKey && consoleKey.length > 0) {
+    return consoleKey;
+  }
+  return crypto.randomUUID();
+}
+
+// The audit: the box's own rows, in the box's own shape.
+async function auditRows(
+  store: BoxStore,
+  boxId: string,
+  adminToken: string,
+  n: number,
+  deps: BoxAdapterDeps,
+): Promise<AuditAnswer> {
+  const call = await callBox(store, boxId, adminToken, {
+    path: `${BOX_API.audit}?n=${n}`,
+    deadlineMs: deps.deadlineMs ?? AUDIT_DEADLINE_MS,
+  }, deps);
+  if (call.kind === "silent") {
+    return { kind: "silent", reason: call.reason };
+  }
+  if (call.res.status !== 200) {
+    return { kind: "unreadable", reason: `status ${call.res.status}` };
+  }
+  const rows = await boxRows(call.res);
+  return rows === null ? { kind: "unreadable", reason: "box_bad_json" } : { kind: "rows", rows };
+}
+
+// The rows the box sent. Null when the answer is not a list of rows:
+// the brain never guesses what the box said.
+async function boxRows(res: Response): Promise<unknown[] | null> {
+  let raw: unknown;
   try {
-    adminToken = await unsealAdminToken(sealKey, box.admin_token_sealed);
+    raw = await res.json();
   } catch {
-    console.error("relay: admin token unseal failed");
     return null;
   }
-  if (!adminToken) {
-    console.error("relay: no admin token bound for box");
+  return Array.isArray(raw) ? (raw as unknown[]) : null;
+}
+
+// The revoke: the box rotates its own credentials. The confirm rides
+// along, because the box is never asked to confirm on the console's
+// behalf.
+async function revoke(
+  store: BoxStore,
+  boxId: string,
+  adminToken: string,
+  deps: BoxAdapterDeps,
+): Promise<RevokeAnswer> {
+  const call = await callBox(store, boxId, adminToken, {
+    path: BOX_API.revoke,
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ confirm: true }),
+    deadlineMs: deps.deadlineMs ?? BOX_WRITE_DEADLINE_MS,
+  }, deps);
+  if (call.kind === "silent") {
+    return { kind: "silent", reason: call.reason };
+  }
+  if (call.res.status !== 200) {
+    return { kind: "refused", message: await refusal(call.res) };
+  }
+  const epoch = await rotatedEpoch(call.res);
+  return epoch === null ? { kind: "claimed" } : { kind: "revoked", epoch };
+}
+
+// The epoch the box rotated to, when it named one. Null when it did
+// not: the box claims it revoked and says nothing about its epoch.
+async function rotatedEpoch(res: Response): Promise<number | null> {
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
     return null;
   }
-  return adminToken;
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  const epoch = (raw as Record<string, unknown>)["epoch"];
+  return Number.isInteger(epoch) && (epoch as number) >= 0 ? (epoch as number) : null;
 }
 
-// The relay the brain asks a box through: the box port, spoken by this
-// adapter. The wiring (state.ts) builds it and hands it to the brain.
-export function boxRelayer(store: BoxRelayStore, deps: BoxRelayDeps = {}): BoxRelayer {
-  return (boxId: string, path: string) => relayToBox(store, boxId, path, deps);
+// The status and the presence: the box's own answer, relayed.
+async function ask(
+  store: BoxStore,
+  boxId: string,
+  adminToken: string,
+  path: string,
+  deps: BoxAdapterDeps,
+): Promise<BoxReply> {
+  const call = await callBox(store, boxId, adminToken, {
+    path,
+    deadlineMs: deps.deadlineMs ?? BOX_READ_DEADLINE_MS,
+  }, deps);
+  if (call.kind === "silent") {
+    return { kind: "silent", reason: call.reason };
+  }
+  return { kind: "answered", message: { status: call.res.status, said: await call.res.text() } };
 }
 
-// The status each failed relay reason answers with.
-const RELAY_FAILURE_STATUS = new Map<RelayFailure, number>([
-  ["unknown_box", 404],
-  ["misconfigured", 500],
-  ["box_timeout", 504],
-  ["box_unreachable", 502],
-]);
+// The box's refusal: the status it answered with and what it said.
+async function refusal(res: Response): Promise<BoxMessage> {
+  return { status: res.status, said: await res.text() };
+}
 
-// The status a failed relay answers with: the reason names the answer.
-// A reason the table does not know is a bad gateway — the brain cannot
-// say more about a relay it does not understand.
-export function relayFailureStatus(reason: RelayFailure): number {
-  return RELAY_FAILURE_STATUS.get(reason) ?? 502;
+// One call to a box: the bearer, the deadline, the pinned hostname.
+//
+// A box the brain does not know, or one that is not enrolled, is never
+// called. A box that does not answer is a silence, and the silence says
+// whether the box was slow or gone.
+async function callBox(
+  store: BoxStore,
+  boxId: string,
+  adminToken: string,
+  call: BoxCall,
+  deps: BoxAdapterDeps,
+): Promise<CallOutcome> {
+  const box = store.getBox(boxId);
+  if (!box || box.enrolled !== 1) {
+    return { kind: "silent", reason: "unknown_box" };
+  }
+  const signal = AbortSignal.timeout(call.deadlineMs);
+  try {
+    const res = await fetchBox(
+      pinnedRegistry([box]),
+      boxId,
+      call.path,
+      {
+        method: call.method ?? "GET",
+        headers: { authorization: `Bearer ${adminToken}`, ...call.headers },
+        body: call.body,
+        signal,
+      },
+      deps.fetcher,
+    );
+    return { kind: "answered", res };
+  } catch {
+    return { kind: "silent", reason: signal.aborted ? "box_timeout" : "box_unreachable" };
+  }
 }

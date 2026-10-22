@@ -473,11 +473,14 @@ The brain is not clean architecture — no entities with behaviour, no
 repositories, no use-case objects. Three rules instead:
 
 1. **The domain names its own ports.** A use case says what it needs
-   ("tell the owner this", "point these two names at this tunnel", "ask
-   this box for its status") in the domain's own words, and the adapter
-   that provides it is wired in from the outside. The needs live in
-   `worker/src/ports.ts`. A port that names the adapter's type, its HTTP
-   shape or the client's methods is the adapter wearing a port's name.
+   ("tell the owner this", "point these two names at this tunnel", "mint
+   a link on this box") in the domain's own words, and the adapter
+   that provides it is wired in from the outside. The needs live with
+   the party they are about: `worker/src/owner.ts` (the owner's chat and
+   the notifier), `worker/src/box.ts` (the boxes) and
+   `worker/src/records.ts` (the DNS records). A port that names the
+   adapter's type, its HTTP shape or the client's methods is the adapter
+   wearing a port's name.
 2. **The adapters implement the ports; the domain never imports an
    adapter.** The port lives in the domain, the implementation lives next
    to the transport it speaks to, and the wiring hands one to the other.

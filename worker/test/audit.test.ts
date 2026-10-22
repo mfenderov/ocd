@@ -1,7 +1,8 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { boxAdapter, AUDIT_DEADLINE_MS } from "../src/boxapi";
 import {
-  AUDIT_DEADLINE_MS,
+  
   fetchAudits,
   handleAudit,
   parseAuditN,
@@ -123,7 +124,7 @@ describe("audit merge (unit)", () => {
       ],
       calls,
     );
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(calls).toHaveLength(2);
     // Receipt order is [a-new, a-old, b-mid]; event-time desc is [a-new, b-mid, a-old].
     expect(rows.map((r) => (r as { actor?: string }).actor)).toEqual(["a-new", "b-mid", "a-old"]);
@@ -144,7 +145,7 @@ describe("audit merge (unit)", () => {
       }
       return Response.json([seedRow(1699999990, "fast-actor")]);
     }) as typeof fetch;
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher, deadlineMs: 30 });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher, deadlineMs: 30 }) });
     expect(Date.now() - start).toBeLessThan(5000);
     expect(rows).toHaveLength(2);
     // Marker carries last-synced time, so it sorts first here.
@@ -156,7 +157,7 @@ describe("audit merge (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "audit-off", { last_seen: 1700000123 });
     const failing: typeof fetch = () => Promise.reject(new Error("conn refused"));
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: failing });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: failing }) });
     expect(rows).toEqual([
       { box: "audit-off", at: 1700000123, error: "box_unreachable", last_seen: 1700000123, tainted: false },
     ]);
@@ -176,7 +177,7 @@ describe("audit merge (unit)", () => {
       }
       return Promise.resolve(Response.json({ at: 1 }));
     }) as typeof fetch;
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(rows).toHaveLength(3);
     expect(rows).toContainEqual(
       expect.objectContaining({ box: "audit-500", error: "box_error", detail: "status 500" }),
@@ -202,7 +203,7 @@ describe("audit merge (unit)", () => {
       ],
       calls,
     );
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     // Both boxes were fetched: taint refused nothing.
     expect(calls).toHaveLength(2);
     expect(rows).toHaveLength(2);
@@ -215,7 +216,7 @@ describe("audit merge (unit)", () => {
     await seedBox(store, "audit-off-tainted", { epoch: 1, last_seen: 1700000123 });
     store.tombstones.set("audit-off-tainted", { box_id: "audit-off-tainted", epoch: 1 });
     const failing: typeof fetch = () => Promise.reject(new Error("conn refused"));
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: failing });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: failing }) });
     expect(rows).toEqual([
       { box: "audit-off-tainted", at: 1700000123, error: "box_unreachable", last_seen: 1700000123, tainted: true },
     ]);
@@ -225,7 +226,7 @@ describe("audit merge (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "audit-shape");
     const fetcher = rowsFetcher([["audit-shape", [seedRow(1699999900, "shaped")]]], []);
-    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(rows).toHaveLength(1);
     expect(Object.keys(rows[0]).sort()).toEqual(
       ["action", "actor", "at", "box", "device", "ip", "result", "tainted", "ua"],
@@ -238,7 +239,7 @@ describe("audit merge (unit)", () => {
     await seedBox(store, "audit-only-b");
     const calls: FetchCall[] = [];
     const fetcher = rowsFetcher([["audit-only-b", [seedRow(1699999900, "b-only")]]], calls);
-    const rows = await fetchAudits(store, { boxId: "audit-only-b", n: 50 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { boxId: "audit-only-b", n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://audit-only-b.example.com/_oc/audit?n=50");
     expect(new Headers(calls[0].init.headers).get("authorization")).toBe("Bearer audit-admin-plaintext-6");
@@ -263,7 +264,7 @@ describe("audit merge (unit)", () => {
     const calls: FetchCall[] = [];
     const res = await handleAudit(new Request("https://fleet.local/audit?box=ghost"), store, {
       sealKey: SEAL_KEY,
-      fetcher: rowsFetcher([], calls),
+      box: boxAdapter(store, { fetcher: rowsFetcher([], calls) }),
     });
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: "unknown_box" });
@@ -277,7 +278,7 @@ describe("audit merge (unit)", () => {
       const calls: FetchCall[] = [];
       const res = await handleAudit(new Request(`https://fleet.local/audit${query}`), store, {
         sealKey: SEAL_KEY,
-        fetcher: rowsFetcher([["audit-n", []]], calls),
+        box: boxAdapter(store, { fetcher: rowsFetcher([["audit-n", []]], calls) }),
       });
       expect(res.status).toBe(200);
       expect(Object.keys(await res.json())).toEqual(["rows"]);
@@ -290,7 +291,7 @@ describe("audit merge (unit)", () => {
     const store = new MemStore();
     await seedBox(store, "audit-noseal");
     const calls: FetchCall[] = [];
-    const noKey = await fetchAudits(store, { n: 50 }, { fetcher: rowsFetcher([["audit-noseal", []]], calls) });
+    const noKey = await fetchAudits(store, { n: 50 }, { box: boxAdapter(store, { fetcher: rowsFetcher([["audit-noseal", []]], calls) }) });
     expect(noKey).toEqual([
       { box: "audit-noseal", at: 1700000000, error: "misconfigured", last_seen: 1700000000, tainted: false },
     ]);
@@ -298,7 +299,7 @@ describe("audit merge (unit)", () => {
     if (box) {
       store.boxes.set("audit-noseal", { ...box, admin_token_sealed: "" });
     }
-    const noToken = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: rowsFetcher([["x", []]], calls) });
+    const noToken = await fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: rowsFetcher([["x", []]], calls) }) });
     expect(noToken).toEqual([
       { box: "audit-noseal", at: 1700000000, error: "misconfigured", last_seen: 1700000000, tainted: false },
     ]);
@@ -316,7 +317,7 @@ describe("audit merge (unit)", () => {
       ],
       [],
     );
-    const rows = await fetchAudits(store, { n: 4 }, { sealKey: SEAL_KEY, fetcher });
+    const rows = await fetchAudits(store, { n: 4 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher }) });
     expect(rows).toHaveLength(4);
     expect(rows.map((r) => (r as { actor?: string }).actor)).toEqual(["a1", "b1", "b2", "a2"]);
     expect(rows.map((r) => r.at)).toEqual([1699999900, 1699999850, 1699999750, 1699999700]);
@@ -327,7 +328,7 @@ describe("audit merge (unit)", () => {
     await seedBox(store, "audit-known");
     const calls: FetchCall[] = [];
     await expect(
-      fetchAudits(store, { boxId: "ghost", n: 50 }, { sealKey: SEAL_KEY, fetcher: rowsFetcher([], calls) }),
+      fetchAudits(store, { boxId: "ghost", n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: rowsFetcher([], calls) }) }),
     ).rejects.toThrow(UnknownBoxError);
     expect(calls).toHaveLength(0);
   });
@@ -337,7 +338,7 @@ describe("audit merge (unit)", () => {
     await seedBox(store, "audit-badfetch");
     const nullFetcher = (() => Promise.resolve(null)) as unknown as typeof fetch;
     await expect(
-      fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, fetcher: nullFetcher }),
+      fetchAudits(store, { n: 50 }, { sealKey: SEAL_KEY, box: boxAdapter(store, { fetcher: nullFetcher }) }),
     ).rejects.toThrow(TypeError);
   });
 });

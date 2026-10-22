@@ -9,28 +9,28 @@ import {
   type BotStore,
 } from "../src/bot";
 import app, { type Env as EdgeEnv } from "../src/index";
-import type { TelegramClient } from "../src/ports";
+import type { OwnerChat } from "../src/owner";
 import { inState, requestedUrl } from "./helpers";
 
 // The router answers one thing itself: a tap it drops. The command
 // layer owns every other reply. The client is here because the brain
 // owns every message.
-const TELEGRAM: TelegramClient = {
-  sendMessage: () => Promise.resolve({ message_id: 1 }),
-  editMessageText: () => Promise.resolve(true),
-  answerCallbackQuery: () => Promise.resolve(),
+const TELEGRAM: OwnerChat = {
+  say: () => Promise.resolve({ id: 1 }),
+  replace: () => Promise.resolve(true),
+  answerTap: () => Promise.resolve(),
 };
 
 // The client that remembers the taps it answered: a tap that is not
 // answered leaves the owner's button spinning.
-function recordingTelegram(): { telegram: TelegramClient; answered: string[] } {
+function recordingTelegram(): { telegram: OwnerChat; answered: string[] } {
   const answered: string[] = [];
   return {
     answered,
     telegram: {
-      sendMessage: () => Promise.resolve({ message_id: 1 }),
-      editMessageText: () => Promise.resolve(true),
-      answerCallbackQuery: (callbackId) => {
+      say: () => Promise.resolve({ id: 1 }),
+      replace: () => Promise.resolve(true),
+      answerTap: (callbackId) => {
         answered.push(callbackId);
         return Promise.resolve();
       },

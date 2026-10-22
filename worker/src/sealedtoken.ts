@@ -29,7 +29,7 @@ function base64ToBytes(raw: string): Uint8Array {
 
 async function importSealKey(secret: string): Promise<CryptoKey> {
   if (!secret) {
-    throw new Error("enroll: seal key not configured");
+    throw new Error("seal: seal key not configured");
   }
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   return crypto.subtle.importKey("raw", digest, { name: "AES-GCM", length: 256 }, false, [

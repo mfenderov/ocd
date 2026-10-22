@@ -1,7 +1,6 @@
 import { unsealAdminToken } from "./sealedtoken";
-import { fetchBox, pinnedRegistry } from "./heartbeat";
+import type { Box, BoxSilence } from "./box";
 import type { BoxRow } from "./boxes";
-import { BOX_API } from "./ports";
 import { isTainted, type TombstoneRow } from "./tombstone";
 
 // Audit merge: console GET /api/audit?box=&n= fans out in parallel to each
@@ -13,9 +12,6 @@ import { isTainted, type TombstoneRow } from "./tombstone";
 // here: a tainted box's rows still show, marked `tainted: true` — audit
 // never refuses what mint refuses. Admin tokens decrypt only at call time;
 // plaintext is never logged.
-
-// Box reads get 5s (audit is a small SQLite scan server-side).
-export const AUDIT_DEADLINE_MS = 5_000;
 
 // Box row contract (binding, from Plan 1): snake_case JSON array.
 interface BoxAuditRow {
@@ -38,7 +34,7 @@ interface MergedAuditRow extends BoxAuditRow {
 interface AuditErrorRow {
   box: string;
   at: number;
-  error: "box_timeout" | "box_unreachable" | "box_error" | "misconfigured";
+  error: BoxSilence | "box_error";
   detail?: string;
   last_seen: number;
   tainted: boolean;
@@ -54,8 +50,9 @@ export interface AuditStore {
 
 export interface AuditDeps {
   sealKey?: string;
-  fetcher?: typeof fetch;
-  deadlineMs?: number;
+  // The box: the port the brain asks a box through. The wiring builds
+  // it; the audit never builds a client of its own.
+  box: Box;
 }
 
 // Box page size mirrors the box contract: default 50, cap 200, garbage 50.
@@ -133,50 +130,9 @@ async function auditAdminToken(sealKey: string | undefined, box: BoxRow): Promis
   return adminToken;
 }
 
-// The box's audit page. A box that does not answer is a marker, not a
-// failed request: the deadline says whether the box was slow or gone.
-async function fetchBoxAudit(
-  box: BoxRow,
-  n: number,
-  adminToken: string,
-  signal: AbortSignal,
-  deps: AuditDeps,
-): Promise<Response> {
-  try {
-    return await fetchBox(
-      pinnedRegistry([box]),
-      box.id,
-      `${BOX_API.audit}?n=${n}`,
-      { headers: { authorization: `Bearer ${adminToken}` }, signal },
-      deps.fetcher,
-    );
-  } catch {
-    throw new BoxAuditError(signal.aborted ? "box_timeout" : "box_unreachable");
-  }
-}
-
-// The rows the box sent. A box that answers with an error, with
-// something that is not JSON, or with something that is not a list of
-// rows is a marker: the brain never guesses what the box said.
-async function boxAuditRows(res: Response): Promise<unknown[]> {
-  if (res.status !== 200) {
-    throw new BoxAuditError("box_error", `status ${res.status}`);
-  }
-  let raw: unknown;
-  try {
-    raw = await res.json();
-  } catch {
-    throw new BoxAuditError("box_error", "box_bad_json");
-  }
-  if (!Array.isArray(raw)) {
-    throw new BoxAuditError("box_error", "box_bad_json");
-  }
-  // The list is a list; what a row holds is unknown until it is read.
-  return raw as unknown[];
-}
-
-// One box's audit rows. Every failure the box can cause is a marker for
-// that box alone: the other boxes' rows still come back.
+// The rows the box sent, or the marker the box earns. A box that does
+// not answer is a marker, not a failed request: the deadline says
+// whether the box was slow or gone.
 async function fetchOneBox(
   box: BoxRow,
   n: number,
@@ -184,10 +140,14 @@ async function fetchOneBox(
   deps: AuditDeps,
 ): Promise<MergedAuditRow[]> {
   const adminToken = await auditAdminToken(deps.sealKey, box);
-  const signal = AbortSignal.timeout(deps.deadlineMs ?? AUDIT_DEADLINE_MS);
-  const res = await fetchBoxAudit(box, n, adminToken, signal, deps);
-  const raw = await boxAuditRows(res);
-  return raw.map((row) => toMerged(box.id, tainted, row));
+  const answer = await deps.box.auditRows(box.id, adminToken, n);
+  if (answer.kind === "silent") {
+    throw new BoxAuditError(answer.reason);
+  }
+  if (answer.kind === "unreadable") {
+    throw new BoxAuditError("box_error", answer.reason);
+  }
+  return answer.rows.map((row) => toMerged(box.id, tainted, row));
 }
 
 function byEventTimeDesc(a: AuditRow, b: AuditRow): number {
@@ -206,7 +166,7 @@ function byEventTimeDesc(a: AuditRow, b: AuditRow): number {
 export async function fetchAudits(
   store: AuditStore,
   opts: { boxId?: string; n: number },
-  deps: AuditDeps = {},
+  deps: AuditDeps,
 ): Promise<AuditRow[]> {
   const n = Number.isInteger(opts.n) && opts.n > 0 ? Math.min(opts.n, 200) : 50;
   if (opts.boxId) {
@@ -249,7 +209,7 @@ export async function fetchAudits(
 export async function handleAudit(
   request: Request,
   store: AuditStore,
-  deps: AuditDeps = {},
+  deps: AuditDeps,
 ): Promise<Response> {
   const url = new URL(request.url);
   const boxId = url.searchParams.get("box") || undefined;

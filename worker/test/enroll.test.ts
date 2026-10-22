@@ -27,7 +27,7 @@ import {
 import { boxDnsWriter } from "../src/dns";
 import { sealAdminToken, unsealAdminToken } from "../src/sealedtoken";
 import { createTelegramClient, sendTelegramMessage } from "../src/telegram";
-import type { NotifyFn } from "../src/ports";
+import type { NotifyFn } from "../src/owner";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";
 import app from "../src/index";
 import { requestedUrl } from "./helpers";

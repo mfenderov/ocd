@@ -1,5 +1,6 @@
 import { OFFLINE_AFTER_SEC } from "./liveness";
 import type { BoxPublic } from "./boxes";
+import type { OwnerButton, OwnerButtons } from "./owner";
 
 // The brain's inline keyboards: the buttons the owner taps.
 //
@@ -9,23 +10,16 @@ import type { BoxPublic } from "./boxes";
 // labels and the layout. One thing changes: the payload is
 // "<action>:<boxId>" instead of the Go's "flink:<boxId>", because the
 // brain's buttons ask for more than a link.
+//
+// The buttons are the owner's chat's buttons (owner.ts): a label and
+// what the tap does. The Bot API's own spelling of a button belongs to
+// the adapter that speaks it.
 
-// A button that runs a command when it is tapped.
-export interface InlineButton {
-  text: string;
-  callback_data: string;
+// The Open button: the Go's openButton. The one-time link travels as the
+// target, never as visible text.
+export function openButton(label: string, link: string): OwnerButton {
+  return { label, link };
 }
-
-// A button that opens a link: the Go's openButton. The one-time link
-// travels as the target, never as visible text.
-export interface UrlButton {
-  text: string;
-  url: string;
-}
-
-// One keyboard: rows of buttons.
-type Button = InlineButton | UrlButton;
-export type Keyboard = Button[][];
 
 // The actions a button can carry: the brain's four taps. Mint a link,
 // show the board, revoke a box, read a box's history.
@@ -71,13 +65,13 @@ export function stateDot(state: string): string {
 // The clock comes from the caller: the board's label and the fleet's
 // text must read the same second, or they can call one box ok and the
 // other offline.
-export function fleetBoard(boxes: BoxPublic[], now: number): InlineButton[][] {
+export function fleetBoard(boxes: BoxPublic[], now: number): OwnerButtons {
   if (boxes.length === 0) {
     return [];
   }
   const row = boxes.map((box) => ({
-    text: boxLabel(box, now),
-    callback_data: callbackData("link", box.id),
+    label: boxLabel(box, now),
+    tap: callbackData("link", box.id),
   }));
   return [row];
 }
@@ -86,13 +80,8 @@ export function fleetBoard(boxes: BoxPublic[], now: number): InlineButton[][] {
 // sends one keyboard for /fleet and /link — "/link is the menu: which
 // machine do you want to work in?" (internal/tg/tg.go) — so the menu and
 // the board are the same buttons.
-export function linkMenu(boxes: BoxPublic[], now: number): InlineButton[][] {
+export function linkMenu(boxes: BoxPublic[], now: number): OwnerButtons {
   return fleetBoard(boxes, now);
-}
-
-// The Open button: the Go's openButton.
-export function openButton(text: string, url: string): UrlButton {
-  return { text, url };
 }
 
 // The payload of a button: "<action>:<boxId>".

@@ -12,7 +12,7 @@
 // Telegram's own description. A cause that is neither an Error nor a
 // string is passed through as it came in. The errors name the method
 // and, when Telegram answered, its status and its own description.
-import { messageFailureReason, type MessageFailure, type NotifyFn, type TelegramClient } from "./ports";
+import type { NotifyFn, OwnerButtons, OwnerChat, SentMessage } from "./owner";
 
 const API_BASE = "https://api.telegram.org";
 
@@ -29,7 +29,7 @@ const RENDER_OPTS = {
 // The client the adapter builds: the port's three operations and the
 // one the brain's front door needs — registering the webhook. The port
 // says nothing about that one: the domain never registers the webhook.
-export interface TelegramApi extends TelegramClient {
+export interface TelegramApi extends OwnerChat {
   setWebhook(url: string, secret: string): Promise<void>;
 }
 
@@ -44,9 +44,9 @@ interface TelegramEnvelope {
 // logs the response body. Telegram's own description is in the message,
 // not in the reason.
 //
-// The class is the adapter's own: the domain reads the failure through
-// the port (messageFailureReason), never through this class.
-class TelegramError extends Error implements MessageFailure {
+// The class is the adapter's own: the domain reads a failure through
+// the message it carries, never through this class.
+class TelegramError extends Error {
   readonly method: string;
   readonly reason: string;
 
@@ -57,6 +57,16 @@ class TelegramError extends Error implements MessageFailure {
     this.method = method;
     this.reason = reason;
   }
+}
+
+// The reason a failed message carries, or "unknown error" when the
+// failure carries none. Only this module's own failure has a reason:
+// the class is the adapter's, so nothing outside can read one.
+function messageFailureReason(err: unknown): string {
+  if (err instanceof TelegramError) {
+    return err.reason;
+  }
+  return "unknown error";
 }
 
 const REDACTED = "[redacted]";
@@ -120,10 +130,11 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
   }
 
   return {
-    async sendMessage(chatId, text, opts) {
+    async say(chatId, text, buttons): Promise<SentMessage> {
       const body: Record<string, unknown> = { chat_id: chatId, text, ...RENDER_OPTS };
-      if (opts?.replyMarkup !== undefined) {
-        body["reply_markup"] = opts.replyMarkup;
+      const markup = replyMarkup(buttons);
+      if (markup !== undefined) {
+        body["reply_markup"] = markup;
       }
       const result = await call<unknown>("sendMessage", body);
       const messageId = (result as { message_id?: unknown } | null | undefined)?.message_id;
@@ -132,10 +143,10 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
         // message with later — that is a failure, not an empty success.
         throw new TelegramError("sendMessage", "the answer carried no message id");
       }
-      return { message_id: messageId };
+      return { id: messageId };
     },
 
-    async editMessageText(chatId, messageId, text) {
+    async replace(chatId, messageId, text) {
       const result = await call<unknown>("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
@@ -149,8 +160,8 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
       return result === true || (typeof result === "object" && result !== null);
     },
 
-    async answerCallbackQuery(callbackId, text) {
-      const body: Record<string, unknown> = { callback_query_id: callbackId };
+    async answerTap(tapId, text) {
+      const body: Record<string, unknown> = { callback_query_id: tapId };
       if (text !== undefined) {
         body["text"] = text;
       }
@@ -170,18 +181,36 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
   };
 }
 
-// Owner ping, sent through the Telegram client — the one place that
+// The Bot API's keyboard: the brain's buttons in the Bot API's shape.
+// The shape is the adapter's business — the brain says what a button
+// does, not how Telegram spells it.
+function replyMarkup(buttons: OwnerButtons | undefined): Record<string, unknown> | undefined {
+  if (!buttons || buttons.length === 0) {
+    return undefined;
+  }
+  return {
+    inline_keyboard: buttons.map((row) =>
+      row.map((button) =>
+        "tap" in button
+          ? { text: button.label, callback_data: button.tap }
+          : { text: button.label, url: button.link },
+      ),
+    ),
+  };
+}
+
+// Owner ping, sent through the owner's chat — the one place that
 // knows the Bot API's shape. The contract is unchanged: the ping never
 // throws, a failure is reported as false, and the log carries the
 // reason alone — never the URL (it embeds the token), the body, or the
 // chat id.
 //
-// The log says "enroll:" because the notifier is the enrolment's ping
-// sink — the same sink the heartbeat's warnings use. The wording is
-// left as it was: a log line's text is not the brain's answer, and
-// changing it would change what the operator greps for.
+// The log says "owner:" because the notifier is the owner's notice
+// sink: the enrolment's pings, the heartbeat's warnings and the DNS
+// failure report all go through it. The prefix names what the line is
+// about, like every other log line in the brain.
 export async function sendTelegramMessage(
-  client: TelegramClient,
+  client: OwnerChat,
   chatId: string,
   text: string,
 ): Promise<boolean> {
@@ -189,14 +218,14 @@ export async function sendTelegramMessage(
   // the Go bot parses its owner id the same way.
   const chat = Number(chatId);
   if (!Number.isInteger(chat)) {
-    console.error("enroll: telegram send failed (bad chat id)");
+    console.error("owner: telegram send failed (bad chat id)");
     return false;
   }
   try {
-    await client.sendMessage(chat, text);
+    await client.say(chat, text);
     return true;
   } catch (err) {
-    console.error(`enroll: telegram send failed (${messageFailureReason(err)})`);
+    console.error(`owner: telegram send failed (${messageFailureReason(err)})`);
     return false;
   }
 }
@@ -208,13 +237,13 @@ export async function sendTelegramMessage(
 // the log says so. The client itself is built by the wiring
 // (state.ts) — this module only speaks it.
 export function telegramNotifier(
-  client: TelegramClient | undefined,
+  client: OwnerChat | undefined,
   chatId: string | undefined,
 ): NotifyFn {
   if (!client || !chatId) {
     // The notifier still answers with a promise: the caller awaits it.
     return () => {
-      console.error("enroll: telegram not configured; ping dropped");
+      console.error("owner: telegram not configured; ping dropped");
       return Promise.resolve();
     };
   }

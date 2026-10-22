@@ -4,7 +4,7 @@ import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "..
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
-import type { TelegramClient } from "../src/ports";
+import type { OwnerButtons, OwnerChat, SentMessage } from "../src/owner";
 import { inState } from "./helpers";
 
 // One row of the fleet's history, the shape the brain's audit answers with.
@@ -34,27 +34,23 @@ const AUDIT_ERROR_ROW: AuditRow = {
   error: "box_timeout",
 };
 
-// The keyboard the brain sent, as Telegram reads it.
-interface RecordedMarkup {
-  inline_keyboard?: Array<Array<{ text: string; callback_data?: string; url?: string }>>;
-}
-
-// The command layer owns every reply, so the client is the seam the tests
-// watch: it records what the brain would have sent to Telegram.
-class RecordingTelegram implements TelegramClient {
-  readonly sent: Array<{ chatId: number; text: string; markup?: RecordedMarkup }> = [];
+// The command layer owns every reply, so the client's seam is what the
+// tests watch: it records what the brain would have said, in the brain's
+// own shape — the buttons, not the Bot API's keyboard.
+class RecordingTelegram implements OwnerChat {
+  readonly sent: Array<{ chatId: number; text: string; buttons?: OwnerButtons }> = [];
   readonly answered: string[] = [];
 
-  sendMessage(chatId: number, text: string, opts?: { replyMarkup?: unknown }): Promise<{ message_id: number }> {
-    this.sent.push({ chatId, text, markup: opts?.replyMarkup as RecordedMarkup | undefined });
-    return Promise.resolve({ message_id: this.sent.length });
+  say(chatId: number, text: string, buttons?: OwnerButtons): Promise<SentMessage> {
+    this.sent.push({ chatId, text, buttons });
+    return Promise.resolve({ id: this.sent.length });
   }
 
-  editMessageText(): Promise<boolean> {
+  replace(): Promise<boolean> {
     return Promise.resolve(true);
   }
 
-  answerCallbackQuery(callbackId: string): Promise<void> {
+  answerTap(callbackId: string): Promise<void> {
     this.answered.push(callbackId);
     return Promise.resolve();
   }
@@ -251,7 +247,7 @@ describe("/link", () => {
 
     expect(telegram.sent[0].text).toContain("home");
     // The menu: one button per box.
-    expect(telegram.sent[0].markup?.inline_keyboard?.[0]).toHaveLength(1);
+    expect(telegram.sent[0].buttons?.[0]).toHaveLength(1);
   });
 });
 
@@ -264,14 +260,14 @@ describe("the keyboards", () => {
 
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
-    const keyboard = telegram.sent[0].markup?.inline_keyboard;
+    const keyboard = telegram.sent[0].buttons;
     expect(keyboard).toHaveLength(1);
     expect(keyboard?.[0]).toHaveLength(2);
     // Every button names the box it acts on.
-    expect(keyboard?.[0][0].callback_data).toBe("link:home");
-    expect(keyboard?.[0][1].callback_data).toBe("link:mac");
+    expect(keyboard?.[0][0]).toMatchObject({ tap: "link:home" });
+    expect(keyboard?.[0][1]).toMatchObject({ tap: "link:mac" });
     // The offline box is marked, not hidden.
-    expect(keyboard?.[0][1].text).toContain("🔴");
+    expect(keyboard?.[0][1].label).toContain("🔴");
   });
 
   it("sends no keyboard when no box is enrolled", async () => {
@@ -279,7 +275,7 @@ describe("the keyboards", () => {
 
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
-    expect(telegram.sent[0].markup).toBeUndefined();
+    expect(telegram.sent[0].buttons).toBeUndefined();
   });
 
   // The board's label and the fleet's text read one clock and one rule,
@@ -293,7 +289,7 @@ describe("the keyboards", () => {
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
     const text = telegram.sent[0].text;
-    const labels = telegram.sent[0].markup?.inline_keyboard?.[0].map((button) => button.text) ?? [];
+    const labels = telegram.sent[0].buttons?.[0].map((button) => button.label) ?? [];
     expect(text).toContain("ok");
     expect(text).toContain("offline");
     expect(labels[0]).toContain("🟢");
@@ -524,7 +520,7 @@ describe("the taps", () => {
     expect(telegram.answered).toEqual(["cb-1"]);
     // The link rides the Open button, never the visible text.
     expect(telegram.sent[0].text).toContain("mac");
-    expect(telegram.sent[0].markup?.inline_keyboard?.[0][0].url).toBe("https://tap.example/?t=tok-1");
+    expect(telegram.sent[0].buttons?.[0][0]).toMatchObject({ link: "https://tap.example/?t=tok-1" });
   });
 
   it("explains an offline box instead of minting", async () => {

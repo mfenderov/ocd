@@ -2,7 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { BoxRow } from "../src/boxes";
 import { sealAdminToken } from "../src/sealedtoken";
-import type { TelegramClient } from "../src/ports";
+import type { OwnerChat } from "../src/owner";
 import { handleMintToken } from "../src/tokens";
 import { inState, requestedUrl } from "./helpers";
 
@@ -143,14 +143,14 @@ describe("fleet DO (real SQLite backend)", () => {
 
 // The Telegram client is the seam the command layer answers through: the
 // test records what the brain would have sent to the owner.
-function recordingTelegram(replies: string[]): TelegramClient {
+function recordingTelegram(replies: string[]): OwnerChat {
   return {
-    sendMessage: (_chatId, text) => {
+    say: (_chatId, text) => {
       replies.push(text);
-      return Promise.resolve({ message_id: replies.length });
+      return Promise.resolve({ id: replies.length });
     },
-    editMessageText: () => Promise.resolve(true),
-    answerCallbackQuery: () => Promise.resolve(),
+    replace: () => Promise.resolve(true),
+    answerTap: () => Promise.resolve(),
   };
 }
 

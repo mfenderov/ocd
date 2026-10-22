@@ -27,7 +27,7 @@
 //     names the status, the API's error code and what that code means
 //     here, never the credential.
 // The caller must catch: a throw is a DNS failure, never a failed enrol.
-import type { BoxDns, DnsOutcome, DnsWriter } from "./ports";
+import type { BoxDns, DnsOutcome, DnsWriter } from "./records";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 

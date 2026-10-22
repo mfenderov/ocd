@@ -5,7 +5,7 @@ import { handleEvents, type LinkRow } from "../src/events";
 import { hashToken } from "../src/heartbeat";
 import app, { type Env as EdgeEnv } from "../src/index";
 import type { FleetState } from "../src/state";
-import type { TelegramClient } from "../src/ports";
+import type { OwnerChat } from "../src/owner";
 import { inState } from "./helpers";
 
 // The box's heartbeat secret: the same secret the heartbeat uses, and the
@@ -29,20 +29,20 @@ const BOX: BoxRow = {
 
 // The client that remembers the edits the brain made: the brain owns
 // every message, so the edit is the thing the tests watch.
-class RecordingTelegram implements TelegramClient {
+class RecordingTelegram implements OwnerChat {
   readonly edits: Array<{ chatId: number; messageId: number; text: string }> = [];
   editLands = true;
 
-  sendMessage(): Promise<{ message_id: number }> {
-    return Promise.resolve({ message_id: 1 });
+  say(): Promise<{ id: number }> {
+    return Promise.resolve({ id: 1 });
   }
 
-  editMessageText(chatId: number, messageId: number, text: string): Promise<boolean> {
+  replace(chatId: number, messageId: number, text: string): Promise<boolean> {
     this.edits.push({ chatId, messageId, text });
     return Promise.resolve(this.editLands);
   }
 
-  answerCallbackQuery(): Promise<void> {
+  answerTap(): Promise<void> {
     return Promise.resolve();
   }
 }

@@ -3,7 +3,7 @@ import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
-import { boxRelayer, relayFailureStatus } from "./boxapi";
+import { boxAdapter } from "./boxapi";
 import { boxDnsWriter } from "./dns";
 import {
   handleEnrollApprove,
@@ -23,7 +23,10 @@ import {
 import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
 import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
 import { handleMintLink } from "./mint";
-import { BOX_API, type BoxRelayer, type DnsWriter, type NotifyFn, type TelegramClient } from "./ports";
+import type { Box, BoxReply, BoxSilence } from "./box";
+import type { DnsWriter } from "./records";
+import type { NotifyFn, OwnerChat } from "./owner";
+import { unsealAdminToken } from "./sealedtoken";
 import {
   handleRevoke,
   handleRevokeAll,
@@ -219,7 +222,7 @@ const PRUNE_AFTER_SEC = 24 * 60 * 60;
 export interface AlarmDeps {
   // The notices go to the owner's chat and to no other. A brain without
   // a Telegram token has nobody to tell, so the sweep stays quiet.
-  telegram?: TelegramClient;
+  telegram?: OwnerChat;
   ownerChatId?: number;
   // The probe: did the box answer?
   probePresence: (boxId: string) => Promise<boolean>;
@@ -255,9 +258,9 @@ export class FleetState implements DurableObject {
   // hands in its own, so the sweep runs without Telegram and without the
   // network.
   alarmDeps: AlarmDeps;
-  // The relay the brain asks a box through: the box port, spoken by the
-  // adapter. The wiring builds it and hands it to the brain.
-  readonly relay: BoxRelayer;
+  // The box the brain asks: the box port, spoken by the adapter. The
+  // wiring builds it and hands it to the brain.
+  readonly box: Box;
   // The routes the DO answers: the table the router looks up. Public so
   // the tests can read the scope each route needs off it.
   readonly routes: DoRoute[];
@@ -278,7 +281,7 @@ export class FleetState implements DurableObject {
     this.primaryBox = env?.PRIMARY_BOX?.trim() || DEFAULT_PRIMARY_BOX;
     this.zoneId = env?.CLOUDFLARE_ZONE_ID;
     this.dnsToken = env?.CLOUDFLARE_DNS_TOKEN;
-    this.relay = boxRelayer(this, { sealKey: this.sealKey });
+    this.box = boxAdapter(this);
     this.alarmDeps = {
       telegram: this.telegramClient(),
       ownerChatId: parseOwnerChatId(this.ownerChatId),
@@ -295,7 +298,7 @@ export class FleetState implements DurableObject {
   // The brain's Telegram client: the brain owns every message, and the
   // events route uses it to edit the messages it handed out. Without a
   // token there is no client, and the edits stay owed.
-  private telegramClient(): TelegramClient | undefined {
+  private telegramClient(): OwnerChat | undefined {
     return this.botToken ? createTelegramClient(this.botToken) : undefined;
   }
 
@@ -306,7 +309,7 @@ export class FleetState implements DurableObject {
   //
   // The client rides in as an argument: the brain owns every message, and
   // the route that owns the token hands the client over.
-  async dispatchCommand(cmd: BotCommand, telegram: TelegramClient): Promise<void> {
+  async dispatchCommand(cmd: BotCommand, telegram: OwnerChat): Promise<void> {
     await runCommand(cmd, {
       telegram,
       listBoxes: () => this.listBackends(),
@@ -345,7 +348,7 @@ export class FleetState implements DurableObject {
   // URL. The brain never mints codes for a box — a code is bound to the
   // box that presents it.
   private async mintLink(boxId: string): Promise<string> {
-    const res = await handleMintLink(boxId, null, this, { sealKey: this.sealKey });
+    const res = await handleMintLink(boxId, null, this, { sealKey: this.sealKey, box: this.box });
     const body = await res.text();
     if (res.status !== 200) {
       throw new Error(relayFailure("mint failed", res.status, body));
@@ -358,11 +361,11 @@ export class FleetState implements DurableObject {
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
-    return revokeOneBox(boxId, this, { sealKey: this.sealKey });
+    return revokeOneBox(boxId, this, { sealKey: this.sealKey, box: this.box });
   }
 
   private async revokeEveryBox(): Promise<RevokeResult[]> {
-    return revokeAllBoxes(this, { sealKey: this.sealKey });
+    return revokeAllBoxes(this, { sealKey: this.sealKey, box: this.box });
   }
 
   // The enroll code: the brain is the owner, so it creates the trusted
@@ -397,16 +400,16 @@ export class FleetState implements DurableObject {
   // text. The brain does not parse it — the command layer prints what
   // the box said.
   private async boxStatus(boxId: string): Promise<string> {
-    const relay = await this.relay(boxId, BOX_API.status);
-    if (!relay.answered) {
+    const answer = await this.askBox(boxId, (id, token) => this.box.status(id, token));
+    if (answer.kind === "silent") {
       throw new Error(
-        relay.reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${relay.reason})`,
+        answer.reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${answer.reason})`,
       );
     }
-    if (relay.status !== 200) {
-      throw new Error(`the box answered ${relay.status}`);
+    if (answer.message.status !== 200) {
+      throw new Error(`the box answered ${answer.message.status}`);
     }
-    return relay.body.trim();
+    return answer.message.said.trim();
   }
 
   // The presence probe: did the box answer? The probe is the brain's own
@@ -418,35 +421,81 @@ export class FleetState implements DurableObject {
   // throws here, so the sweep leaves the box unjudged instead of
   // reporting a box the brain never asked.
   private async probePresence(boxId: string): Promise<boolean> {
-    const relay = await this.relay(boxId, BOX_API.presence);
-    if (relay.answered) {
+    const answer = await this.askBox(boxId, (id, token) => this.box.presence(id, token));
+    if (answer.kind === "answered") {
       return true;
     }
-    if (relay.reason === "misconfigured" || relay.reason === "unknown_box") {
-      throw new Error(`the presence probe cannot run (${relay.reason})`);
+    if (answer.reason === "misconfigured" || answer.reason === "unknown_box") {
+      throw new Error(`the presence probe cannot run (${answer.reason})`);
     }
     return false;
   }
 
-  // The relay's answer: the box's own body, or the reason the box was
-  // not reached.
-  private async relayRoute(boxId: string, path: string): Promise<Response> {
-    const relay = await this.relay(boxId, path);
-    if (!relay.answered) {
-      return Response.json({ error: relay.reason }, { status: relayFailureStatus(relay.reason) });
+  // The box's answer, or the reason the brain could not ask it. The
+  // token is the brain's own: it is unsealed here, at call time, right
+  // before the call — never earlier, never logged.
+  private async askBox(
+    boxId: string,
+    ask: (boxId: string, adminToken: string) => Promise<BoxReply>,
+  ): Promise<BoxReply> {
+    const box = this.getBox(boxId);
+    if (!box || box.enrolled !== 1) {
+      return { kind: "silent", reason: "unknown_box" };
     }
-    if (relay.status !== 200) {
+    const adminToken = await this.boxToken(box);
+    if (adminToken === null) {
+      return { kind: "silent", reason: "misconfigured" };
+    }
+    return ask(boxId, adminToken);
+  }
+
+  // The box's admin token, unsealed at call time — the same rule the
+  // mint and the revoke relays follow. Null when the brain cannot read
+  // it: no seal key, a binding it cannot read, or a box with no admin
+  // token bound.
+  private async boxToken(box: BoxRow): Promise<string | null> {
+    if (!this.sealKey) {
+      console.error("relay: seal key not configured");
+      return null;
+    }
+    let adminToken: string | null;
+    try {
+      adminToken = await unsealAdminToken(this.sealKey, box.admin_token_sealed);
+    } catch {
+      console.error("relay: admin token unseal failed");
+      return null;
+    }
+    if (!adminToken) {
+      console.error("relay: no admin token bound for box");
+      return null;
+    }
+    return adminToken;
+  }
+
+  // The relay's answer: the box's own body, or the reason the box was
+  // not reached. The content type is the route's own: the box's status
+  // is a line of text, its presence report is a document.
+  private async relayRoute(
+    boxId: string,
+    ask: (boxId: string, adminToken: string) => Promise<BoxReply>,
+    contentType: string,
+  ): Promise<Response> {
+    const answer = await this.askBox(boxId, ask);
+    if (answer.kind === "silent") {
+      return Response.json({ error: answer.reason }, { status: relayFailureStatus(answer.reason) });
+    }
+    if (answer.message.status !== 200) {
       // The box answered and refused. The console must not read the
       // box's refusal as its own credential problem, so a refusal is a
       // 502 that carries the box's status.
       return Response.json(
-        { error: "box_error", box_status: relay.status, detail: relay.body.slice(0, 200) },
+        { error: "box_error", box_status: answer.message.status, detail: answer.message.said.slice(0, 200) },
         { status: 502 },
       );
     }
-    return new Response(relay.body, {
+    return new Response(answer.message.said, {
       status: 200,
-      headers: { "content-type": relay.contentType },
+      headers: { "content-type": contentType },
     });
   }
 
@@ -993,7 +1042,7 @@ export class FleetState implements DurableObject {
     return [
       // The reads: the boxes the brain knows, and the fleet's history.
       { method: "GET", path: exact("/backends"), scope: "audit", handler: (s) => Promise.resolve(Response.json(s.listBackends())) },
-      { method: "GET", path: exact("/audit"), scope: "audit", handler: (s, c) => handleAudit(c.request, s, { sealKey: s.sealKey }) },
+      { method: "GET", path: exact("/audit"), scope: "audit", handler: (s, c) => handleAudit(c.request, s, { sealKey: s.sealKey, box: s.box }) },
       // The brain's front door: Telegram's webhook, forwarded by the edge.
       { method: "POST", path: exact("/tg"), handler: (s, c) => s.telegramRoute(c.request) },
       // The boxes' door: the box authenticates itself with its heartbeat
@@ -1006,7 +1055,7 @@ export class FleetState implements DurableObject {
       { method: "GET", path: exact("/enroll/approve"), handler: (s, c) => s.enrollApproveRoute(c.request) },
       { method: "GET", path: exact("/enroll/deny"), handler: (s, c) => s.enrollDenyRoute(c.request) },
       // The revokes.
-      { method: "POST", path: exact("/revoke-all"), scope: "revoke", handler: (s, c) => handleRevokeAll(c.request, s, { sealKey: s.sealKey }) },
+      { method: "POST", path: exact("/revoke-all"), scope: "revoke", handler: (s, c) => handleRevokeAll(c.request, s, { sealKey: s.sealKey, box: s.box }) },
       { method: "POST", path: optionalId("/revoke/"), scope: "revoke", handler: (s, c) => s.revokeRoute(c.request, c.id) },
       // The mint: the box mints its own tap code.
       { method: "POST", path: optionalId("/link/"), scope: "link", handler: (s, c) => s.linkRoute(c.request, c.id) },
@@ -1098,7 +1147,7 @@ export class FleetState implements DurableObject {
     if (boxId === null) {
       return Promise.resolve(badRequest());
     }
-    return handleRevoke(boxId, request, this, { sealKey: this.sealKey });
+    return handleRevoke(boxId, request, this, { sealKey: this.sealKey, box: this.box });
   }
 
   // The mint of one box's tap code.
@@ -1109,16 +1158,17 @@ export class FleetState implements DurableObject {
     }
     return handleMintLink(boxId, request.headers.get("idempotency-key"), this, {
       sealKey: this.sealKey,
+      box: this.box,
     });
   }
 
-  // The box's presence, relayed.
+  // The box's presence, relayed: the box's own report, as a document.
   private presenceRoute(rawId: string): Promise<Response> {
     const boxId = this.decodedId(rawId);
     if (boxId === null) {
       return Promise.resolve(badRequest());
     }
-    return this.relayRoute(boxId, BOX_API.presence);
+    return this.relayRoute(boxId, (id, token) => this.box.presence(id, token), "application/json");
   }
 
   // The box's status, relayed as text.
@@ -1127,7 +1177,7 @@ export class FleetState implements DurableObject {
     if (boxId === null) {
       return Promise.resolve(badRequest());
     }
-    return this.relayRoute(boxId, BOX_API.status);
+    return this.relayRoute(boxId, (id, token) => this.box.status(id, token), "text/plain");
   }
 
   // The rotation of a token.
@@ -1173,6 +1223,21 @@ function generateSecret(): string {
 // The brain's clock: Unix seconds, like the DO's other timestamps.
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+// The status each failed relay reason answers with.
+const RELAY_FAILURE_STATUS = new Map<BoxSilence, number>([
+  ["unknown_box", 404],
+  ["misconfigured", 500],
+  ["box_timeout", 504],
+  ["box_unreachable", 502],
+]);
+
+// The status a failed relay answers with: the reason names the answer.
+// A reason the table does not know is a bad gateway — the brain cannot
+// say more about a relay it does not understand.
+function relayFailureStatus(reason: BoxSilence): number {
+  return RELAY_FAILURE_STATUS.get(reason) ?? 502;
 }
 
 // The failed relay, as the owner may read it: the status and a short
