@@ -22,7 +22,7 @@ import {
 } from "./events";
 import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
 import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
-import { handleMintLink, isTainted, type TombstoneRow } from "./mint";
+import { handleMintLink } from "./mint";
 import { BOX_API, type BoxRelayer, type DnsWriter, type NotifyFn, type TelegramClient } from "./ports";
 import {
   handleRevoke,
@@ -33,6 +33,7 @@ import {
 } from "./revoke";
 import { exact, findRoute, optionalId, optionalSingleId, type Route } from "./routes";
 import { createTelegramClient, telegramNotifier } from "./telegram";
+import { isTainted, type TombstoneRow } from "./tombstone";
 import {
   handleDeleteToken,
   handleMintToken,
@@ -645,7 +646,7 @@ export class FleetState implements DurableObject {
   }
 
   // Task 5 (revoke) writes through here; mint only reads. Epoch invariant is
-  // documented on TombstoneRow in mint.ts.
+  // documented on TombstoneRow in tombstone.ts.
   putTombstone(row: TombstoneRow): void {
     this.ensureSchema();
     this.state.storage.sql.exec(

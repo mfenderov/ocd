@@ -1,5 +1,5 @@
 import { integerField, numberField, optionalIntegerField, optionalStringField, textField } from "./fields";
-import type { TombstoneRow } from "./mint";
+import type { TombstoneRow } from "./tombstone";
 import type { BoxRow } from "./boxes";
 
 // Heartbeat request body (box JSON contract, snake_case). The box sends
@@ -359,7 +359,7 @@ async function replayAnswer(
 }
 
 // The taint signal (Task 5 revoke): the tombstone epoch is the greatest
-// stale epoch (see TombstoneRow in mint.ts), so the box is tainted while
+// stale epoch (see TombstoneRow in tombstone.ts), so the box is tainted while
 // its reported epoch has not rotated past it. A healed epoch clears the
 // tombstone here — heartbeat is the only path that observes new epochs.
 function taintOf(store: HeartbeatStore, body: HeartbeatBody): boolean {

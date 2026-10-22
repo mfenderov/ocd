@@ -6,7 +6,7 @@
 // The endpoints the brain asks for are the protocol it speaks with a
 // box, so they live in the ports module (BOX_API): the domain names
 // them, and this module speaks them.
-import { unsealAdminToken } from "./enroll";
+import { unsealAdminToken } from "./sealedtoken";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { BoxRow } from "./boxes";
 import type { BoxRelay, BoxRelayer, RelayFailure } from "./ports";

@@ -1,7 +1,8 @@
-import { unsealAdminToken } from "./enroll";
+import { unsealAdminToken } from "./sealedtoken";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
 import type { BoxRow } from "./boxes";
 import { BOX_API } from "./ports";
+import { isTainted, type TombstoneRow } from "./tombstone";
 
 // Mint relay: console POST /api/backends/:id/link → box POST /admin/mint.
 // One idempotency key per console request: the console's own
@@ -12,22 +13,6 @@ import { BOX_API } from "./ports";
 
 // Box calls get 15s (mint execs a password rotation server-side).
 const MINT_DEADLINE_MS = 15_000;
-
-// Pending-revoke marker. Invariant for Task 5 (revoke): tombstone.epoch is
-// the greatest stale epoch — a box is tainted while its heartbeat epoch has
-// not rotated past it, clean once it exceeds it. Table lives here minimally
-// so Task 5 only adds the revoke write path, never a second table.
-export interface TombstoneRow {
-  box_id: string;
-  epoch: number;
-}
-
-export function isTainted(boxEpoch: number, tombstone: TombstoneRow | undefined): boolean {
-  if (!tombstone) {
-    return false;
-  }
-  return boxEpoch <= tombstone.epoch;
-}
 
 export interface MintStore {
   getBox(id: string): BoxRow | undefined;

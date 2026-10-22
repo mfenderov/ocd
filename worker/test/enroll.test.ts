@@ -17,9 +17,7 @@ import {
   parseEnrollBody,
   parseHostSuffixes,
   requestEnrollment,
-  sealAdminToken,
   rotationPingText,
-  unsealAdminToken,
   verifyCapability,
   type CapabilityBinding,
   type EnrollConfig,
@@ -27,6 +25,7 @@ import {
   type PendingRow,
 } from "../src/enroll";
 import { boxDnsWriter } from "../src/dns";
+import { sealAdminToken, unsealAdminToken } from "../src/sealedtoken";
 import { createTelegramClient, sendTelegramMessage } from "../src/telegram";
 import type { NotifyFn } from "../src/ports";
 import { handleHeartbeat, hashToken, tokenMatches } from "../src/heartbeat";

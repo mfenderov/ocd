@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import { boxState } from "../src/botbuttons";
 import { BOX_READ_DEADLINE_MS, relayToBox } from "../src/boxapi";
-import { sealAdminToken } from "../src/enroll";
+import { sealAdminToken } from "../src/sealedtoken";
 import { sweepLiveness, type LivenessStore } from "../src/liveness";
 import type { FleetState } from "../src/state";
 import type { LinkRow } from "../src/events";

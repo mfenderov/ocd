@@ -49,6 +49,98 @@ function importsAdapter(source: string, adapter: string): boolean {
   return new RegExp(`from\\s+["']\\./${adapter}["']|import\\(\\s*["']\\./${adapter}["']\\s*\\)`).test(source);
 }
 
+// The import of a module, in either spelling: a value, a type, a
+// dynamic import. A type import is an import too — the cycle it closes
+// is a cycle in the code, whatever the compiler erases.
+const IMPORTS = /(?:\bfrom|\bimport)\s*\(?\s*["']\.\/([\w-]+)["']/g;
+
+// The import graph of the brain's own modules: every module, and the
+// modules it names.
+function importGraph(): Map<string, string[]> {
+  const graph = new Map<string, string[]>();
+  for (const [path, source] of Object.entries(sources)) {
+    const named = new Set<string>();
+    for (const match of source.matchAll(IMPORTS)) {
+      named.add(`../src/${match[1]}.ts`);
+    }
+    graph.set(path, [...named]);
+  }
+  return graph;
+}
+
+// The modules a module can reach, directly or through others.
+function reachable(graph: Map<string, string[]>, from: string): Set<string> {
+  const seen = new Set<string>();
+  const queue = [...(graph.get(from) ?? [])];
+  while (queue.length > 0) {
+    const node = queue.shift() as string;
+    if (seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    queue.push(...(graph.get(node) ?? []));
+  }
+  return seen;
+}
+
+// The shortest path from one module to another.
+function pathTo(graph: Map<string, string[]>, from: string, to: string): string[] | undefined {
+  const queue: string[][] = [[from]];
+  const seen = new Set<string>([from]);
+  while (queue.length > 0) {
+    const path = queue.shift() as string[];
+    for (const next of graph.get(path[path.length - 1]) ?? []) {
+      if (next === to) {
+        return [...path, next];
+      }
+      if (seen.has(next)) {
+        continue;
+      }
+      seen.add(next);
+      queue.push([...path, next]);
+    }
+  }
+  return undefined;
+}
+
+// The cycle's name: the same cycle read from another module is the same
+// cycle.
+function cycleName(cycle: string[]): string {
+  const names = cycle.slice(0, -1);
+  let smallest = 0;
+  for (let i = 1; i < names.length; i++) {
+    if (names[i] < names[smallest]) {
+      smallest = i;
+    }
+  }
+  return [...names.slice(smallest), ...names.slice(0, smallest)].join(" -> ");
+}
+
+// Every cycle in the graph, each one named by the modules it goes
+// through.
+//
+// Two modules that import each other are really one module, or a third
+// one is missing: the fix is a module that holds what they share, not a
+// re-export that leaves the cycle in place.
+function findCycles(graph: Map<string, string[]>): string[][] {
+  const found = new Map<string, string[]>();
+  for (const [from] of graph) {
+    for (const to of reachable(graph, from)) {
+      if (to === from || !reachable(graph, to).has(from)) {
+        continue;
+      }
+      const there = pathTo(graph, from, to);
+      const back = pathTo(graph, to, from);
+      if (!there || !back) {
+        continue;
+      }
+      const cycle = [...there, ...back.slice(1)];
+      found.set(cycleName(cycle), cycle);
+    }
+  }
+  return [...found.values()];
+}
+
 describe("the architecture", () => {
   it("the glob found the tree it checks", () => {
     // A glob that resolves to nothing would leave the rule below with
@@ -94,6 +186,14 @@ describe("the architecture", () => {
     expect(
       offenders,
       `the domain must not depend on an adapter: ${offenders.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("the import graph has no cycles", () => {
+    const cycles = findCycles(importGraph());
+    expect(
+      cycles,
+      `the import graph must be a tree of layers: ${cycles.map((cycle) => cycle.join(" -> ")).join(" | ")}`,
     ).toEqual([]);
   });
 });

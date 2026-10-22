@@ -1,8 +1,8 @@
-import { unsealAdminToken } from "./enroll";
+import { unsealAdminToken } from "./sealedtoken";
 import { fetchBox, pinnedRegistry } from "./heartbeat";
-import type { TombstoneRow } from "./mint";
 import type { BoxRow } from "./boxes";
 import { BOX_API } from "./ports";
+import type { TombstoneRow } from "./tombstone";
 
 // Revoke relay: console POST /api/backends/:id/revoke (or POST
 // /api/revoke-all) → box POST /admin/revoke with {"confirm": true}.
@@ -11,7 +11,7 @@ import { BOX_API } from "./ports";
 // Every outcome is a per-box result ({id, status, ...}), never a silent
 // skip: online boxes report revoked, unreachable boxes are tombstoned at
 // their last-known epoch (sticky until a heartbeat rotates past it — see
-// the TombstoneRow invariant in mint.ts), unknown boxes report unknown_box.
+// the TombstoneRow invariant in tombstone.ts), unknown boxes report unknown_box.
 // Plaintext admin tokens are never logged.
 
 // Box calls get 15s (revoke execs a password rotation server-side).

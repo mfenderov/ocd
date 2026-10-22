@@ -9,10 +9,10 @@ import {
 } from "../src/audit";
 import type { BoxRow } from "../src/boxes";
 import type { AuditStore } from "../src/audit";
-import { sealAdminToken } from "../src/enroll";
+import { sealAdminToken } from "../src/sealedtoken";
 import { hashToken } from "../src/heartbeat";
 import app from "../src/index";
-import type { TombstoneRow } from "../src/mint";
+import type { TombstoneRow } from "../src/tombstone";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";
 

@@ -2,8 +2,9 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { BoxRow } from "../src/boxes";
 import { hashToken } from "../src/heartbeat";
-import { sealAdminToken } from "../src/enroll";
-import { handleMintLink, isTainted, type MintStore, type TombstoneRow } from "../src/mint";
+import { sealAdminToken } from "../src/sealedtoken";
+import { handleMintLink, type MintStore } from "../src/mint";
+import { isTainted, type TombstoneRow } from "../src/tombstone";
 import { handleMintToken } from "../src/tokens";
 import { inState } from "./helpers";
 
