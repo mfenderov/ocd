@@ -41,7 +41,10 @@ jobs:
         run: |
           go install github.com/mfenderov/gocrap@v0.4.2
           go test -coverprofile=coverage.out ./...
-          gocrap -c coverage.out -max 10 -exclude "*_test.go"
+          # Scoped to the Go sources: an unscoped scan walks into
+          # worker/node_modules, whose vendored Go port of flatted scores
+          # over the bar on code that is not ours.
+          gocrap -c coverage.out -max 10 -exclude "*_test.go" ./cmd/... ./internal/...
 
   worker:
     runs-on: ubuntu-latest
