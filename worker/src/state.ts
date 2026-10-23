@@ -1,6 +1,6 @@
 import { handleAudit } from "./audit";
 import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
-import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
+import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
 import { boxAdapter } from "./boxapi";
@@ -21,7 +21,6 @@ import {
   type LinkRow,
 } from "./events";
 import { extractBearer, handleHeartbeat, reenrollPingText, shouldPingMismatch, shouldPingReenroll, tokenMatches } from "./heartbeat";
-import { sweepLiveness, OFFLINE_AFTER_SEC, type LivenessStore } from "./liveness";
 import { handleMintLink } from "./mint";
 import type { Box, BoxReply, BoxSilence } from "./box";
 import type { DnsWriter } from "./records";
@@ -81,11 +80,7 @@ CREATE TABLE IF NOT EXISTS boxes(
   last_seq INTEGER NOT NULL DEFAULT 0,
   last_ts INTEGER NOT NULL DEFAULT 0,
   last_seen INTEGER NOT NULL DEFAULT 0,
-  enrolled INTEGER NOT NULL DEFAULT 0,
-  -- 1 when the owner was told this box went dark. The sweep owns the
-  -- mark: a heartbeat never clears it, so the notice survives until
-  -- the box answers again.
-  suspected_offline INTEGER NOT NULL DEFAULT 0
+  enrolled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS pending(
   id TEXT PRIMARY KEY,
@@ -158,7 +153,6 @@ interface ColumnMigration {
 const BOX_MIGRATIONS: readonly ColumnMigration[] = [
   { column: "last_ts", sql: "ALTER TABLE boxes ADD COLUMN last_ts INTEGER NOT NULL DEFAULT 0" },
   { column: "admin_token_sealed", sql: "ALTER TABLE boxes ADD COLUMN admin_token_sealed TEXT NOT NULL DEFAULT ''" },
-  { column: "suspected_offline", sql: "ALTER TABLE boxes ADD COLUMN suspected_offline INTEGER NOT NULL DEFAULT 0" },
   { column: "tunnel_id", sql: "ALTER TABLE boxes ADD COLUMN tunnel_id TEXT NOT NULL DEFAULT ''" },
 ];
 
@@ -206,8 +200,7 @@ interface FleetEnv {
 const DEFAULT_PRIMARY_BOX = "home";
 
 // The alarm's period: the brain's only timer. Every 30 seconds the brain
-// re-drives the owed edits, prunes the old rows and looks for the boxes
-// that went quiet. A Durable Object alarm is the only scheduler a Worker
+// re-drives the owed edits and prunes the old rows. A Durable Object alarm is the only scheduler a Worker
 // has, so nothing else may assume a timer.
 const ALARM_INTERVAL_MS = 30_000;
 
@@ -215,17 +208,14 @@ const ALARM_INTERVAL_MS = 30_000;
 // 24 hours, the same window the box prunes its own link tokens on.
 const PRUNE_AFTER_SEC = 24 * 60 * 60;
 
-// The alarm's dependencies: the client that carries the notices, the
-// chat they go to, the probe that asks a box whether it is there and the
-// clock. The alarm builds them from the Worker env; a test hands in its
-// own.
+// The alarm's dependencies: the client that carries the owed edits and
+// the clock. The alarm builds them from the Worker env; a test hands in
+// its own.
 export interface AlarmDeps {
-  // The notices go to the owner's chat and to no other. A brain without
-  // a Telegram token has nobody to tell, so the sweep stays quiet.
+  // The edits go to the owner's chat through this client. A brain
+  // without a Telegram token still prunes — only the edit needs
+  // Telegram — and the edits stay owed until the client exists.
   telegram?: OwnerChat;
-  ownerChatId?: number;
-  // The probe: did the box answer?
-  probePresence: (boxId: string) => Promise<boolean>;
   nowSec: () => number;
 }
 
@@ -252,11 +242,10 @@ export class FleetState implements DurableObject {
   // ledgers — neither may hide the other.
   private mismatchPinged = new Map<string, number>();
   private reenrollPinged = new Map<string, number>();
-  // The alarm's dependencies: the client that carries the notices, the
-  // chat they go to, the probe that asks a box whether it is there and
-  // the clock. The constructor fills them from the Worker env; a test
-  // hands in its own, so the sweep runs without Telegram and without the
-  // network.
+  // The alarm's dependencies: the client that carries the owed edits
+  // and the clock. The constructor fills them from the Worker env; a
+  // test hands in its own, so the alarm runs without Telegram and
+  // without the network.
   alarmDeps: AlarmDeps;
   // The box the brain asks: the box port, spoken by the adapter. The
   // wiring builds it and hands it to the brain.
@@ -284,8 +273,6 @@ export class FleetState implements DurableObject {
     this.box = boxAdapter(this);
     this.alarmDeps = {
       telegram: this.telegramClient(),
-      ownerChatId: parseOwnerChatId(this.ownerChatId),
-      probePresence: (boxId) => this.probePresence(boxId),
       nowSec: () => nowSec(),
     };
     this.routes = this.buildRoutes();
@@ -410,25 +397,6 @@ export class FleetState implements DurableObject {
       throw new Error(`the box answered ${answer.message.status}`);
     }
     return answer.message.said.trim();
-  }
-
-  // The presence probe: did the box answer? The probe is the brain's own
-  // request to the box, so a box whose heartbeat is broken still reads
-  // as alive.
-  //
-  // A probe that cannot run is not a dead box. A misconfigured relay (no
-  // seal key, no admin token bound) or a box the brain does not know
-  // throws here, so the sweep leaves the box unjudged instead of
-  // reporting a box the brain never asked.
-  private async probePresence(boxId: string): Promise<boolean> {
-    const answer = await this.askBox(boxId, (id, token) => this.box.presence(id, token));
-    if (answer.kind === "answered") {
-      return true;
-    }
-    if (answer.reason === "misconfigured" || answer.reason === "unknown_box") {
-      throw new Error(`the presence probe cannot run (${answer.reason})`);
-    }
-    return false;
   }
 
   // The box's answer, or the reason the brain could not ask it. The
@@ -598,9 +566,9 @@ export class FleetState implements DurableObject {
   putBox(box: BoxRow): void {
     this.ensureSchema();
     // The upsert, not a replace: a replace drops every column the row
-    // does not carry — and the liveness mark is one of them. A heartbeat
-    // rewrites the box's own fields and must leave the mark alone: only
-    // the sweep clears it.
+    // does not carry. A heartbeat rewrites the box's own fields and must
+    // leave anything else — including columns older releases wrote —
+    // alone.
     this.state.storage.sql.exec(
       "INSERT INTO boxes (id, hostname, heartbeat_token_hash, admin_token_hash, admin_token_sealed, tunnel_id, epoch, last_seq, last_ts, last_seen, enrolled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET hostname = excluded.hostname, heartbeat_token_hash = excluded.heartbeat_token_hash, admin_token_hash = excluded.admin_token_hash, admin_token_sealed = excluded.admin_token_sealed, tunnel_id = excluded.tunnel_id, epoch = excluded.epoch, last_seq = excluded.last_seq, last_ts = excluded.last_ts, last_seen = excluded.last_seen, enrolled = excluded.enrolled",
       box.id,
@@ -615,35 +583,6 @@ export class FleetState implements DurableObject {
       box.last_seen,
       box.enrolled,
     );
-  }
-
-  // The liveness mark: the owner was told this box went dark. The mark
-  // lives on the box row, so it survives every heartbeat and only the
-  // sweep clears it — the owner hears about an outage once, and the
-  // recovery once.
-  markSuspectedOffline(boxId: string): void {
-    this.ensureSchema();
-    this.state.storage.sql.exec("UPDATE boxes SET suspected_offline = 1 WHERE id = ?", boxId);
-  }
-
-  // Clears the mark and reports whether it was set.
-  clearSuspectedOffline(boxId: string): boolean {
-    this.ensureSchema();
-    if (!this.isSuspectedOffline(boxId)) {
-      return false;
-    }
-    this.state.storage.sql.exec("UPDATE boxes SET suspected_offline = 0 WHERE id = ?", boxId);
-    return true;
-  }
-
-  isSuspectedOffline(boxId: string): boolean {
-    this.ensureSchema();
-    const cursor = this.state.storage.sql.exec(
-      "SELECT suspected_offline FROM boxes WHERE id = ? LIMIT 1",
-      boxId,
-    );
-    const row = cursor.toArray()[0] as unknown as { suspected_offline: number } | undefined;
-    return row?.suspected_offline === 1;
   }
 
   getPending(id: string): PendingRow | undefined {
@@ -936,7 +875,7 @@ export class FleetState implements DurableObject {
 
   // The alarm: the brain's only clock. workerd calls it when the alarm
   // fires, and it does every periodic work the brain has: the owed
-  // edits, the liveness sweep and the prunes. Then it re-arms itself.
+  // edits and the prunes. Then it re-arms itself.
   async alarm(): Promise<void> {
     try {
       await this.runAlarmWork(this.alarmDeps);
@@ -949,7 +888,7 @@ export class FleetState implements DurableObject {
 
   // The alarm's work. Every step gets its own boundary: a step that
   // throws must not skip the steps behind it — a broken owed-edit sweep
-  // must not cost the fleet its liveness tick.
+  // must not cost the fleet its prune, and the other way round.
   private async runAlarmWork(deps: AlarmDeps): Promise<void> {
     // The prune first: it is the cheapest work and the one that must
     // not be skipped. The tables grow without it, and a later step that
@@ -958,7 +897,6 @@ export class FleetState implements DurableObject {
     // The owed edits: a link whose message still says "tap me" is the
     // most visible thing the brain owes the owner.
     await this.alarmStep("the owed edits", () => sweepOwedEdits(this, { telegram: deps.telegram }));
-    await this.alarmStep("the liveness sweep", () => this.runLivenessSweep(deps));
   }
 
   // One step of the alarm, in its own boundary: a step that throws is
@@ -971,38 +909,9 @@ export class FleetState implements DurableObject {
     }
   }
 
-  // The liveness sweep: the brain probes the boxes that went quiet.
-  //
-  // A brain that cannot talk to the owner (no Telegram token, no owner
-  // chat) says so out loud and judges nothing: silence would hide a
-  // misconfigured brain.
-  private async runLivenessSweep(deps: AlarmDeps): Promise<void> {
-    if (!deps.telegram || deps.ownerChatId === undefined) {
-      console.error("alarm: no Telegram client or owner chat — the liveness sweep stays quiet");
-      return;
-    }
-    await sweepLiveness(this.livenessStore(), {
-      telegram: deps.telegram,
-      ownerChatId: deps.ownerChatId,
-      probePresence: deps.probePresence,
-      nowSec: deps.nowSec,
-      offlineAfterSec: OFFLINE_AFTER_SEC,
-    });
-  }
-
-  // The store the liveness sweep reads and writes.
-  private livenessStore(): LivenessStore {
-    return {
-      listBoxes: () => this.listBackends(),
-      markSuspectedOffline: (boxId) => this.markSuspectedOffline(boxId),
-      clearSuspectedOffline: (boxId) => this.clearSuspectedOffline(boxId),
-      isSuspectedOffline: (boxId) => this.isSuspectedOffline(boxId),
-    };
-  }
-
   // The alarm is armed once — the first request that finds no alarm
   // sets it — and the alarm handler re-arms it after every run. Arming
-  // it on every request would push the sweep back every time the brain
+  // it on every request would push the tick back every time the brain
   // is busy.
   private async ensureAlarm(): Promise<void> {
     if ((await this.state.storage.getAlarm()) === null) {
