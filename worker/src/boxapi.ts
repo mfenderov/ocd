@@ -8,6 +8,7 @@
 // The admin token is the brain's: it seals it at enrolment and unseals
 // it at call time. The adapter only carries it.
 import { fetchBox, pinnedRegistry } from "./boxclient";
+import { isEdgeError } from "./edgeerror";
 import type { BoxRow } from "./boxes";
 import type {
   AuditAnswer,
@@ -199,6 +200,11 @@ async function rotatedEpoch(res: Response): Promise<number | null> {
 }
 
 // The status and the presence: the box's own answer, relayed.
+//
+// An edge error page is not the box answering: when the tunnel is down
+// the edge answers instead of the box, so the probe must read it as
+// silence — otherwise a dead box looks alive and the sweep never marks
+// it, nor recovers it.
 async function ask(
   store: BoxStore,
   boxId: string,
@@ -213,7 +219,11 @@ async function ask(
   if (call.kind === "silent") {
     return { kind: "silent", reason: call.reason };
   }
-  return { kind: "answered", message: { status: call.res.status, said: await call.res.text() } };
+  const said = await call.res.text();
+  if (isEdgeError(call.res.status, said)) {
+    return { kind: "silent", reason: "box_unreachable" };
+  }
+  return { kind: "answered", message: { status: call.res.status, said } };
 }
 
 // The box's refusal: the status it answered with and what it said.
