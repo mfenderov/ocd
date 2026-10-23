@@ -1,4 +1,5 @@
 import { unsealAdminToken } from "./sealedtoken";
+import { isEdgeError } from "./edgeerror";
 import type { Box, BoxMessage } from "./box";
 import type { BoxRow } from "./boxes";
 import type { TombstoneRow } from "./tombstone";
@@ -63,19 +64,6 @@ async function readConfirm(request: Request): Promise<boolean> {
     return false;
   }
   return (raw as Record<string, unknown>)["confirm"] === true;
-}
-
-// Cloudflare's own error statuses: the edge never reached the origin.
-// 530 carries "error 1016" (no DNS record) and "error 1033" (tunnel not
-// connected); 52x are the other origin failures. A 5xx outside this set
-// came from the box: the box answered and refused.
-const EDGE_ERROR_STATUSES = new Set([520, 521, 522, 523, 524, 525, 526, 527, 530]);
-
-// isEdgeError tells an unreachable box from a box that answered. The
-// status covers the tunnel errors; the body covers the edge's plain-text
-// "error code: NNN" pages, which arrive on statuses the box also uses.
-function isEdgeError(status: number, body: string): boolean {
-  return EDGE_ERROR_STATUSES.has(status) || /error code: \d+/.test(body);
 }
 
 export async function revokeOneBox(
