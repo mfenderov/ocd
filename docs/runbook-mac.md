@@ -76,6 +76,5 @@ sudo systemsetup -setcomputersleep Never   # on adapter, lid open
 ## Checking it
 
 - `/fleet` in the bot's DM (the brain's bot, the only one) lists every box
-  with live state.
-- `/flink <box>` mints a tap link for that box.
+  with live state, plus Open and Pair buttons per box.
 - On the Mac: `curl -s https://oc-tap-<box>.buyallmemes.com/healthz` → `ok`.

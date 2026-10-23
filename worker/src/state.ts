@@ -3,7 +3,7 @@ import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type DeviceRow, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
-import { boxAdapter } from "./boxapi";
+import { boxAdapter, pairingLink } from "./boxapi";
 import { boxDnsWriter } from "./dns";
 import {
   handleEnrollApprove,
@@ -301,6 +301,9 @@ export class FleetState implements DurableObject {
       telegram,
       listBoxes: () => this.listBackends(),
       mintLink: (boxId) => this.mintLink(boxId),
+      // The pairing URL out of a tap the brain minted: the tap's own
+      // answer, read server-side.
+      resolvePair: (boxId, tapUrl) => this.resolveTap(boxId, tapUrl),
       // The history: the brain's own table. The boxes pushed these rows,
       // so a box that is offline — or gone for good — keeps its history.
       audit: (boxId, limit) => Promise.resolve(this.auditLogRows(boxId, limit)),
@@ -347,6 +350,18 @@ export class FleetState implements DurableObject {
       throw new Error("mint answered with no url");
     }
     return url;
+  }
+
+  // The pairing URL out of a tap the brain minted: a server-side GET of
+  // the tap URL that reads the printed link without following the
+  // redirect. The tap is single-use, so this spends it — the pairing URL
+  // it answers with is what the owner copies.
+  private async resolveTap(boxId: string, tapUrl: string): Promise<string> {
+    const answer = await this.box.resolvePair(boxId, tapUrl);
+    if (answer.kind === "silent") {
+      throw new Error(tapSilence(answer.reason, boxId));
+    }
+    return pairingLink(answer.message.status, answer.message.said);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -1167,6 +1182,13 @@ const RELAY_FAILURE_STATUS = new Map<BoxSilence, number>([
 // say more about a relay it does not understand.
 function relayFailureStatus(reason: BoxSilence): number {
   return RELAY_FAILURE_STATUS.get(reason) ?? 502;
+}
+
+// The reason the tap was not read: the box the tap names, or the reason
+// the box did not answer. The owner can act on either — a name they can
+// check, a reason they can wait out.
+function tapSilence(reason: BoxSilence, boxId: string): string {
+  return reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${reason})`;
 }
 
 // The failed relay, as the owner may read it: the status and a short

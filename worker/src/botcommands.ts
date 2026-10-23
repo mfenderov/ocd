@@ -2,7 +2,6 @@ import type { BotCommand } from "./bot";
 import {
   boxState,
   fleetBoard,
-  linkMenu,
   openButton,
   stateDot,
 } from "./botbuttons";
@@ -33,9 +32,11 @@ import type { OwnerButtons, OwnerChat, SentMessage } from "./owner";
 //      A failure becomes a short answer ("⚠️ Fleet failed: …"), the way
 //      the Go bot's sendFleetReply turns it.
 //
-//   3. Silence for what it does not know. An unknown command gets no
-//      reply at all: a typo must not make noise. A tap is different: it
-//      is always answered, or the owner's button spins forever.
+//   3. No silence for a typed command. A command the brain does not know
+//      is answered with a pointer at /help: muscle memory for a retired
+//      command must land somewhere. A tap for an unknown action stays
+//      silent — the tap itself is always answered, and there is nothing
+//      to say.
 
 // AuditRow is one row of the brain's history. The shape matches the Go
 // client's AuditRow so the bot's text and the console's text agree.
@@ -79,6 +80,11 @@ export interface CommandDeps {
   telegram: OwnerChat;
   listBoxes: () => BoxPublic[];
   mintLink: (boxId: string) => Promise<string>;   // the tap URL
+  // The pairing URL out of a tap's own answer: a server-side GET of the
+  // tap URL that reads the printed link without following the redirect.
+  // Following it would spend the single use in a browser the owner
+  // never sees.
+  resolvePair: (boxId: string, tapUrl: string) => Promise<string>;
   audit: (boxId: string, limit: number) => Promise<AuditRow[]>;
   devices: () => Promise<DeviceRow[]>;   // the tapping clients
   revoke: (boxId: string) => Promise<RevokeResult>;
@@ -123,12 +129,6 @@ const COMMANDS = new Map<string, CommandHandler>([
   ["/start", helpCommand],
   ["/help", helpCommand],
   ["/fleet", fleetCommand],
-  // The Go bot sends one board for /fleet and /link — "/link is the
-  // menu: which machine do you want to work in?" (internal/tg/tg.go) —
-  // so the two views carry the same buttons.
-  ["/link", linkCommand],
-  ["/flink", flinkCommand],
-  ["/login", loginCommand],
   ["/devices", devicesCommand],
   ["/faudit", auditCommand],
   // Typed /audit is the /faudit question, not a redirect: the tap
@@ -141,8 +141,11 @@ const COMMANDS = new Map<string, CommandHandler>([
   ["/fnuke", nukeCommand],
   ["/enrollcode", enrollCodeCommand],
   ["/status", statusCommand],
-  // The taps: the same commands, reached by a button.
+  // The taps: Pair mints a pairing URL; the board's old link taps still
+  // mint an Open button, so a board that sat unread keeps working. The
+  // rest re-read the fleet.
   ["link", tapLinkCommand],
+  ["pair", pairCommand],
   ["board", fleetCommand],
   ["revoke", revokeCommand],
   ["audit", auditCommand],
@@ -161,7 +164,13 @@ export async function runCommand(cmd: BotCommand, deps: CommandDeps): Promise<vo
   }
   const handler = COMMANDS.get(commandName(cmd.name));
   if (!handler) {
-    // An unknown command is ignored: no reply at all.
+    // A typed command the brain does not know still gets an answer: a
+    // pointer at /help, so retired muscle memory lands somewhere. A tap
+    // for an unknown action stays silent — the tap itself was answered
+    // above, and there is nothing to say.
+    if (!cmd.callbackId) {
+      await sendReply(cmd, { text: unknownCommandText(commandName(cmd.name)) }, deps);
+    }
     return;
   }
   const reply = await commandReply(handler, cmd, deps);
@@ -268,36 +277,43 @@ function commandName(name: string): string {
 }
 
 // /fleet: every enrolled box, its state and how long ago it was seen,
-// with the board's buttons under it.
-function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Reply {
-  return boardReply(fleetBoard, deps);
-}
-
-// /link: the menu of boxes the owner picks a machine from. The Go bot
-// sends the same board for /fleet and /link, so the menu and the board
-// are the same buttons.
-function linkCommand(_cmd: BotCommand, deps: CommandDeps): Reply {
-  return boardReply(linkMenu, deps);
+// with the board's buttons under it. The Open links are minted here —
+// the board owns every link — one per box the clock calls online.
+async function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return boardReply(deps);
 }
 
 // The board's reply: the fleet's text and the keyboard under it. One
-// clock for both, so the label and the text can never call the same box
-// ok and offline.
-function boardReply(board: (boxes: BoxPublic[], now: number) => OwnerButtons, deps: CommandDeps): Reply {
+// clock for both, so the text and the mint skip can never call the same
+// box ok and offline.
+async function boardReply(deps: CommandDeps): Promise<Reply> {
   const boxes = deps.listBoxes();
   const now = nowSec();
-  return { text: fleetText(boxes, now), keyboard: board(boxes, now) };
+  return { text: fleetText(boxes, now), keyboard: fleetBoard(boxes, await mintOpenLinks(boxes, now, deps)) };
 }
 
-// /flink <box>: a tap URL for one box. The URL is single-use; it travels
-// as a link target, never as visible text.
-async function flinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
-  const box = cmd.args[0]?.trim() ?? "";
-  if (!box) {
-    return { text: "Usage: <code>/flink &lt;box&gt;</code>" };
-  }
-  const url = await deps.mintLink(box);
-  return { text: linkText(url, box), link: { url, box } };
+// One tap link per box the clock calls online, all at once. A mint that
+// fails is not the board's failure: the box keeps its Pair button, and
+// the tap says what went wrong when asked.
+async function mintOpenLinks(
+  boxes: BoxPublic[],
+  now: number,
+  deps: CommandDeps,
+): Promise<Map<string, string>> {
+  const links = new Map<string, string>();
+  await Promise.all(
+    boxes.map(async (box) => {
+      if (boxState(box, now) !== "ok") {
+        return;
+      }
+      try {
+        links.set(box.id, await deps.mintLink(box.id));
+      } catch {
+        // The Pair tap says what went wrong; the board still renders.
+      }
+    }),
+  );
+  return links;
 }
 
 // The tap on a box's button: the same mint, the Go bot's callback
@@ -330,10 +346,41 @@ async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply
   };
 }
 
-// /login: the primary box, one tap.
-async function loginCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
-  const url = await deps.mintLink(deps.primaryBox);
-  return { text: loginText(url), link: { url, box: deps.primaryBox } };
+// The Pair tap: a pairing URL for one box, as copyable text. The tap
+// mints at tap time, so the URL's five-minute clock starts when asked —
+// not while a board sits unread. The resolve spends the tap
+// server-side; the owner copies the URL out of the follow-up message
+// instead of tapping it.
+//
+// Nothing is recorded for it: the tap is already spent when the message
+// goes out, and the pairing URL is not a tap the brain can edit.
+async function pairCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | undefined> {
+  const box = cmd.args[0]?.trim() ?? "";
+  if (!box) {
+    return undefined;
+  }
+  const now = nowSec();
+  const known = deps.listBoxes().find((b) => b.id === box);
+  if (known && boxState(known, now) === "offline") {
+    // An offline box cannot mint. The tap explains instead of waiting
+    // for the relay to time out.
+    return { text: offlineText(known, now) };
+  }
+  let tapUrl: string;
+  try {
+    tapUrl = await deps.mintLink(box);
+  } catch (err) {
+    return { text: pairFailedText(err) };
+  }
+  let pairingUrl: string;
+  try {
+    pairingUrl = await deps.resolvePair(box, tapUrl);
+  } catch (err) {
+    // The mint or the resolve failed, not the fleet: one line, and the
+    // board keeps working.
+    return { text: pairFailedText(err) };
+  }
+  return { text: pairReadyText(box, pairingUrl) };
 }
 
 // /start and /help: the same list. A bot with no help text is a bot
@@ -477,15 +524,23 @@ function fleetFailedText(err: unknown): string {
   return `⚠️ <b>Fleet failed:</b> ${escapeHtml(errorText(err))}`;
 }
 
+// The answer for a command the brain does not know: what was typed and
+// where the list lives. Retired muscle memory (/link, /flink, /login)
+// lands here too — a pointer, not silence.
+function unknownCommandText(name: string): string {
+  return `❓ <code>${escapeHtml(name)}</code> is not a command — see <code>/help</code> for what the fleet bot can do.`;
+}
+
 // The failed link, the Go bot's callback answer: "⚠️ <b>Link failed:</b> …"
 // (internal/tg/buttons.go). The fleet is fine; the link is not.
 function linkFailedText(err: unknown): string {
   return `⚠️ <b>Link failed:</b> ${escapeHtml(errorText(err))}`;
 }
 
-// The tap link, the Go bot's FleetLinkText.
-function linkText(url: string, box: string): string {
-  return `🔑 <a href="${escapeHtml(url)}">Tap to log in to <code>${escapeHtml(box)}</code></a>`;
+// The failed Pair tap: the mint or the resolve failed, not the fleet.
+// One line, and the board keeps working.
+function pairFailedText(err: unknown): string {
+  return `⚠️ <b>Pair failed:</b> ${escapeHtml(errorText(err))}`;
 }
 
 // The tapped box, the Go bot's callback answer. The link itself rides
@@ -503,11 +558,15 @@ function offlineText(box: BoxPublic, now: number): string {
   );
 }
 
-// The primary box's link, the Go bot's /login answer. The brain does not
-// state a duration: the box decides when a link dies, and the brain must
-// not repeat the box's TTL as its own.
-function loginText(url: string): string {
-  return `🔑 <b>OpenCode ready</b> — one tap · single use\n<a href="${escapeHtml(url)}">🚀 Open OpenCode</a>`;
+// The pairing URL: copyable text in a <code> block, never a button or
+// a bare link — a stray tap would spend the single use before opencode
+// ever sees it. Single use, good for five minutes from this tap.
+function pairReadyText(box: string, pairingUrl: string): string {
+  return (
+    `🔑 <b>${escapeHtml(box)}</b> pairing link — single use, good for 5 minutes:\n` +
+    `<code>${escapeHtml(pairingUrl)}</code>\n` +
+    "Open it within 5 minutes — the first opener wins."
+  );
 }
 
 // The command list, in one place: /start and /help print the same
@@ -517,10 +576,7 @@ function helpText(): string {
     "🤖 <b>Fleet bot</b> — what each command does:",
     "/start — this list",
     "/help — this list",
-    "/fleet — every box, its state and last sync",
-    "/link — the menu of boxes to open",
-    "/flink &lt;box&gt; — a one-use tap link for one box",
-    "/login — a one-use tap link for the primary box",
+    "/fleet — every box, its state and last sync, with Open and Pair buttons",
     "/devices — the clients that tapped in",
     "/faudit [box] [n] — the fleet's history, newest first",
     "/audit [box] [n] — the same history",
