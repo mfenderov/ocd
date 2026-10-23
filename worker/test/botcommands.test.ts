@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { runCommand, type AuditRow, type CommandDeps, type LinkRecord } from "../src/botcommands";
+import { runCommand, type AuditRow, type CommandDeps, type DeviceRow, type LinkRecord } from "../src/botcommands";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
@@ -61,6 +61,7 @@ class RecordingTelegram implements OwnerChat {
 interface Calls {
   mintLink: string[];
   audit: Array<{ boxId: string; limit: number }>;
+  devices: number;
   revoke: string[];
   revokeAll: number;
   issueEnrollCode: string[];
@@ -73,6 +74,7 @@ interface Calls {
 interface HarnessOptions {
   boxes?: BoxPublic[];
   auditRows?: AuditRow[];
+  deviceRows?: DeviceRow[];
   revokeResult?: RevokeResult;
   revokeAllResults?: RevokeResult[];
   primaryBox?: string;
@@ -95,6 +97,7 @@ function harness(options: HarnessOptions = {}): {
   const calls: Calls = {
     mintLink: [],
     audit: [],
+    devices: 0,
     revoke: [],
     revokeAll: 0,
     issueEnrollCode: [],
@@ -119,6 +122,10 @@ function harness(options: HarnessOptions = {}): {
     audit: (boxId, limit) => {
       calls.audit.push({ boxId, limit });
       return Promise.resolve(options.auditRows ?? []);
+    },
+    devices: () => {
+      calls.devices += 1;
+      return Promise.resolve(options.deviceRows ?? []);
     },
     revoke: (boxId) => {
       calls.revoke.push(boxId);
@@ -328,6 +335,89 @@ describe("/flink", () => {
   });
 });
 
+describe("/start and /help", () => {
+  it("answer with the same command list", async () => {
+    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "/start", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "/help", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent).toHaveLength(2);
+    expect(telegram.sent[0].text).toBe(telegram.sent[1].text);
+    expect(telegram.sent[0].text).toContain("/fleet");
+    expect(telegram.sent[0].text).toContain("/devices");
+    expect(telegram.sent[0].text).toContain("/fnuke");
+  });
+
+  it("names every command in one line each", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "/help", args: [], chatId: 7 }, deps);
+
+    const text = telegram.sent[0].text;
+    for (const cmd of [
+      "/start",
+      "/help",
+      "/fleet",
+      "/link",
+      "/flink",
+      "/login",
+      "/devices",
+      "/faudit",
+      "/audit",
+      "/frevoke",
+      "/revoke",
+      "/fnuke",
+      "/enrollcode",
+      "/status",
+    ]) {
+      expect(text).toContain(cmd);
+    }
+  });
+});
+
+describe("/devices", () => {
+  it("lists each tapping client with its count and last seen", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram, calls } = harness({
+      deviceRows: [
+        { ip: "1.2.3.4", ua: "Mozilla/5.0", count: 3, last: now - 10 },
+        { ip: "5.6.7.8", ua: "", count: 1, last: now - 300 },
+      ],
+    });
+
+    await runCommand({ name: "/devices", args: [], chatId: 7 }, deps);
+
+    expect(calls.devices).toBe(1);
+    const text = telegram.sent[0].text;
+    expect(text).toContain("1.2.3.4");
+    expect(text).toContain("3 taps");
+    expect(text).toContain("just now");
+    expect(text).toContain("5.6.7.8");
+    expect(text).toContain("Mozilla/5.0");
+  });
+
+  it("says so when no client tapped yet", async () => {
+    const { deps, telegram } = harness({ deviceRows: [] });
+
+    await runCommand({ name: "/devices", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toContain("No taps yet");
+  });
+
+  it("escapes a client that names markup", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram } = harness({
+      deviceRows: [{ ip: "1.2.3.4", ua: "<b>evil</b>", count: 1, last: now - 10 }],
+    });
+
+    await runCommand({ name: "/devices", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toContain("&lt;b&gt;evil&lt;/b&gt;");
+    expect(telegram.sent[0].text).not.toContain("<b>evil</b>");
+  });
+});
+
 describe("/login", () => {
   it("mints for the primary box", async () => {
     const { deps, telegram, calls } = harness({ primaryBox: "mac" });
@@ -379,6 +469,33 @@ describe("/faudit", () => {
     await runCommand({ name: "/faudit", args: [], chatId: 7 }, deps);
 
     expect(telegram.sent[0].text).toContain("revoke pending");
+  });
+});
+
+describe("typed /audit", () => {
+  it("answers the same history /faudit answers", async () => {
+    const { deps, telegram, calls } = harness({ auditRows: [AUDIT_ROW] });
+
+    await runCommand({ name: "/audit", args: ["mac", "5"], chatId: 7 }, deps);
+
+    expect(calls.audit).toEqual([{ boxId: "mac", limit: 5 }]);
+    expect(telegram.sent[0].text).toContain("Audit");
+  });
+});
+
+describe("typed /revoke", () => {
+  it("says it is retired and names /fnuke, without revoking anything", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "/revoke", args: ["YES"], chatId: 7 }, deps);
+
+    expect(calls.revoke).toEqual([]);
+    expect(calls.revokeAll).toBe(0);
+    const text = telegram.sent[0].text;
+    expect(text).toContain("/revoke");
+    expect(text).toContain("retired");
+    expect(text).toContain("/fnuke");
+    expect(text).toContain("credentials");
   });
 });
 
@@ -753,6 +870,31 @@ describe("the Durable Object's dispatch", () => {
 
     expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].text).toContain("revoke pending");
+  });
+
+  it("answers /devices from the brain's own history", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-devices"));
+    const telegram = new RecordingTelegram();
+
+    await inState(stub, async (instance) => {
+      instance.putBox(boxRow("home", { last_seen: Math.floor(Date.now() / 1000) - 10 }));
+      const now = 1699999900;
+      instance.addAuditRow({ ...auditRow("home", now, "tapped", "1.2.3.4"), ua: "Mozilla/5.0" });
+      instance.addAuditRow({ ...auditRow("home", now - 100, "consumed", "1.2.3.4"), ua: "Mozilla/5.0" });
+      // A row that is not a tap is not a tapping client.
+      instance.addAuditRow(auditRow("home", now - 200, "admin_denied", "9.9.9.9"));
+      instance.addAuditRow(auditRow("mac", now - 300, "tapped", "5.6.7.8"));
+
+      await instance.dispatchCommand({ name: "/devices", args: [], chatId: 7 }, telegram);
+    });
+
+    expect(telegram.sent).toHaveLength(1);
+    const text = telegram.sent[0].text;
+    expect(text).toContain("1.2.3.4");
+    expect(text).toContain("2 taps");
+    expect(text).toContain("Mozilla/5.0");
+    expect(text).toContain("5.6.7.8");
+    expect(text).not.toContain("9.9.9.9");
   });
 
   it("answers /faudit for a box with no rows", async () => {

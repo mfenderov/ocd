@@ -77,3 +77,37 @@ if [ "$status" != "200" ] || ! [[ "$body" =~ $ok_pattern ]]; then
 fi
 
 echo "brain-webhook: Telegram now points at $webhook_url"
+
+# The menu: the commands Telegram offers in the chat. The brain answers
+# the typed commands in worker/src/botcommands.ts (/help there is the
+# text of record); these one-liners must say the same thing in fewer
+# words. No scope is set: the default menu is the whole bot, and the
+# bot talks to exactly one chat — the owner's — so no scope could
+# narrow it further.
+menu='{"commands":[{"command":"start","description":"List what the fleet bot can do"},{"command":"help","description":"List what the fleet bot can do"},{"command":"fleet","description":"Every box, its state and last sync"},{"command":"link","description":"The menu of boxes to open"},{"command":"flink","description":"A tap link for one box"},{"command":"login","description":"A tap link for the primary box"},{"command":"devices","description":"The clients that tapped in"},{"command":"faudit","description":"The fleet'"'"'s history, newest first"},{"command":"audit","description":"The fleet'"'"'s history, same as /faudit"},{"command":"frevoke","description":"Revoke one box (confirm with YES)"},{"command":"revoke","description":"Retired: points at the fleet-wide /fnuke"},{"command":"fnuke","description":"Revoke every box (confirm with YES)"},{"command":"enrollcode","description":"A one-time code for a new box"},{"command":"status","description":"The primary box'"'"'s service status"}]}'
+
+# The body goes in on stdin, as above: nothing secret rides here, but
+# the shape stays the same so the two calls cannot drift apart.
+if ! response="$(printf '%s' "$menu" | curl -sS --max-time 30 -w '\n%{http_code}' \
+  -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" \
+  -H 'Content-Type: application/json' \
+  --data-binary @-)"; then
+  echo "brain-webhook: could not reach Telegram" >&2
+  exit 1
+fi
+
+status="${response##*$'\n'}"
+body="${response%$'\n'*}"
+
+# A refused menu is not a failed cutover: the webhook above is
+# registered and the bot answers. It is still a loud failure — a bot
+# with no menu hides every command — and rerunning this script retries
+# the menu alone (re-registering the same webhook changes nothing).
+if [ "$status" != "200" ] || ! [[ "$body" =~ $ok_pattern ]]; then
+  echo "brain-webhook: Telegram refused the menu (HTTP $status)" >&2
+  echo "brain-webhook: $body" >&2
+  echo "brain-webhook: the webhook is registered but the menu is not. Rerun this script." >&2
+  exit 1
+fi
+
+echo "brain-webhook: Telegram shows the command menu"
