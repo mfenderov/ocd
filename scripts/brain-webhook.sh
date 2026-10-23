@@ -90,7 +90,13 @@ echo "brain-webhook: Telegram now points at $webhook_url"
 # explain it. Both scopes carry the same list, so no scope can disagree.
 # The group scope is deleted outright: the bot talks to exactly one
 # chat — the owner's — and a group menu would be a lie.
-menu='{"commands":[{"command":"start","description":"List what the fleet bot can do"},{"command":"help","description":"List what the fleet bot can do"},{"command":"fleet","description":"Every box, its state and last sync, with Open and Pair buttons"},{"command":"devices","description":"The clients that tapped in"},{"command":"faudit","description":"The fleet'"'"'s history, newest first"},{"command":"audit","description":"The fleet'"'"'s history, same as /faudit"},{"command":"frevoke","description":"Revoke one box (confirm with YES)"},{"command":"revoke","description":"Retired: points at the fleet-wide /fnuke"},{"command":"fnuke","description":"Revoke every box (confirm with YES)"},{"command":"enrollcode","description":"A one-time code for a new box"},{"command":"status","description":"The primary box'"'"'s service status"}]}'
+#
+# The menu is smaller than the command list on purpose: /start is what
+# the Start button sends (it works whether or not it is listed), /audit
+# is /faudit under its old name, and typed /revoke answers with its
+# retirement notice. All three still work when typed; none of them needs
+# a menu row.
+menu='{"commands":[{"command":"help","description":"List what the fleet bot can do"},{"command":"fleet","description":"Every box, its state and last sync, with Open and Pair buttons"},{"command":"devices","description":"The clients that tapped in"},{"command":"faudit","description":"The fleet'"'"'s history, newest first"},{"command":"frevoke","description":"Revoke one box (confirm with YES)"},{"command":"fnuke","description":"Revoke every box (confirm with YES)"},{"command":"enrollcode","description":"A one-time code for a new box"},{"command":"status","description":"The primary box'"'"'s service status"}]}'
 
 # One scope's menu: the body goes in on stdin, as above. Nothing secret
 # rides here, but the shape stays the same so the calls cannot drift
