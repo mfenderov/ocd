@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.25.0 - 2026-10-23
+#### Features
+- (**worker**) the fleet board owns every link - (73f47c9) - mfenderov
+- (**worker**) the fleet board owns every link; /flink, /link and /login are gone - (e77dceb) - mfenderov
+#### Bug Fixes
+- (**worker**) the review's findings on the board consolidation - (3980bc8) - mfenderov
+
+- - -
+
 ## v0.24.0 - 2026-10-23
 #### Features
 - (**worker**) the bot answers /start, /help and /devices, and retires /revoke out loud - (cb31ee3) - mfenderov
