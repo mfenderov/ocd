@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.25.1 - 2026-10-23
+#### Bug Fixes
+- (**ops**) the command menu is set on every scope Telegram reads - (856839f) - mfenderov
+#### Miscellaneous Chores
+- (**bot**) the menu lists eight commands, not eleven - (08f0bd5) - mfenderov
+
+- - -
+
 ## v0.25.0 - 2026-10-23
 #### Features
 - (**worker**) the fleet board owns every link - (73f47c9) - mfenderov
