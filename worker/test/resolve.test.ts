@@ -182,6 +182,11 @@ describe("the pairing link out of the tap's answer", () => {
     expect(pairingLink(302, `${PAIRING}\n`)).toBe(PAIRING);
   });
 
+  it("reads the link out of the redirect page the live box sends", () => {
+    const said = `<a href="${PAIRING}">Found</a>.\n\n${PAIRING}\n`;
+    expect(pairingLink(302, said)).toBe(PAIRING);
+  });
+
   it("refuses another status", () => {
     expect(() => pairingLink(410, "link already used or expired")).toThrow("the tap answered 410");
   });

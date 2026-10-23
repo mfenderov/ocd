@@ -187,17 +187,25 @@ async function fetchTap(box: BoxRow, boxId: string, tap: URL, deps: BoxAdapterDe
 }
 
 // The pairing URL out of the tap's answer: the box 302s to it and prints
-// it. Anything else — another status, another body — is not a pairing
-// link, and the caller says so instead of handing the owner a dead URL.
+// it. Go's redirect writes its own short HTML page first, so the body is
+// the redirect page plus the link — the first https URL in the text is
+// the pairing link, the same first-URL rule the box's own ParseLink uses,
+// with the match stopped at HTML delimiters (a bare \S+ would swallow
+// the closing `">Found</a>.` of the redirect page into the link).
+// Anything else — another status, a body with no URL in it — is not a
+// pairing link, and the caller says so instead of handing the owner a
+// dead URL.
+const pairingUrlRe = /https:\/\/[^\s"'<>]+/;
+
 export function pairingLink(status: number, said: string): string {
   if (status !== 302) {
     throw new Error(`the tap answered ${status}`);
   }
-  const link = said.trim();
-  if (!link.startsWith("https://")) {
+  const match = pairingUrlRe.exec(said);
+  if (!match) {
     throw new Error("the tap answered no pairing link");
   }
-  return link;
+  return match[0];
 }
 
 // The audit: the box's own rows, in the box's own shape.
