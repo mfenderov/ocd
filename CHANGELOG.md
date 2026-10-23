@@ -2,6 +2,16 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.24.0 - 2026-10-23
+#### Features
+- (**worker**) the bot answers /start, /help and /devices, and retires /revoke out loud - (cb31ee3) - mfenderov
+- (**worker**) the bot answers /start, /help and /devices, and retires /revoke out loud - (aa5e52d) - mfenderov
+#### Refactoring
+- (**worker**) offline is a normal state, so the brain stops announcing it - (7b6ce89) - mfenderov
+- (**worker**) offline is a normal state, so the brain stops announcing it - (1096cc8) - mfenderov
+
+- - -
+
 ## v0.23.3 - 2026-10-23
 #### Bug Fixes
 - (**worker**) the presence probe does not trust the edge's error pages - (0c6dccd) - mfenderov
