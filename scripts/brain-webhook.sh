@@ -81,33 +81,56 @@ echo "brain-webhook: Telegram now points at $webhook_url"
 # The menu: the commands Telegram offers in the chat. The brain answers
 # the typed commands in worker/src/botcommands.ts (/help there is the
 # text of record); these one-liners must say the same thing in fewer
-# words. No scope is set: the default menu is the whole bot, and the
-# bot talks to exactly one chat — the owner's — so no scope could
-# narrow it further.
+# words.
+#
+# The menu is set on TWO scopes, and that is deliberate, not redundant:
+# Telegram shows a DM the most specific scope that has commands, and an
+# ancient menu once lived on all_private_chats while default carried the
+# new one — the owner saw the old commands and nothing here could
+# explain it. Both scopes carry the same list, so no scope can disagree.
+# The group scope is deleted outright: the bot talks to exactly one
+# chat — the owner's — and a group menu would be a lie.
 menu='{"commands":[{"command":"start","description":"List what the fleet bot can do"},{"command":"help","description":"List what the fleet bot can do"},{"command":"fleet","description":"Every box, its state and last sync, with Open and Pair buttons"},{"command":"devices","description":"The clients that tapped in"},{"command":"faudit","description":"The fleet'"'"'s history, newest first"},{"command":"audit","description":"The fleet'"'"'s history, same as /faudit"},{"command":"frevoke","description":"Revoke one box (confirm with YES)"},{"command":"revoke","description":"Retired: points at the fleet-wide /fnuke"},{"command":"fnuke","description":"Revoke every box (confirm with YES)"},{"command":"enrollcode","description":"A one-time code for a new box"},{"command":"status","description":"The primary box'"'"'s service status"}]}'
 
-# The body goes in on stdin, as above: nothing secret rides here, but
-# the shape stays the same so the two calls cannot drift apart.
-if ! response="$(printf '%s' "$menu" | curl -sS --max-time 30 -w '\n%{http_code}' \
-  -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" \
-  -H 'Content-Type: application/json' \
-  --data-binary @-)"; then
-  echo "brain-webhook: could not reach Telegram" >&2
-  exit 1
-fi
-
-status="${response##*$'\n'}"
-body="${response%$'\n'*}"
+# One scope's menu: the body goes in on stdin, as above. Nothing secret
+# rides here, but the shape stays the same so the calls cannot drift
+# apart. Exits nonzero when Telegram refuses or cannot be reached.
+set_scope_menu() {
+  local scope="$1"
+  local body status response payload
+  # The menu var is {"commands":[...]}; the scope goes in front of it.
+  payload="{\"scope\":${scope},${menu#\{}"
+  if ! response="$(printf '%s' "$payload" | curl -sS --max-time 30 -w '\n%{http_code}' \
+    -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" \
+    -H 'Content-Type: application/json' \
+    --data-binary @-)"; then
+    echo "brain-webhook: could not reach Telegram (scope $scope)" >&2
+    return 1
+  fi
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  if [ "$status" != "200" ] || ! [[ "$body" =~ $ok_pattern ]]; then
+    echo "brain-webhook: Telegram refused the menu (HTTP $status, scope $scope)" >&2
+    echo "brain-webhook: $body" >&2
+    return 1
+  fi
+}
 
 # A refused menu is not a failed cutover: the webhook above is
 # registered and the bot answers. It is still a loud failure — a bot
 # with no menu hides every command — and rerunning this script retries
 # the menu alone (re-registering the same webhook changes nothing).
-if [ "$status" != "200" ] || ! [[ "$body" =~ $ok_pattern ]]; then
-  echo "brain-webhook: Telegram refused the menu (HTTP $status)" >&2
-  echo "brain-webhook: $body" >&2
+menu_failed=0
+set_scope_menu '{"type":"default"}' || menu_failed=1
+set_scope_menu '{"type":"all_private_chats"}' || menu_failed=1
+if [ "$menu_failed" != "0" ]; then
   echo "brain-webhook: the webhook is registered but the menu is not. Rerun this script." >&2
   exit 1
 fi
+# No group menu: this bot has exactly one chat.
+curl -sS --max-time 30 \
+  -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMyCommands" \
+  -H 'Content-Type: application/json' \
+  --data '{"scope":{"type":"all_group_chats"}}' > /dev/null || true
 
 echo "brain-webhook: Telegram shows the command menu"
