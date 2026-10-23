@@ -52,6 +52,16 @@ export interface AuditRow {
   error?: string;
 }
 
+// A tapping client the brain saw: one IP + user-agent pair from the
+// brain's own history, with its tap count and its last tap. The shape
+// is the Go bot's SeenClient, read from the rows the boxes pushed.
+export interface DeviceRow {
+  ip: string;
+  ua: string;
+  count: number;
+  last: number;
+}
+
 // A link the brain handed out, with the message it rides on. The brain
 // owns every message, so it has to know where the link lives to edit
 // that message when the link is spent or dies.
@@ -70,6 +80,7 @@ export interface CommandDeps {
   listBoxes: () => BoxPublic[];
   mintLink: (boxId: string) => Promise<string>;   // the tap URL
   audit: (boxId: string, limit: number) => Promise<AuditRow[]>;
+  devices: () => Promise<DeviceRow[]>;   // the tapping clients
   revoke: (boxId: string) => Promise<RevokeResult>;
   revokeAll: () => Promise<RevokeResult[]>;
   issueEnrollCode: (boxId: string) => Promise<{ code: string; command: string }>;
@@ -107,6 +118,10 @@ const AUDIT_ROWS_MAX = 30;
 // arguments. Both reach the same commands. A Map, so a name can never
 // reach something that only looks like a command.
 const COMMANDS = new Map<string, CommandHandler>([
+  // /start prints the same list as /help: Telegram shows a Start
+  // button on first contact, and it must land somewhere.
+  ["/start", helpCommand],
+  ["/help", helpCommand],
   ["/fleet", fleetCommand],
   // The Go bot sends one board for /fleet and /link — "/link is the
   // menu: which machine do you want to work in?" (internal/tg/tg.go) —
@@ -114,8 +129,15 @@ const COMMANDS = new Map<string, CommandHandler>([
   ["/link", linkCommand],
   ["/flink", flinkCommand],
   ["/login", loginCommand],
+  ["/devices", devicesCommand],
   ["/faudit", auditCommand],
+  // Typed /audit is the /faudit question, not a redirect: the tap
+  // action "audit" below answers through the same handler.
+  ["/audit", auditCommand],
   ["/frevoke", revokeCommand],
+  // Typed /revoke is retired out loud: the tap action "revoke" below
+  // still revokes one box — this answers the typed command only.
+  ["/revoke", revokeRetiredCommand],
   ["/fnuke", nukeCommand],
   ["/enrollcode", enrollCodeCommand],
   ["/status", statusCommand],
@@ -314,6 +336,18 @@ async function loginCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply>
   return { text: loginText(url), link: { url, box: deps.primaryBox } };
 }
 
+// /start and /help: the same list. A bot with no help text is a bot
+// nobody can learn, and /start is where Telegram's Start button lands.
+function helpCommand(): Reply {
+  return { text: helpText() };
+}
+
+// /devices: the clients that tapped in, from the brain's own history.
+async function devicesCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  const now = nowSec();
+  return { text: devicesText(await deps.devices(), now) };
+}
+
 // /faudit [box] [n]: the fleet's history, newest first.
 async function auditCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
   const { box, limit } = auditArgs(cmd.args);
@@ -331,6 +365,13 @@ async function revokeCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply>
     return { text: revokeConfirmText(box) };
   }
   return { text: revokeText(await deps.revoke(box), box) };
+}
+
+// Typed /revoke: retired out loud. The Go bot's /revoke killed sessions;
+// /fnuke rotates credentials instead. Silence would leave the owner's
+// muscle memory talking to nothing.
+function revokeRetiredCommand(): Reply {
+  return { text: revokeRetiredText() };
 }
 
 // /fnuke YES: revoke every box.
@@ -469,6 +510,46 @@ function loginText(url: string): string {
   return `🔑 <b>OpenCode ready</b> — one tap · single use\n<a href="${escapeHtml(url)}">🚀 Open OpenCode</a>`;
 }
 
+// The command list, in one place: /start and /help print the same
+// text. One line per command: what it does, nothing more.
+function helpText(): string {
+  return [
+    "🤖 <b>Fleet bot</b> — what each command does:",
+    "/start — this list",
+    "/help — this list",
+    "/fleet — every box, its state and last sync",
+    "/link — the menu of boxes to open",
+    "/flink &lt;box&gt; — a one-use tap link for one box",
+    "/login — a one-use tap link for the primary box",
+    "/devices — the clients that tapped in",
+    "/faudit [box] [n] — the fleet's history, newest first",
+    "/audit [box] [n] — the same history",
+    "/frevoke &lt;box&gt; YES — revoke one box",
+    "/revoke — retired; /fnuke YES is the fleet-wide equivalent",
+    "/fnuke YES — revoke every box",
+    "/enrollcode &lt;box&gt; — a one-time code for a new box",
+    "/status — the primary box's service status",
+  ].join("\n");
+}
+
+// The tapping clients, the Go bot's sendDevices: each client with its
+// tap count and how long ago it was last seen, newest first.
+function devicesText(clients: DeviceRow[], now: number): string {
+  if (clients.length === 0) {
+    return "📭 <b>No taps yet.</b>";
+  }
+  const lines = ["📱 <b>Seen clients</b>"];
+  for (const client of clients) {
+    lines.push(
+      `• <code>${escapeHtml(client.ip)}</code> · ${client.count} taps · ${escapeHtml(fmtAgo(now - client.last))}`,
+    );
+    if (client.ua !== "") {
+      lines.push(`<code>${escapeHtml(client.ua)}</code>`);
+    }
+  }
+  return lines.join("\n");
+}
+
 // The history, the Go bot's FleetAuditText.
 function auditText(rows: AuditRow[]): string {
   if (rows.length === 0) {
@@ -522,6 +603,16 @@ function blockedText(box: string, epoch: number, detail?: string): string {
     return blocked;
   }
   return `${blocked}\n<i>${escapeHtml(detail)}</i>`;
+}
+
+// The retired command: what happened to it and where to go instead.
+// The old /revoke killed sessions; /fnuke rotates credentials —
+// that is the difference, in one clause.
+function revokeRetiredText(): string {
+  return (
+    "⚠️ <code>/revoke</code> is retired — it killed sessions on one box. " +
+    "The fleet-wide equivalent is <code>/fnuke YES</code>, which rotates credentials on every box."
+  );
 }
 
 // The revoke prompt: the credentials rotate, so the owner confirms.

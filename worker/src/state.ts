@@ -1,7 +1,7 @@
 import { handleAudit } from "./audit";
 import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, parseOwnerChatId, resolveBrainConfig, type BotCommand } from "./bot";
-import { runCommand, type LinkRecord } from "./botcommands";
+import { runCommand, type DeviceRow, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
 import { boxAdapter } from "./boxapi";
 import { boxDnsWriter } from "./dns";
@@ -317,6 +317,8 @@ export class FleetState implements DurableObject {
       // The history: the brain's own table. The boxes pushed these rows,
       // so a box that is offline — or gone for good — keeps its history.
       audit: (boxId, limit) => Promise.resolve(this.auditLogRows(boxId, limit)),
+      // The tapping clients: the same table, aggregated.
+      devices: () => Promise.resolve(this.deviceRows()),
       revoke: (boxId) => this.revokeBox(boxId),
       revokeAll: () => this.revokeEveryBox(),
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
@@ -897,6 +899,24 @@ export class FleetState implements DurableObject {
       tainted: row.tainted === 1,
       token: row.token,
     }));
+  }
+
+  // The tapping clients: distinct IP + user-agent pairs from the
+  // brain's own history — the Go bot's SeenClients, read from the rows
+  // the boxes pushed instead of the box's own table. Only the tap
+  // actions count: a row that is not a tap is not a tapping client.
+  deviceRows(): DeviceRow[] {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec(
+      "SELECT ip, ua, COUNT(*) AS n, MAX(at) AS last FROM audit_log WHERE action IN ('tapped','consumed') GROUP BY ip, ua ORDER BY last DESC",
+    );
+    const rows = cursor.toArray() as unknown as Array<{
+      ip: string;
+      ua: string;
+      n: number;
+      last: number;
+    }>;
+    return rows.map((row) => ({ ip: row.ip, ua: row.ua, count: row.n, last: row.last }));
   }
 
   // The box's own check: the bearer is the box's heartbeat token, the
