@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.26.0 - 2026-10-23
+#### Features
+- (**worker**) the fleet board is the only menu; boxes open into actions - (4316d40) - mfenderov
+- (**worker**) the fleet board is the only menu; boxes open into actions - (84f738d) - mfenderov
+
+- - -
+
 ## v0.25.1 - 2026-10-23
 #### Bug Fixes
 - (**ops**) the command menu is set on every scope Telegram reads - (856839f) - mfenderov
