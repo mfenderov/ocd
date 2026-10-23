@@ -1,7 +1,9 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { boxAdapter, BOX_READ_DEADLINE_MS } from "../src/boxapi";
 import type { BoxRow } from "../src/boxes";
-import { sealAdminToken } from "../src/sealedtoken";
+import { sealAdminToken, unsealAdminToken } from "../src/sealedtoken";
+import type { FleetState } from "../src/state";
 import type { OwnerChat } from "../src/owner";
 import { handleMintToken } from "../src/tokens";
 import { inState, requestedUrl } from "./helpers";
@@ -224,5 +226,119 @@ describe("the /status relay", () => {
         delete globals["__prevFetch"];
       });
     }
+  });
+});
+
+// The box relay: the Worker calls the box over its pinned hostname with
+// the sealed admin token.
+const RELAY_SEAL_KEY = "test-seal-key-relay";
+const RELAY_ADMIN_TOKEN = "admin-secret-relay";
+const RELAY_SEALED_ADMIN = await sealAdminToken(RELAY_SEAL_KEY, RELAY_ADMIN_TOKEN);
+const RELAY_NOW = 1_700_000_000;
+
+const RELAY_BOX: BoxRow = {
+  id: "home",
+  hostname: "oc-tap-home.buyallmemes.com",
+  heartbeat_token_hash: "hb-hash",
+  admin_token_hash: "admin-hash",
+  admin_token_sealed: RELAY_SEALED_ADMIN,
+  tunnel_id: "",
+  epoch: 1,
+  last_seq: 1,
+  last_ts: 0,
+  last_seen: RELAY_NOW,
+  enrolled: 1,
+};
+
+const RELAY_STORE = {
+  getBox: (id: string): BoxRow | undefined => (id === RELAY_BOX.id ? RELAY_BOX : undefined),
+};
+
+// The admin token the brain carries to the box: sealed at rest, opened
+// at call time.
+async function relayToken(): Promise<string> {
+  const token = await unsealAdminToken(RELAY_SEAL_KEY, RELAY_SEALED_ADMIN);
+  if (token === null) {
+    throw new Error("the sealed admin token did not unseal");
+  }
+  return token;
+}
+
+describe("the box relay", () => {
+  it("calls the box over its pinned hostname with the sealed admin token", async () => {
+    const calls: Array<{ url: string; authorization: string | null }> = [];
+    const fetcher = (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      calls.push({ url: request.url, authorization: request.headers.get("authorization") });
+      return Promise.resolve(
+        new Response('{"id":"home","epoch":1,"version":"dev","taps_24h":0}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
+
+    const relay = await boxAdapter(RELAY_STORE, { fetcher }).presence("home", await relayToken());
+
+    expect(relay.kind).toBe("answered");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://oc-tap-home.buyallmemes.com/_oc/presence");
+    // The admin token is sealed in the brain and plaintext only on the
+    // wire to the box.
+    expect(calls[0].authorization).toBe(`Bearer ${RELAY_ADMIN_TOKEN}`);
+  });
+
+  it("gives up on a box that never answers", async () => {
+    // The deadline the controller set: a dead box must not hold the
+    // request open. The mint relay's 15 seconds is far too long here.
+    expect(BOX_READ_DEADLINE_MS).toBe(3000);
+
+    const hanging = (async (_input: RequestInfo | URL, init?: RequestInit) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as typeof fetch;
+
+    const relay = await boxAdapter(RELAY_STORE, { deadlineMs: 20, fetcher: hanging }).presence(
+      "home",
+      await relayToken(),
+    );
+
+    expect(relay).toEqual({ kind: "silent", reason: "box_timeout" });
+  });
+
+  it("says a box that cannot be reached is unreachable", async () => {
+    const failing: typeof fetch = () => Promise.reject(new Error("connection refused"));
+
+    const relay = await boxAdapter(RELAY_STORE, { fetcher: failing }).presence("home", await relayToken());
+
+    expect(relay).toEqual({ kind: "silent", reason: "box_unreachable" });
+  });
+});
+
+describe("the console routes", () => {
+  it("answers 404 for a box the fleet does not know", async () => {
+    const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-relay"));
+    const token = await inState(stub, async (instance: FleetState) => {
+      const res = await handleMintToken(
+        new Request("https://fleet.local/tokens", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer test-bootstrap-relay" },
+          body: JSON.stringify({ scopes: ["audit"] }),
+        }),
+        instance,
+        { bootstrapSecret: "test-bootstrap-relay" },
+      );
+      expect(res.status).toBe(200);
+      return (await res.json<{ token: string }>()).token;
+    });
+    const headers = { authorization: `Bearer ${token}` };
+
+    const presence = await stub.fetch(new Request("https://do/presence/ghost", { headers }));
+    expect(presence.status).toBe(404);
+    expect(await presence.json()).toMatchObject({ error: "unknown_box" });
+
+    const status = await stub.fetch(new Request("https://do/status/ghost", { headers }));
+    expect(status.status).toBe(404);
+    expect(await status.json()).toMatchObject({ error: "unknown_box" });
   });
 });

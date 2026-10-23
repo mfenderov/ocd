@@ -25,9 +25,9 @@ export default defineConfig({
       // an update that answers nothing.
       //
       // The seal secret lets the brain read a box's admin token, so the
-      // relays run for real: a box with no sealed admin token is the
-      // misconfiguration the brain's own presence probe must refuse to
-      // judge. A box sealed with another key cannot be read either.
+      // relays run for real: a box with no sealed admin token is a
+      // misconfiguration the brain must refuse to judge. A box sealed
+      // with another key cannot be read either.
       miniflare: {
         bindings: {
           ACCESS_TEAM_DOMAIN: "test-team.cloudflareaccess.com",

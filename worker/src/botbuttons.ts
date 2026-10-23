@@ -1,4 +1,3 @@
-import { OFFLINE_AFTER_SEC } from "./liveness";
 import type { BoxPublic } from "./boxes";
 import type { OwnerButton, OwnerButtons } from "./owner";
 
@@ -25,6 +24,10 @@ export function openButton(label: string, link: string): OwnerButton {
 // show the board, revoke a box, read a box's history.
 export type Action = "link" | "revoke" | "audit" | "board";
 
+// How long a box may go without a heartbeat before the board calls it
+// offline: three missed beats at the 30 second fleet heartbeat.
+const OFFLINE_AFTER_SEC = 90;
+
 // The label of a button is at most this long. The Go's boxKey "caps the
 // button label length Telegram renders well" (internal/tg/buttons.go).
 // The Go counts bytes and the brain counts characters, so a full-length
@@ -34,8 +37,8 @@ const LABEL_MAX = 32;
 // The state of one box: tombstoned wins over staleness, then a box
 // quieter than the offline threshold reads offline (the Go's
 // fleet.BoxState — offline only *exceeds* the threshold). The threshold
-// itself lives in liveness.ts: the board's label, the fleet's text and
-// the brain's liveness sweep must agree on a box's state.
+// lives above: the board's label and the fleet's text must agree on a
+// box's state.
 export function boxState(box: BoxPublic, now: number): string {
   if (box.tombstoned) {
     return "tombstoned";

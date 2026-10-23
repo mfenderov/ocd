@@ -38,8 +38,8 @@ const BOX_API = {
 } as const;
 
 // Box reads get 3s: a dead box must not hold a request open. The mint
-// relay's 15s is far too long for a presence probe — the owner would
-// wait behind a box that is already gone.
+// relay's 15s is far too long for a read — the owner would wait behind
+// a box that is already gone.
 export const BOX_READ_DEADLINE_MS = 3_000;
 
 // The mint and the revoke exec a password rotation server-side, so
@@ -202,9 +202,8 @@ async function rotatedEpoch(res: Response): Promise<number | null> {
 // The status and the presence: the box's own answer, relayed.
 //
 // An edge error page is not the box answering: when the tunnel is down
-// the edge answers instead of the box, so the probe must read it as
-// silence — otherwise a dead box looks alive and the sweep never marks
-// it, nor recovers it.
+// the edge answers instead of the box, so the relay must read it as
+// silence — otherwise a dead box looks alive.
 async function ask(
   store: BoxStore,
   boxId: string,
