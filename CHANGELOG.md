@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.26.1 - 2026-10-23
+#### Bug Fixes
+- (**worker**) read the pairing link out of the tap's answer, don't require it to be the whole answer - (41cd4dd) - mfenderov
+- (**worker**) read the pairing link out of the tap's answer, don't require it to be the whole answer - (70b4d2a) - mfenderov
+
+- - -
+
 ## v0.26.0 - 2026-10-23
 #### Features
 - (**worker**) the fleet board is the only menu; boxes open into actions - (4316d40) - mfenderov
