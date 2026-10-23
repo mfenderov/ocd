@@ -14,11 +14,13 @@ export type NotifyFn = (text: string) => Promise<void>;
 // The owner's chat: the one place the brain talks to the owner.
 //
 // Three operations, in the brain's words: say something, replace what
-// the brain said before, answer a tap. The Bot API's own method names,
-// its option keys and its inline_keyboard shape belong to the adapter.
+// the brain said before, answer a tap. A replace carries the buttons
+// the edited message keeps: omitting them leaves the old keyboard in
+// place. The Bot API's own method names, its option keys and its
+// inline_keyboard shape belong to the adapter.
 export interface OwnerChat {
   say(chatId: number, text: string, buttons?: OwnerButtons): Promise<SentMessage>;
-  replace(chatId: number, messageId: number, text: string): Promise<boolean>;
+  replace(chatId: number, messageId: number, text: string, buttons?: OwnerButtons): Promise<boolean>;
   answerTap(tapId: string, text?: string): Promise<void>;
 }
 

@@ -1,8 +1,12 @@
 import type { BotCommand } from "./bot";
 import {
   boxState,
+  boxView,
+  enrollPromptButtons,
   fleetBoard,
+  nukeConfirmButtons,
   openButton,
+  revokeConfirmButtons,
   stateDot,
 } from "./botbuttons";
 import type { RevokeResult } from "./revoke";
@@ -97,6 +101,11 @@ export interface CommandDeps {
   // The link registry: the brain records every link it hands out, with
   // the message it rides on.
   recordLink: (link: LinkRecord) => void;
+  // The +Box prompt: the next message names the box. The brain arms the
+  // prompt when the tap asks, and clears it when the tap is cancelled —
+  // the Durable Object holds the prompt next to the fleet state.
+  beginEnroll: (chatId: number) => void;
+  cancelEnroll: (chatId: number) => void;
   primaryBox: string;
 }
 
@@ -109,6 +118,11 @@ interface Reply {
   // The minted link this reply carries, when it carries one: the brain
   // has to find that message again to edit it when the link is spent.
   link?: { url: string; box: string };
+  // An edit, not a follow-up: the reply replaces the tapped message
+  // instead of saying something new. The navigation taps (the box, the
+  // board, the confirms, the Cancel) edit; the content (Pair, Status,
+  // History, Help, the enroll prompt, the YES results) says.
+  edit?: boolean;
 }
 
 // A command handler answers with the message to send, or with nothing
@@ -145,13 +159,25 @@ const COMMANDS = new Map<string, CommandHandler>([
   ["/enrollcode", enrollCodeCommand],
   ["/status", statusCommand],
   // The taps: Pair mints a pairing URL; the board's old link taps still
-  // mint an Open button, so a board that sat unread keeps working. The
-  // rest re-read the fleet.
+  // mint an Open button, so a board that sat unread keeps working. Box
+  // opens the box's view; status relays that box; rask and ryes are the
+  // revoke's ask and run; nuke and nukeyes are the fleet's ask and run;
+  // help posts the command list; enroll arms the box-name prompt and
+  // encancel clears it. The rest re-read the fleet.
   ["link", tapLinkCommand],
   ["pair", pairCommand],
   ["board", fleetCommand],
   ["revoke", revokeCommand],
   ["audit", auditCommand],
+  ["box", boxCommand],
+  ["status", statusTapCommand],
+  ["rask", revokeAskCommand],
+  ["ryes", revokeYesCommand],
+  ["nuke", nukeAskCommand],
+  ["nukeyes", nukeYesCommand],
+  ["help", helpCommand],
+  ["enroll", enrollPromptCommand],
+  ["encancel", enrollCancelCommand],
 ]);
 
 // runCommand answers one command. It never throws: a failure becomes a
@@ -202,13 +228,18 @@ async function commandReply(
   }
 }
 
-// The reply, sent. Telegram is down: nothing can be said about it, and
-// the answer must not escape — the webhook would be retried forever.
+// The reply, sent. A tap that navigates edits the message it came
+// from; everything else says something new. Telegram is down: nothing
+// can be said about it, and the answer must not escape — the webhook
+// would be retried forever.
 async function sendReply(
   cmd: BotCommand,
   reply: Reply,
   deps: CommandDeps,
 ): Promise<SentMessage | undefined> {
+  if (reply.edit === true && cmd.messageId !== undefined) {
+    return sendEdit(cmd.chatId, cmd.messageId, reply, deps);
+  }
   try {
     return await deps.telegram.say(cmd.chatId, reply.text, replyButtons(reply));
   } catch (err) {
@@ -217,18 +248,43 @@ async function sendReply(
   }
 }
 
+// The edit: the navigation taps replace the message they came from, so
+// the chat keeps one board, one view, one confirm — never a trail of
+// them. A failed edit is the same as a failed reply: the webhook must
+// not retry the update in a loop.
+async function sendEdit(
+  chatId: number,
+  messageId: number,
+  reply: Reply,
+  deps: CommandDeps,
+): Promise<SentMessage | undefined> {
+  try {
+    const landed = await deps.telegram.replace(chatId, messageId, reply.text, replyButtons(reply));
+    if (!landed) {
+      console.error("bot: the edit did not land");
+      return undefined;
+    }
+    return { id: messageId };
+  } catch (err) {
+    console.error(`bot: the edit failed (${errorText(err)})`);
+    return undefined;
+  }
+}
+
 // The link registry: the brain has to know which message carries the
 // link, so it can edit that message when the link is spent or dies.
 //
 // The message is already sent when this runs, so a registry that fails
-// must not take the answer down with it: the link lives on.
+// must not take the answer down with it: the link lives on. An edit
+// records nothing: the message already exists, and the board and box
+// views re-render their links on every Back instead of tracking them.
 function recordReplyLink(
   cmd: BotCommand,
   reply: Reply,
   sent: SentMessage,
   deps: CommandDeps,
 ): void {
-  if (!reply.link) {
+  if (!reply.link || reply.edit === true) {
     return;
   }
   const token = linkToken(reply.link.url);
@@ -263,8 +319,10 @@ async function answerTap(deps: CommandDeps, callbackId: string): Promise<void> {
   }
 }
 
-// The reply's buttons: Telegram refuses an empty keyboard, so a fleet
-// with no boxes sends the text alone.
+// The reply's buttons: Telegram refuses an empty keyboard, and a tap
+// that navigates with no keyboard would strand the message without a
+// way back. The board always carries its footer, so it never sends the
+// text alone.
 function replyButtons(reply: Reply): OwnerButtons | undefined {
   if (!reply.keyboard || reply.keyboard.length === 0) {
     return undefined;
@@ -288,11 +346,96 @@ async function fleetCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply>
 
 // The board's reply: the fleet's text and the keyboard under it. One
 // clock for both, so the text and the mint skip can never call the same
-// box ok and offline.
+// box ok and offline. A tap edits the message it came from; a typed
+// /fleet says something new.
 async function boardReply(deps: CommandDeps): Promise<Reply> {
   const boxes = deps.listBoxes();
   const now = nowSec();
-  return { text: fleetText(boxes, now), keyboard: fleetBoard(boxes, await mintOpenLinks(boxes, now, deps)) };
+  return {
+    text: fleetText(boxes, now),
+    keyboard: fleetBoard(boxes, await mintOpenLinks(boxes, now, deps)),
+    edit: true,
+  };
+}
+
+// The box tap: that box's view — its state line and its actions —
+// editing the board message it came from. A stale button for a box
+// that is gone edits back into the board, so the message keeps
+// working; a tap with no message to edit says the view instead.
+async function boxCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | undefined> {
+  const box = cmd.args[0]?.trim() ?? "";
+  if (!box) {
+    return undefined;
+  }
+  const boxes = deps.listBoxes();
+  const now = nowSec();
+  const known = boxes.find((b) => b.id === box);
+  if (!known) {
+    return boardReply(deps);
+  }
+  const links = await mintOpenLinks([known], now, deps);
+  return { text: fleetLine(known, now), keyboard: boxView(known, links.get(known.id)), edit: true };
+}
+
+// The Status tap: that box's status, relayed as a follow-up — the
+// typed /status still reads the primary box.
+async function statusTapCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | undefined> {
+  const box = cmd.args[0]?.trim() ?? "";
+  if (!box) {
+    return undefined;
+  }
+  const now = nowSec();
+  const known = deps.listBoxes().find((b) => b.id === box);
+  if (!known) {
+    return { text: unknownBoxText(box) };
+  }
+  if (boxState(known, now) === "offline") {
+    return { text: offlineText(known, now) };
+  }
+  return { text: statusBoxText(box, await deps.boxStatus(box)) };
+}
+
+// The Revoke button: the ask, editing the box into its confirm view.
+// YES runs the existing per-box revoke; Cancel edits back to the box.
+function revokeAskCommand(cmd: BotCommand): Reply | undefined {
+  const box = cmd.args[0]?.trim() ?? "";
+  if (!box) {
+    return undefined;
+  }
+  return { text: revokeAskText(box), keyboard: revokeConfirmButtons(box), edit: true };
+}
+
+// The revoke's YES: the existing per-box revoke, as a follow-up.
+async function revokeYesCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | undefined> {
+  const box = cmd.args[0]?.trim() ?? "";
+  if (!box) {
+    return undefined;
+  }
+  return { text: revokeText(await deps.revoke(box), box) };
+}
+
+// The Nuke button: the ask, editing the board into its confirm view.
+// YES runs the existing nuke path; Cancel edits back to the board.
+function nukeAskCommand(): Reply {
+  return { text: nukeAskText(), keyboard: nukeConfirmButtons(), edit: true };
+}
+
+// The nuke's YES: the existing nuke path, as a follow-up.
+async function nukeYesCommand(_cmd: BotCommand, deps: CommandDeps): Promise<Reply> {
+  return { text: nukeText(await deps.revokeAll()) };
+}
+
+// The +Box button: the ask, as a follow-up. The prompt arms the
+// box-name input; the owner's next message names the box.
+function enrollPromptCommand(cmd: BotCommand, deps: CommandDeps): Reply {
+  deps.beginEnroll(cmd.chatId);
+  return { text: enrollPromptText(), keyboard: enrollPromptButtons() };
+}
+
+// The prompt's Cancel: the prompt is cleared, and the message says so.
+function enrollCancelCommand(cmd: BotCommand, deps: CommandDeps): Reply {
+  deps.cancelEnroll(cmd.chatId);
+  return { text: "📦 Enrollment cancelled.", edit: true };
 }
 
 // One tap link per box the clock calls online, all at once. The board
@@ -516,13 +659,17 @@ function fleetText(boxes: BoxPublic[], now: number): string {
   }
   const lines = [`🖥 <b>Fleet</b> (${boxes.length})`];
   for (const b of boxes) {
-    const state = boxState(b, now);
-    const dot = stateDot(state);
-    lines.push(
-      `${dot} <code>${escapeHtml(b.id)}</code> · ${state} · synced ${escapeHtml(fmtAgo(now - b.last_seen))} · epoch ${b.epoch}`,
-    );
+    lines.push(fleetLine(b, now));
   }
   return lines.join("\n");
+}
+
+// One box's line: its state, how long ago it was seen, its epoch. The
+// box view prints this same line, so the view and the board agree.
+function fleetLine(b: BoxPublic, now: number): string {
+  const state = boxState(b, now);
+  const dot = stateDot(state);
+  return `${dot} <code>${escapeHtml(b.id)}</code> · ${state} · synced ${escapeHtml(fmtAgo(now - b.last_seen))} · epoch ${b.epoch}`;
 }
 
 // The age of a last-seen timestamp, in the words the fleet list reads:
@@ -701,6 +848,12 @@ function revokeConfirmText(box: string): string {
   return `☠️ <b>Revoke box ${escapeHtml(box)}?</b> Its credentials rotate.\nConfirm: <code>/frevoke ${escapeHtml(box)} YES</code>`;
 }
 
+// The revoke's ask on a button: the same question, without the typing —
+// YES and Cancel ride under it.
+function revokeAskText(box: string): string {
+  return `☠️ <b>Revoke box ${escapeHtml(box)}?</b> Its credentials rotate.`;
+}
+
 // The nuke outcome, the Go bot's FleetNukeText.
 function nukeText(results: RevokeResult[]): string {
   let revoked = 0;
@@ -724,6 +877,18 @@ function nukeConfirmText(): string {
   return "☠️ <b>Nuke the whole fleet?</b> Every box re-enrolls.\nConfirm: <code>/fnuke YES</code>";
 }
 
+// The nuke's ask on a button: the same question, without the typing —
+// YES and Cancel ride under it.
+function nukeAskText(): string {
+  return "☠️ <b>Nuke the whole fleet?</b> Every box re-enrolls.";
+}
+
+// The +Box prompt: the ask for the new box's name. The owner's next
+// message names it.
+function enrollPromptText(): string {
+  return "📦 Send me the box name — the next message names the box.";
+}
+
 // The enroll code, the Go bot's FleetEnrollCodeText.
 function enrollCodeText(box: string, command: string): string {
   return (
@@ -733,8 +898,21 @@ function enrollCodeText(box: string, command: string): string {
   );
 }
 
+// The status of one box, the box view's relay. The typed /status
+// prints the primary box's bare line; the tap names the box it relays.
+function statusBoxText(box: string, status: string): string {
+  return `📊 <b>Status ${escapeHtml(box)}</b>\n• <code>${escapeHtml(status.trim())}</code>`;
+}
+
+// A button for a box that is gone: the fleet moved on, and the board
+// has the live list.
+function unknownBoxText(box: string): string {
+  return `⚠️ Unknown box <code>${escapeHtml(box)}</code> — send /fleet for the live board.`;
+}
+
 // The status, the Go bot's /status answer. The box reports one line, so
 // the brain relays that line instead of splitting it into fields it
+// would have to parse. The line is trimmed here: the box's status ends
 // would have to parse. The line is trimmed here: the box's status ends
 // in a newline, and a newline inside the <code> block ends the block —
 // the closing tag would land in the owner's chat as plain text.

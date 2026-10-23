@@ -63,11 +63,17 @@ here.
 - `/fleet` in the bot DM lists every box with live state and two buttons
   per box: `Open <box>` carries the box's tap link straight into that
   machine's editor; `Pair <box>` mints at tap time and sends the pairing
-  URL as copyable text (single use, good for 5 minutes).
+  URL as copyable text (single use, good for 5 minutes). Tapping a box
+  opens its view: state line, Open, Pair, per-box Status and Revoke, and
+  `‹ Back` to the board. The board's footer holds the global actions:
+  `🕘 History` (the `/faudit` default), `＋ Box` (asks for the name, then
+  the next message enrolls it), `☠️ Nuke` (YES/Cancel confirm), `❓ Help`.
+  The Telegram `/` menu lists `/fleet` and `/help` only.
 - `/fleet`, `/devices`, `/faudit` (or `/audit`), `/frevoke <box> YES`,
-  `/fnuke YES`, `/enrollcode <box>`, `/status`. `/start` and `/help` list
-  them in chat. Any other typed command is answered with a pointer at
-  `/help` — `/link`, `/flink` and `/login` are gone, the board does it all.
+  `/fnuke YES`, `/enrollcode <box>`, `/status` all still work typed.
+  `/start` and `/help` list them in chat. Any other typed command is
+  answered with a pointer at `/help` — `/link`, `/flink` and `/login`
+  are gone, the board does it all.
 - `/fnuke YES` revokes every box: every session dies, and each box is
   tombstoned until it comes back with a higher epoch. Until then the
   mint relay answers 409 `tainted` and the bot says "⚠️ Link failed".

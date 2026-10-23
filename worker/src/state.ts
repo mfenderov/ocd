@@ -1,6 +1,6 @@
 import { handleAudit } from "./audit";
 import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
-import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
+import { handleTelegramWebhook, resolveBrainConfig, type BotCommand, type BotConfig } from "./bot";
 import { runCommand, type DeviceRow, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
 import { boxAdapter, pairingLink } from "./boxapi";
@@ -121,6 +121,12 @@ CREATE TABLE IF NOT EXISTS links(
   used_ua TEXT NOT NULL DEFAULT '',
   edited INTEGER NOT NULL DEFAULT 0
 );
+-- The +Box prompt, one per chat: the owner's next message names the
+-- box. The row dies when the name is consumed, cancelled, or expired.
+CREATE TABLE IF NOT EXISTS bot_pending(
+  chat_id INTEGER PRIMARY KEY,
+  prompt_at INTEGER NOT NULL DEFAULT 0
+);
 -- The fleet's history, ingested from the boxes.
 CREATE TABLE IF NOT EXISTS audit_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +213,11 @@ const ALARM_INTERVAL_MS = 30_000;
 // How long a row lives: the dedup table and the links are pruned after
 // 24 hours, the same window the box prunes its own link tokens on.
 const PRUNE_AFTER_SEC = 24 * 60 * 60;
+
+// How long the +Box prompt waits for the name: five minutes, the same
+// order as the other timeouts. An unanswered prompt expires — a stale
+// pending name must never claim a later unrelated message.
+export const PENDING_INPUT_TTL_SEC = 300;
 
 // The alarm's dependencies: the client that carries the owed edits and
 // the clock. The alarm builds them from the Worker env; a test hands in
@@ -314,6 +325,10 @@ export class FleetState implements DurableObject {
       issueEnrollCode: (boxId) => this.issueEnrollCode(boxId),
       boxStatus: (boxId) => this.boxStatus(boxId),
       recordLink: (link) => this.recordLink(link),
+      // The +Box prompt: the tap arms it, Cancel clears it, and the
+      // owner's next message is consumed as the name (state.ts).
+      beginEnroll: (chatId) => this.setPendingInput(chatId, nowSec()),
+      cancelEnroll: (chatId) => this.clearPendingInput(chatId),
       primaryBox: this.primaryBox,
     });
   }
@@ -724,6 +739,26 @@ export class FleetState implements DurableObject {
     );
   }
 
+  // The +Box prompt, one per chat: the owner's next message names the
+  // box. The prompt is armed by the +Box tap, and the row dies when the
+  // name is consumed, the prompt is cancelled, or the prompt expires.
+  setPendingInput(chatId: number, at: number): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("INSERT OR REPLACE INTO bot_pending (chat_id, prompt_at) VALUES (?, ?)", chatId, at);
+  }
+
+  getPendingInput(chatId: number): { chatId: number; promptAt: number } | undefined {
+    this.ensureSchema();
+    const cursor = this.state.storage.sql.exec("SELECT chat_id, prompt_at FROM bot_pending WHERE chat_id = ? LIMIT 1", chatId);
+    const row = cursor.toArray()[0] as unknown as { chat_id: number; prompt_at: number } | undefined;
+    return row ? { chatId: row.chat_id, promptAt: row.prompt_at } : undefined;
+  }
+
+  clearPendingInput(chatId: number): void {
+    this.ensureSchema();
+    this.state.storage.sql.exec("DELETE FROM bot_pending WHERE chat_id = ?", chatId);
+  }
+
   deleteTombstone(boxId: string): void {
     this.ensureSchema();
     this.state.storage.sql.exec("DELETE FROM tombstones WHERE box_id = ?", boxId);
@@ -901,12 +936,13 @@ export class FleetState implements DurableObject {
 
   // The prune: the rows the brain does not need any more. The dedup
   // table and the links live 24 hours — the same window the box prunes
-  // its own link tokens on.
+  // its own link tokens on. A stale +Box prompt dies on its own TTL.
   private pruneOldRows(now: number, olderThanSec: number): void {
     this.ensureSchema();
     const cutoff = now - olderThanSec;
     this.state.storage.sql.exec("DELETE FROM seen_updates WHERE seen_at < ?", cutoff);
     this.state.storage.sql.exec("DELETE FROM links WHERE created_at < ?", cutoff);
+    this.state.storage.sql.exec("DELETE FROM bot_pending WHERE prompt_at < ?", now - PENDING_INPUT_TTL_SEC);
   }
 
   // The alarm: the brain's only clock. workerd calls it when the alarm
@@ -1029,10 +1065,56 @@ export class FleetState implements DurableObject {
     if (!brain) {
       return Response.json({ error: "misconfigured" }, { status: 500 });
     }
+    // The +Box prompt: the owner's next message names the box. A tap is
+    // never a name; a command cancels the prompt and runs as a command.
+    if (await this.consumePendingInput(request, brain)) {
+      return Response.json({ ok: true });
+    }
     return handleTelegramWebhook(request, this, {
       ...brain,
       dispatch: (cmd) => this.dispatchCommand(cmd, brain.telegram),
     });
+  }
+
+  // The +Box prompt's answer: the single message after the prompt names
+  // the box. True when the update was consumed here — the webhook must
+  // not see it again. A command cancels the prompt and falls through;
+  // an expired prompt is cleared and the message falls through too.
+  private async consumePendingInput(request: Request, brain: BotConfig): Promise<boolean> {
+    const update = await readPendingUpdate(request);
+    const named = pendingNameOf(update, brain.ownerChatId);
+    if (!named) {
+      return false;
+    }
+    if (named.command) {
+      this.clearPendingInput(named.chatId);
+      return false;
+    }
+    return this.consumeEnrollName(update?.update_id, named, brain);
+  }
+
+  // The name, consumed: the enroll-code flow runs for it, exactly as a
+  // typed /enrollcode would. The prompt dies however this answers — one
+  // prompt names one box.
+  private async consumeEnrollName(
+    updateId: unknown,
+    named: { chatId: number; text: string },
+    brain: BotConfig,
+  ): Promise<boolean> {
+    const pending = this.getPendingInput(named.chatId);
+    if (!pending || nowSec() - pending.promptAt > PENDING_INPUT_TTL_SEC) {
+      // No prompt, or an unanswered one past its TTL: the stale name
+      // claims nothing.
+      this.clearPendingInput(named.chatId);
+      return false;
+    }
+    if (typeof updateId !== "number" || !Number.isInteger(updateId) || !this.seenUpdate(updateId)) {
+      return false;
+    }
+    this.markUpdateSeen(updateId, nowSec());
+    this.clearPendingInput(named.chatId);
+    await this.dispatchCommand({ name: "/enrollcode", args: [named.text.trim()], chatId: named.chatId }, brain.telegram);
+    return true;
   }
 
   // The boxes' door: the Telegram client is optional — a brain without a
@@ -1190,6 +1272,60 @@ function relayFailureStatus(reason: BoxSilence): number {
 // check, a reason they can wait out.
 function tapSilence(reason: BoxSilence, boxId: string): string {
   return reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${reason})`;
+}
+
+// The +Box prompt's candidate: the owner's next message, read loosely.
+// A tap is never a name; another chat is never the owner's; a message
+// with no text names nothing. The reader says whether the message is a
+// command — a command cancels the prompt instead of naming the box.
+function pendingNameOf(
+  update: PendingUpdate | undefined,
+  ownerChatId: number,
+): { chatId: number; text: string; command: boolean } | undefined {
+  if (!update || update.callback_query !== undefined) {
+    return undefined;
+  }
+  const chatId = update.message?.chat?.id;
+  if (chatId !== ownerChatId) {
+    return undefined;
+  }
+  const text = update.message?.text;
+  if (typeof text !== "string") {
+    return undefined;
+  }
+  return { chatId, text, command: isCommandText(text) };
+}
+
+// A typed command, the router's own rule (bot.ts): the first word plus
+// its arguments. Plain text is not a command: the owner chatting is
+// not a request — here, it is the box's name.
+function isCommandText(text: string): boolean {
+  const fields = text.trim().split(/\s+/).filter((field) => field !== "");
+  const name = fields[0];
+  return Boolean(name) && name.startsWith("/");
+}
+
+// The webhook body, read without consuming it: the prompt check runs
+// before the router, and the router reads the body again.
+async function readPendingUpdate(request: Request): Promise<PendingUpdate | undefined> {
+  try {
+    const body: unknown = await request.clone().json();
+    if (typeof body !== "object" || body === null) {
+      return undefined;
+    }
+    return body;
+  } catch {
+    return undefined;
+  }
+}
+
+// The update the prompt check reads: the id for the dedup, and the
+// message or tap it carries. Every field is read defensively — the
+// router below is the one that judges the shape.
+interface PendingUpdate {
+  update_id?: unknown;
+  message?: { text?: unknown; chat?: { id?: unknown } };
+  callback_query?: unknown;
 }
 
 // The failed relay, as the owner may read it: the status and a short
