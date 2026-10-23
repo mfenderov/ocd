@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { runCommand, type AuditRow, type CommandDeps, type DeviceRow, type LinkRecord } from "../src/botcommands";
+import { boardIdempotencyKey, runCommand, type AuditRow, type CommandDeps, type DeviceRow, type LinkRecord } from "../src/botcommands";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
@@ -60,6 +60,10 @@ class RecordingTelegram implements OwnerChat {
 // recorded, so a test can assert what the command asked for.
 interface Calls {
   mintLink: string[];
+  // The idempotency key each mint carried: the board's stable key, or
+  // nothing when the tap minted fresh.
+  mintKeys: Array<string | undefined>;
+  resolvePair: Array<{ boxId: string; tapUrl: string }>;
   audit: Array<{ boxId: string; limit: number }>;
   devices: number;
   revoke: string[];
@@ -82,6 +86,10 @@ interface HarnessOptions {
   listBoxesFails?: Error;
   // The mint that fails: a tap must still be answered.
   mintFails?: Error;
+  // The tap the resolve reads the pairing URL out of.
+  resolveFails?: Error;
+  // The pairing URL the resolve reads out of the tap's answer.
+  pairUrl?: string;
   // The URL the mint hands out.
   mintUrl?: string;
   // The status line the box answers with.
@@ -92,10 +100,27 @@ function harness(options: HarnessOptions = {}): {
   deps: CommandDeps;
   telegram: RecordingTelegram;
   calls: Calls;
+  order: string[];
 } {
   const telegram = new RecordingTelegram();
+  // The order the brain acts in: the tap is answered before the mint,
+  // and the mint before the resolve — the owner must never watch a
+  // spinner for box calls.
+  const order: string[] = [];
+  const say = telegram.say.bind(telegram);
+  telegram.say = (chatId, text, buttons) => {
+    order.push("say");
+    return say(chatId, text, buttons);
+  };
+  const answerTap = telegram.answerTap.bind(telegram);
+  telegram.answerTap = (callbackId) => {
+    order.push(`tap:${callbackId}`);
+    return answerTap(callbackId);
+  };
   const calls: Calls = {
     mintLink: [],
+    mintKeys: [],
+    resolvePair: [],
     audit: [],
     devices: 0,
     revoke: [],
@@ -112,12 +137,22 @@ function harness(options: HarnessOptions = {}): {
       }
       return options.boxes ?? [];
     },
-    mintLink: (boxId) => {
+    mintLink: (boxId, key?) => {
+      order.push(`mint:${boxId}`);
       calls.mintLink.push(boxId);
+      calls.mintKeys.push(key);
       if (options.mintFails) {
         return Promise.reject(options.mintFails);
       }
       return Promise.resolve(options.mintUrl ?? "https://tap.example/?t=tok-1");
+    },
+    resolvePair: (boxId, tapUrl) => {
+      order.push(`resolve:${boxId}`);
+      calls.resolvePair.push({ boxId, tapUrl });
+      if (options.resolveFails) {
+        return Promise.reject(options.resolveFails);
+      }
+      return Promise.resolve(options.pairUrl ?? "https://oc.home.buyallmemes.com/pair/abc123");
     },
     audit: (boxId, limit) => {
       calls.audit.push({ boxId, limit });
@@ -150,7 +185,7 @@ function harness(options: HarnessOptions = {}): {
     },
     primaryBox: options.primaryBox ?? "home",
   };
-  return { deps, telegram, calls };
+  return { deps, telegram, calls, order };
 }
 
 function box(overrides: Partial<BoxPublic> & { id: string }): BoxPublic {
@@ -246,20 +281,8 @@ describe("/fleet", () => {
   });
 });
 
-describe("/link", () => {
-  it("shows the menu of boxes", async () => {
-    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
-
-    await runCommand({ name: "/link", args: [], chatId: 7 }, deps);
-
-    expect(telegram.sent[0].text).toContain("home");
-    // The menu: one button per box.
-    expect(telegram.sent[0].buttons?.[0]).toHaveLength(1);
-  });
-});
-
 describe("the keyboards", () => {
-  it("rides the board under the fleet's text", async () => {
+  it("rides the board under the fleet's text: Open and Pair per box", async () => {
     const now = Math.floor(Date.now() / 1000);
     const { deps, telegram } = harness({
       boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 3600 })],
@@ -268,13 +291,31 @@ describe("the keyboards", () => {
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
     const keyboard = telegram.sent[0].buttons;
-    expect(keyboard).toHaveLength(1);
-    expect(keyboard?.[0]).toHaveLength(2);
-    // Every button names the box it acts on.
-    expect(keyboard?.[0][0]).toMatchObject({ tap: "link:home" });
-    expect(keyboard?.[0][1]).toMatchObject({ tap: "link:mac" });
-    // The offline box is marked, not hidden.
-    expect(keyboard?.[0][1].label).toContain("🔴");
+    // One row per box: each box's actions stay together.
+    expect(keyboard).toHaveLength(2);
+    // The online box: its tap link rides the Open button, and the Pair
+    // button asks for the pairing URL.
+    expect(keyboard?.[0][0]).toMatchObject({ label: "🚀 Open home", link: "https://tap.example/?t=tok-1" });
+    expect(keyboard?.[0][1]).toMatchObject({ tap: "pair:home" });
+    expect(keyboard?.[0][1].label).toContain("Pair");
+    // The offline box is marked, not hidden — and it keeps no Open
+    // button, because there is no tap link to carry.
+    expect(keyboard?.[1]).toHaveLength(1);
+    expect(keyboard?.[1][0]).toMatchObject({ tap: "pair:mac" });
+  });
+
+  it("leaves a box whose mint failed at its Pair button", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 })],
+      mintFails: new Error("boom"),
+    });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    // The board still renders: the extra failed, not the board.
+    expect(telegram.sent[0].text).toContain("home");
+    expect(telegram.sent[0].buttons).toEqual([[{ label: "🔑 Pair home", tap: "pair:home" }]]);
   });
 
   it("sends no keyboard when no box is enrolled", async () => {
@@ -296,42 +337,8 @@ describe("the keyboards", () => {
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
     const text = telegram.sent[0].text;
-    const labels = telegram.sent[0].buttons?.[0].map((button) => button.label) ?? [];
     expect(text).toContain("ok");
     expect(text).toContain("offline");
-    expect(labels[0]).toContain("🟢");
-    expect(labels[1]).toContain("🔴");
-  });
-});
-
-describe("/flink", () => {
-  it("mints a link for the box and replies with the URL", async () => {
-    const { deps, telegram, calls } = harness();
-
-    await runCommand({ name: "/flink", args: ["mac"], chatId: 7 }, deps);
-
-    expect(calls.mintLink).toEqual(["mac"]);
-    expect(telegram.sent[0].text).toContain("https://tap.example/?t=tok-1");
-    expect(telegram.sent[0].text).toContain("mac");
-  });
-
-  it("shows the usage when no box is named", async () => {
-    const { deps, telegram, calls } = harness();
-
-    await runCommand({ name: "/flink", args: [], chatId: 7 }, deps);
-
-    expect(calls.mintLink).toEqual([]);
-    expect(telegram.sent[0].text).toContain("/flink");
-  });
-
-  // The URL rides inside an href="…" attribute: a quote in it must not
-  // end that attribute.
-  it("escapes a quote in the minted URL so the href stays one attribute", async () => {
-    const { deps, telegram } = harness({ mintUrl: 'https://tap.example/?t=tok"1' });
-
-    await runCommand({ name: "/flink", args: ["mac"], chatId: 7 }, deps);
-
-    expect(telegram.sent[0].text).toContain('href="https://tap.example/?t=tok&quot;1"');
   });
 });
 
@@ -359,9 +366,6 @@ describe("/start and /help", () => {
       "/start",
       "/help",
       "/fleet",
-      "/link",
-      "/flink",
-      "/login",
       "/devices",
       "/faudit",
       "/audit",
@@ -373,6 +377,17 @@ describe("/start and /help", () => {
     ]) {
       expect(text).toContain(cmd);
     }
+    for (const gone of ["/link", "/flink", "/login"]) {
+      expect(text).not.toContain(gone);
+    }
+  });
+
+  it("says the Open links expire and a fresh /fleet mints new ones", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "/help", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toContain("Open links expire");
   });
 });
 
@@ -418,15 +433,70 @@ describe("/devices", () => {
   });
 });
 
-describe("/login", () => {
-  it("mints for the primary box", async () => {
-    const { deps, telegram, calls } = harness({ primaryBox: "mac" });
+describe("the Pair tap", () => {
+  it("answers the tap first, then mints and resolves, and replies with the pairing URL as copyable text", async () => {
+    const { deps, telegram, calls, order } = harness({ boxes: [box({ id: "mac" })] });
 
-    await runCommand({ name: "/login", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
 
+    // The tap is answered before the box calls: the owner never watches
+    // a spinner for the mint and the resolve.
+    expect(order).toEqual(["tap:cb-1", "mint:mac", "resolve:mac", "say"]);
     expect(calls.mintLink).toEqual(["mac"]);
-    expect(telegram.sent[0].text).toContain("https://tap.example/?t=tok-1");
-    expect(telegram.sent[0].text).toContain("OpenCode ready");
+    expect(calls.resolvePair).toEqual([{ boxId: "mac", tapUrl: "https://tap.example/?t=tok-1" }]);
+    const sent = telegram.sent[0];
+    expect(sent.text).toContain("mac");
+    expect(sent.text).toContain("<code>https://oc.home.buyallmemes.com/pair/abc123</code>");
+    expect(sent.text).toContain("5 minutes");
+    expect(sent.text).toContain("single use");
+    // Never a button or a bare link: a stray tap would spend the single
+    // use before opencode ever sees it.
+    expect(sent.buttons).toBeUndefined();
+    expect(sent.text).not.toContain('href="https://oc.home.buyallmemes.com/pair/abc123"');
+  });
+
+  it("explains an offline box instead of minting", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram, calls, order } = harness({ boxes: [box({ id: "mac", last_seen: now - 3600 })] });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-2" }, deps);
+
+    expect(calls.mintLink).toEqual([]);
+    expect(calls.resolvePair).toEqual([]);
+    expect(order).toEqual(["tap:cb-2", "say"]);
+    expect(telegram.sent[0].text).toContain("offline");
+    expect(telegram.sent[0].text).toContain("mac");
+  });
+
+  it("says Pair failed when the mint fails", async () => {
+    const { deps, telegram } = harness({ mintFails: new Error("boom") });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-3" }, deps);
+
+    expect(telegram.sent[0].text).toContain("Pair failed");
+    expect(telegram.sent[0].text).toContain("boom");
+    expect(telegram.sent[0].text).not.toContain("Fleet failed");
+  });
+
+  it("says Pair failed in one line when the resolve fails", async () => {
+    const { deps, telegram } = harness({ resolveFails: new Error("box_timeout") });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-4" }, deps);
+
+    const text = telegram.sent[0].text;
+    expect(text).toContain("Pair failed");
+    expect(text).toContain("box_timeout");
+    expect(text.split("\n")).toHaveLength(1);
+    expect(telegram.sent[0].buttons).toBeUndefined();
+  });
+
+  it("stays silent when the tap names no box", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "pair", args: [], chatId: 7, callbackId: "cb-5" }, deps);
+
+    expect(telegram.answered).toEqual(["cb-5"]);
+    expect(telegram.sent).toEqual([]);
   });
 });
 
@@ -626,6 +696,54 @@ describe("/status", () => {
   });
 });
 
+describe("the board's idempotency", () => {
+  it("pre-mints every render with one stable key per box, so re-renders dedup", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, calls } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 10 })],
+    });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    expect(calls.mintLink).toEqual(["home", "mac", "home", "mac"]);
+    // One stable key per box: the second render reuses the first one's.
+    expect(calls.mintKeys[0]).toBeDefined();
+    expect(calls.mintKeys[2]).toBe(calls.mintKeys[0]);
+    expect(calls.mintKeys[3]).toBe(calls.mintKeys[1]);
+    // ... and the key names the box it mints for.
+    expect(calls.mintKeys[0]).not.toBe(calls.mintKeys[1]);
+  });
+
+  it("mints the Pair tap fresh every time, never reused", async () => {
+    const { deps, calls } = harness({ boxes: [box({ id: "mac" })] });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-2" }, deps);
+
+    // No stable key: the box mints a fresh token per tap, because the
+    // resolve spends it — a reused key would serve a spent token.
+    expect(calls.mintLink).toEqual(["mac", "mac"]);
+    expect(calls.mintKeys).toEqual([undefined, undefined]);
+  });
+
+  it("mints the link tap fresh, never reused", async () => {
+    const { deps, calls } = harness();
+
+    await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
+
+    expect(calls.mintLink).toEqual(["mac"]);
+    expect(calls.mintKeys).toEqual([undefined]);
+  });
+
+  it("keys the board per box per window, and rotates each window", () => {
+    // One window is 300 seconds: half the tap-token TTL.
+    expect(boardIdempotencyKey("home", 600)).toBe(boardIdempotencyKey("home", 899));
+    expect(boardIdempotencyKey("home", 899)).not.toBe(boardIdempotencyKey("home", 900));
+    expect(boardIdempotencyKey("home", 600)).not.toBe(boardIdempotencyKey("mac", 600));
+  });
+});
+
 describe("the taps", () => {
   it("mints for the box the tap names and answers the tap", async () => {
     const { deps, telegram, calls } = harness();
@@ -700,12 +818,25 @@ describe("the taps", () => {
 });
 
 describe("the edges", () => {
-  it("ignores an unknown command", async () => {
+  it("points an unknown command at /help instead of staying silent", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "/flink", args: ["mac"], chatId: 7 }, deps);
+
+    expect(calls.mintLink).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("/flink");
+    expect(telegram.sent[0].text).toContain("/help");
+  });
+
+  it("escapes the unknown command it echoes", async () => {
     const { deps, telegram } = harness();
 
-    await runCommand({ name: "/nope", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "/<b>nope</b>", args: [], chatId: 7 }, deps);
 
-    expect(telegram.sent).toEqual([]);
+    expect(telegram.sent[0].text).toContain("&lt;b&gt;nope&lt;/b&gt;");
+    expect(telegram.sent[0].text).not.toContain("<b>nope</b>");
+    expect(telegram.sent[0].text).toContain("/help");
   });
 
   it("answers a failure instead of throwing at the dispatch", async () => {
@@ -728,20 +859,22 @@ describe("the link registry", () => {
     expect(calls.recorded).toEqual([{ token: "tok-1", box: "mac", chatId: 7, messageId: 1 }]);
   });
 
-  it("records the link /flink handed out", async () => {
-    const { deps, calls } = harness();
+  it("records nothing for the board's Open links: one message carries many", async () => {
+    const { deps, calls } = harness({ boxes: [box({ id: "home" })] });
 
-    await runCommand({ name: "/flink", args: ["home"], chatId: 7 }, deps);
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
-    expect(calls.recorded).toEqual([{ token: "tok-1", box: "home", chatId: 7, messageId: 1 }]);
+    expect(calls.mintLink).toEqual(["home"]);
+    expect(calls.recorded).toEqual([]);
   });
 
-  it("records the link /login handed out, for the primary box", async () => {
-    const { deps, calls } = harness({ primaryBox: "mac" });
+  it("records nothing for a Pair tap: the tap is already spent", async () => {
+    const { deps, calls } = harness({ boxes: [box({ id: "mac" })] });
 
-    await runCommand({ name: "/login", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7 }, deps);
 
-    expect(calls.recorded).toEqual([{ token: "tok-1", box: "mac", chatId: 7, messageId: 1 }]);
+    expect(calls.mintLink).toEqual(["mac"]);
+    expect(calls.recorded).toEqual([]);
   });
 
   it("records nothing when the reply carries no link", async () => {
@@ -781,7 +914,9 @@ describe("the Durable Object's dispatch", () => {
   });
 
   // The owner's chat is not the brain's log: a failed relay shows the
-  // status and the reason, never the Worker's raw JSON.
+  // status and the reason, never the Worker's raw JSON. The Pair tap
+  // mints first, so a tainted box fails the mint the same way /flink
+  // used to.
   it("never shows the Worker's raw JSON to the owner", async () => {
     const stub = env.FLEET_STATE.get(env.FLEET_STATE.idFromName("fleet-commands-relay"));
     const telegram = new RecordingTelegram();
@@ -803,7 +938,7 @@ describe("the Durable Object's dispatch", () => {
       // A box with a pending revoke: the mint relay refuses it (409).
       instance.putTombstone({ box_id: "home", epoch: 1 });
 
-      await instance.dispatchCommand({ name: "/flink", args: ["home"], chatId: 7 }, telegram);
+      await instance.dispatchCommand({ name: "pair", args: ["home"], chatId: 7 }, telegram);
     });
 
     expect(telegram.sent).toHaveLength(1);

@@ -81,6 +81,7 @@ type CallOutcome =
 export function boxAdapter(store: BoxStore, deps: BoxAdapterDeps = {}): Box {
   return {
     mintLink: (boxId, adminToken, consoleKey) => mintLink(store, boxId, adminToken, consoleKey, deps),
+    resolvePair: (boxId, tapUrl) => resolvePair(store, boxId, tapUrl, deps),
     auditRows: (boxId, adminToken, n) => auditRows(store, boxId, adminToken, n, deps),
     revoke: (boxId, adminToken) => revoke(store, boxId, adminToken, deps),
     status: (boxId, adminToken) => ask(store, boxId, adminToken, BOX_API.status, deps),
@@ -121,6 +122,82 @@ function idempotencyKey(consoleKey: string | null): string {
     return consoleKey;
   }
   return crypto.randomUUID();
+}
+
+// The tap's own answer: the pairing URL the box 302s to and prints.
+// The redirect is not followed — following it would spend the single
+// use in a fetch the owner never sees — so the printed body is read
+// instead. The tap URL's host must be the box's own pinned hostname: a
+// tap that points anywhere else is refused, not followed.
+async function resolvePair(
+  store: BoxStore,
+  boxId: string,
+  tapUrl: string,
+  deps: BoxAdapterDeps,
+): Promise<BoxReply> {
+  const box = store.getBox(boxId);
+  if (!box || box.enrolled !== 1) {
+    return { kind: "silent", reason: "unknown_box" };
+  }
+  const tap = parseTapUrl(tapUrl);
+  assertTapHost(box, tap);
+  return fetchTap(box, boxId, tap, deps);
+}
+
+// The tap URL the box minted, parsed. A URL that does not parse is
+// refused, not fetched.
+function parseTapUrl(tapUrl: string): URL {
+  try {
+    return new URL(tapUrl);
+  } catch {
+    throw new Error("refused: invalid tap URL");
+  }
+}
+
+// The tap URL's host must be the box's own pinned hostname: the check
+// reads the box's row, never a heartbeat-supplied URL.
+function assertTapHost(box: BoxRow, tap: URL): void {
+  if (tap.hostname !== box.hostname) {
+    throw new Error(`refused: the tap is not this box's ("${tap.hostname}")`);
+  }
+}
+
+// One GET of the tap, without following the redirect: the box 302s to
+// the pairing URL and prints it, and the printed body is the answer.
+async function fetchTap(box: BoxRow, boxId: string, tap: URL, deps: BoxAdapterDeps): Promise<BoxReply> {
+  const signal = AbortSignal.timeout(deps.deadlineMs ?? BOX_WRITE_DEADLINE_MS);
+  try {
+    // Redirect manual: following it would spend the single use in a
+    // fetch the owner never sees.
+    const res = await fetchBox(
+      pinnedRegistry([box]),
+      boxId,
+      `${tap.pathname}${tap.search}`,
+      { redirect: "manual", signal },
+      deps.fetcher,
+    );
+    const said = await res.text();
+    if (isEdgeError(res.status, said)) {
+      return { kind: "silent", reason: "box_unreachable" };
+    }
+    return { kind: "answered", message: { status: res.status, said } };
+  } catch {
+    return { kind: "silent", reason: signal.aborted ? "box_timeout" : "box_unreachable" };
+  }
+}
+
+// The pairing URL out of the tap's answer: the box 302s to it and prints
+// it. Anything else — another status, another body — is not a pairing
+// link, and the caller says so instead of handing the owner a dead URL.
+export function pairingLink(status: number, said: string): string {
+  if (status !== 302) {
+    throw new Error(`the tap answered ${status}`);
+  }
+  const link = said.trim();
+  if (!link.startsWith("https://")) {
+    throw new Error("the tap answered no pairing link");
+  }
+  return link;
 }
 
 // The audit: the box's own rows, in the box's own shape.

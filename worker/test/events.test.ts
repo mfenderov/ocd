@@ -182,7 +182,9 @@ describe("the edits", () => {
     expect(telegram.edits).toHaveLength(1);
     expect(telegram.edits[0].chatId).toBe(7);
     expect(telegram.edits[0].messageId).toBe(42);
-    expect(telegram.edits[0].text).toContain("⌛️");
+    // The expired branch deleted /login: the edit must point at the
+    // board that mints fresh links, not at a dead command.
+    expect(telegram.edits[0].text).toBe("⌛️ <b>Expired</b> · never tapped\n/fleet for a fresh one");
   });
 });
 

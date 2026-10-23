@@ -3,7 +3,7 @@ import { authorizeRequest, unauthorized, type AccessConfig } from "./access";
 import { handleTelegramWebhook, resolveBrainConfig, type BotCommand } from "./bot";
 import { runCommand, type DeviceRow, type LinkRecord } from "./botcommands";
 import { type BoxPublic, type BoxRow, type DenialRow } from "./boxes";
-import { boxAdapter } from "./boxapi";
+import { boxAdapter, pairingLink } from "./boxapi";
 import { boxDnsWriter } from "./dns";
 import {
   handleEnrollApprove,
@@ -186,7 +186,7 @@ interface FleetEnv {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
   ACCESS_ALLOWED_EMAIL?: string;
-  // The box the bot reaches when the owner says "/login" or "/status":
+  // The box the bot reaches when the owner says "/status":
   // a Worker setting, not a fact about the fleet.
   PRIMARY_BOX?: string;
   // The zone the brain owns the DNS of (a plain var) and the token that
@@ -300,7 +300,10 @@ export class FleetState implements DurableObject {
     await runCommand(cmd, {
       telegram,
       listBoxes: () => this.listBackends(),
-      mintLink: (boxId) => this.mintLink(boxId),
+      mintLink: (boxId, key) => this.mintLink(boxId, key),
+      // The pairing URL out of a tap the brain minted: the tap's own
+      // answer, read server-side.
+      resolvePair: (boxId, tapUrl) => this.resolveTap(boxId, tapUrl),
       // The history: the brain's own table. The boxes pushed these rows,
       // so a box that is offline — or gone for good — keeps its history.
       audit: (boxId, limit) => Promise.resolve(this.auditLogRows(boxId, limit)),
@@ -333,11 +336,12 @@ export class FleetState implements DurableObject {
     });
   }
 
-  // The mint relay: the box mints its own tap code and answers with the
-  // URL. The brain never mints codes for a box — a code is bound to the
-  // box that presents it.
-  private async mintLink(boxId: string): Promise<string> {
-    const res = await handleMintLink(boxId, null, this, { sealKey: this.sealKey, box: this.box });
+  // The mint relay: the box mints its own tap code with the caller's
+  // idempotency key — the board's stable per-box key, or nothing when a
+  // tap wants a fresh token. The brain never mints codes for a box — a
+  // code is bound to the box that presents it.
+  private async mintLink(boxId: string, idempotencyKey?: string): Promise<string> {
+    const res = await handleMintLink(boxId, idempotencyKey ?? null, this, { sealKey: this.sealKey, box: this.box });
     const body = await res.text();
     if (res.status !== 200) {
       throw new Error(relayFailure("mint failed", res.status, body));
@@ -347,6 +351,18 @@ export class FleetState implements DurableObject {
       throw new Error("mint answered with no url");
     }
     return url;
+  }
+
+  // The pairing URL out of a tap the brain minted: a server-side GET of
+  // the tap URL that reads the printed link without following the
+  // redirect. The tap is single-use, so this spends it — the pairing URL
+  // it answers with is what the owner copies.
+  private async resolveTap(boxId: string, tapUrl: string): Promise<string> {
+    const answer = await this.box.resolvePair(boxId, tapUrl);
+    if (answer.kind === "silent") {
+      throw new Error(tapSilence(answer.reason, boxId));
+    }
+    return pairingLink(answer.message.status, answer.message.said);
   }
 
   private async revokeBox(boxId: string): Promise<RevokeResult> {
@@ -1167,6 +1183,13 @@ const RELAY_FAILURE_STATUS = new Map<BoxSilence, number>([
 // say more about a relay it does not understand.
 function relayFailureStatus(reason: BoxSilence): number {
   return RELAY_FAILURE_STATUS.get(reason) ?? 502;
+}
+
+// The reason the tap was not read: the box the tap names, or the reason
+// the box did not answer. The owner can act on either — a name they can
+// check, a reason they can wait out.
+function tapSilence(reason: BoxSilence, boxId: string): string {
+  return reason === "unknown_box" ? `unknown box "${boxId}"` : `the box did not answer (${reason})`;
 }
 
 // The failed relay, as the owner may read it: the status and a short

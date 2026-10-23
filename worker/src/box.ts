@@ -79,6 +79,11 @@ export interface Box {
   // Mint a link on this box. The key is the console's own: one per
   // console request, so a retry never mints twice.
   mintLink(boxId: string, adminToken: string, consoleKey: string | null): Promise<MintAnswer>;
+  // Read the pairing URL out of a tap's own answer: the box 302s to it
+  // and prints it, and the brain reads the printed body without
+  // following the redirect. No admin token rides along: the tap is the
+  // credential, and the box's /pair endpoint answers it on its own.
+  resolvePair(boxId: string, tapUrl: string): Promise<BoxReply>;
   // This box's audit rows: at most n of them.
   auditRows(boxId: string, adminToken: string, n: number): Promise<AuditAnswer>;
   // Revoke this box: its credentials rotate.

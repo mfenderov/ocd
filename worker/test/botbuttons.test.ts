@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { callbackData, fleetBoard, linkMenu, openButton, parseCallback } from "../src/botbuttons";
+import { callbackData, fleetBoard, openButton, pairButton, parseCallback } from "../src/botbuttons";
 import type { BoxPublic } from "../src/boxes";
 
 // The clock the board reads. A fixed second, so the labels are exact:
@@ -23,69 +23,43 @@ function box(overrides: Partial<BoxPublic> & { id: string }): BoxPublic {
 }
 
 describe("the fleet board", () => {
-  // The board is the Go bot's board (internal/tg/buttons.go): one button
-  // per box, labeled with the box's state, so the owner sees which
-  // machine is up without asking.
-  it("offers one button per box, labeled with its state", () => {
+  // The board is the fleet's front door: one row per box, an Open
+  // button carrying the box's tap link and a Pair button asking for the
+  // pairing URL. Each box's actions stay in its own row.
+  it("offers Open and Pair buttons per box", () => {
     const rows = fleetBoard(
       [
         box({ id: "home" }),
         box({ id: "mac", last_seen: NOW - 3600 }),
         box({ id: "vm" }),
       ],
-      NOW,
+      new Map([
+        ["home", "https://tap.example/home?t=1"],
+        ["mac", "https://tap.example/mac?t=2"],
+        ["vm", "https://tap.example/vm?t=3"],
+      ]),
     );
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveLength(3);
-    expect(rows[0][0].label).toContain("home");
-    expect(rows[0][0].label).toContain("🟢");
-    expect(rows[0][1].label).toContain("mac");
-    // The offline box is marked, not hidden.
-    expect(rows[0][1].label).toContain("🔴");
-    expect(rows[0][2].label).toContain("vm");
-    expect(rows[0][2].label).toContain("🟢");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual([
+      { label: "🚀 Open home", link: "https://tap.example/home?t=1" },
+      { label: "🔑 Pair home", tap: "pair:home" },
+    ]);
+    expect(rows[1][0]).toMatchObject({ label: "🚀 Open mac" });
+    expect(rows[1][1]).toMatchObject({ tap: "pair:mac" });
+    expect(rows[2][0]).toMatchObject({ label: "🚀 Open vm" });
   });
 
-  it("marks a box whose revoke is pending", () => {
-    const rows = fleetBoard([box({ id: "mac", tombstoned: true })], NOW);
+  // A box with no tap link — offline, or its mint failed — keeps its
+  // Pair button: the tap explains instead of minting blind.
+  it("leaves a box with no link at its Pair button", () => {
+    const rows = fleetBoard([box({ id: "mac", last_seen: NOW - 3600 })], new Map());
 
-    expect(rows[0][0].label).toContain("🟠");
-    expect(rows[0][0].label).toContain("mac");
-  });
-
-  // The board reads the clock its caller gives it, not the wall clock:
-  // the label and the fleet's text must never disagree.
-  it("reads the clock it is given", () => {
-    const boxes = [box({ id: "home" })];
-    // Seen ten seconds before the caller's clock, so it is ok — even
-    // though the wall clock says the box has been silent for years.
-    expect(fleetBoard(boxes, NOW)[0][0].label).toContain("🟢");
-    // The same box, read an hour later, is offline.
-    expect(fleetBoard(boxes, NOW + 3600)[0][0].label).toContain("🔴");
-  });
-
-  // The button's payload names the box it acts on, so a tap knows which
-  // machine it means.
-  it("names the box the button acts on", () => {
-    const rows = fleetBoard([box({ id: "mac" })], NOW);
-
-    expect(rows[0][0]).toMatchObject({ tap: "link:mac" });
+    expect(rows).toEqual([[{ label: "🔑 Pair mac", tap: "pair:mac" }]]);
   });
 
   it("has no buttons when no box is enrolled", () => {
-    expect(fleetBoard([], NOW)).toEqual([]);
-  });
-});
-
-describe("the link menu", () => {
-  // The Go bot sends one keyboard for /fleet and /link — "/link is the
-  // menu: which machine do you want to work in?" (internal/tg/tg.go) —
-  // so the menu and the board are the same buttons.
-  it("offers the same boxes the board offers", () => {
-    const boxes = [box({ id: "home" }), box({ id: "mac" })];
-
-    expect(linkMenu(boxes, NOW)).toEqual(fleetBoard(boxes, NOW));
+    expect(fleetBoard([], new Map())).toEqual([]);
   });
 });
 
@@ -106,7 +80,7 @@ describe("the callback data", () => {
   // The encoder and the decoder are a pair: every button the brain
   // builds must read back as the action and the box it was built for.
   it("agrees with the encoder", () => {
-    for (const action of ["link", "revoke", "audit", "board"] as const) {
+    for (const action of ["link", "pair", "revoke", "audit", "board"] as const) {
       expect(parseCallback(callbackData(action, "mac"))).toEqual({ action, boxId: "mac" });
     }
   });
@@ -119,5 +93,13 @@ describe("the Open button", () => {
       label: "🚀 Open mac",
       link: "https://tap.example/?t=tok-1",
     });
+  });
+});
+
+describe("the Pair button", () => {
+  // The tap carries the box it acts on, so the brain knows which
+  // machine to mint for.
+  it("names the box the button acts on", () => {
+    expect(pairButton("mac")).toEqual({ label: "🔑 Pair mac", tap: "pair:mac" });
   });
 });

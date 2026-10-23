@@ -28,7 +28,7 @@ flowchart TB
     DNS["public hostnames<br/>oc-tap-… → daemon<br/>oc-… → opencode"]
   end
 
-  U -->|"/link /fleet /flink /faudit …"| W
+  U -->|"/fleet /faudit …"| W
   TGAPI <-->|"webhook + replies"| W
   TGAPI --> U
   HD -->|"heartbeat · events (link + audit rows)"| W
@@ -53,7 +53,7 @@ flowchart TB
    works while a box is down, and why no box hosts a bot.
 2. **The Worker is the only shared component, and it holds all state.**
    Boxes know only themselves; the Durable Object knows every box. That
-   is what makes `/fleet`, `/flink mac`, revoke-all and the audit trail
+   is what makes `/fleet`, Pair taps, revoke-all and the audit trail
    possible. It also *relays* to boxes (`/_oc/mint`, `/_oc/audit`) using
    the box's sealed admin token.
 3. **Each box publishes two hostnames pointing at two different
@@ -72,12 +72,13 @@ sequenceDiagram
   participant X as Box daemon
   participant O as OpenCode (editor)
 
-  Y->>B: /link  (or /flink mac)
+  Y->>B: /fleet → tap [🚀 Open <box>] (or [🔑 Pair <box>] for copyable text)
   B->>W: mint a link for that box (in-process: the bot and the brain are one process)
   W->>X: POST /_oc/mint  (admin token, sealed)
   X-->>W: tap token
   W-->>B: https://oc-tap-<box>/pair?t=…
   B-->>Y: [🚀 Open <box>] button
+  Note over B,W: Pair instead mints at tap time and reads the pairing URL out of the tap's answer, then sends it as copyable text
   Y->>X: GET /pair?t=…  (via tunnel)
   X->>X: consume token, one-time
   X->>O: opencode pair --url https://oc-<box>
@@ -258,7 +259,7 @@ CREATE TABLE cli_tokens (         -- CLI/API tokens, hashes only
   "someone tried to enroll a box and I said no" is recorded, not lost.
 - **`seen_updates`** — the Telegram updates the brain already handled.
   Telegram retries a webhook it thinks failed, so a repeated update id
-  must not run the command twice — a retried `/link` would mint two
+  must not run the command twice — a retried `/fleet` would mint two
   links.
 - **`links`** — every tap link the brain handed out, with the Telegram
   message that carries it. The brain owns that message, so the row is
