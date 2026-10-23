@@ -72,7 +72,7 @@ sequenceDiagram
   participant X as Box daemon
   participant O as OpenCode (editor)
 
-  Y->>B: /fleet → tap [🚀 Open <box>] (or [🔑 Pair <box>] for copyable text)
+  Y->>B: /fleet → tap [🚀 Open <box>] (or [🔑 Pair <box>] for copyable text, or [📦 <box>] for its view)
   B->>W: mint a link for that box (in-process: the bot and the brain are one process)
   W->>X: POST /_oc/mint  (admin token, sealed)
   X-->>W: tap token

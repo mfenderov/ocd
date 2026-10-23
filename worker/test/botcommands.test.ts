@@ -36,9 +36,11 @@ const AUDIT_ERROR_ROW: AuditRow = {
 
 // The command layer owns every reply, so the client's seam is what the
 // tests watch: it records what the brain would have said, in the brain's
-// own shape — the buttons, not the Bot API's keyboard.
+// own shape — the buttons, not the Bot API's keyboard. An edit replaces
+// what the brain said before; a follow-up says something new.
 class RecordingTelegram implements OwnerChat {
   readonly sent: Array<{ chatId: number; text: string; buttons?: OwnerButtons }> = [];
+  readonly replaced: Array<{ chatId: number; messageId: number; text: string; buttons?: OwnerButtons }> = [];
   readonly answered: string[] = [];
 
   say(chatId: number, text: string, buttons?: OwnerButtons): Promise<SentMessage> {
@@ -46,7 +48,8 @@ class RecordingTelegram implements OwnerChat {
     return Promise.resolve({ id: this.sent.length });
   }
 
-  replace(): Promise<boolean> {
+  replace(chatId: number, messageId: number, text: string, buttons?: OwnerButtons): Promise<boolean> {
+    this.replaced.push({ chatId, messageId, text, buttons });
     return Promise.resolve(true);
   }
 
@@ -71,6 +74,10 @@ interface Calls {
   issueEnrollCode: string[];
   boxStatus: string[];
   recorded: LinkRecord[];
+  // The enroll prompt the +Box tap arms, and the Cancel tap that clears
+  // it: the chat each one acted on.
+  enrollPrompted: number[];
+  enrollCancelled: number[];
 }
 
 // What the fleet answers with. The harness always records the calls, so a
@@ -128,6 +135,8 @@ function harness(options: HarnessOptions = {}): {
     issueEnrollCode: [],
     boxStatus: [],
     recorded: [],
+    enrollPrompted: [],
+    enrollCancelled: [],
   };
   const deps: CommandDeps = {
     telegram,
@@ -182,6 +191,12 @@ function harness(options: HarnessOptions = {}): {
     },
     recordLink: (link) => {
       calls.recorded.push(link);
+    },
+    beginEnroll: (chatId) => {
+      calls.enrollPrompted.push(chatId);
+    },
+    cancelEnroll: (chatId) => {
+      calls.enrollCancelled.push(chatId);
     },
     primaryBox: options.primaryBox ?? "home",
   };
@@ -282,7 +297,7 @@ describe("/fleet", () => {
 });
 
 describe("the keyboards", () => {
-  it("rides the board under the fleet's text: Open and Pair per box", async () => {
+  it("rides the board under the fleet's text: Open and Pair per box, box and footer around them", async () => {
     const now = Math.floor(Date.now() / 1000);
     const { deps, telegram } = harness({
       boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 3600 })],
@@ -291,20 +306,23 @@ describe("the keyboards", () => {
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
     const keyboard = telegram.sent[0].buttons;
-    // One row per box: each box's actions stay together.
-    expect(keyboard).toHaveLength(2);
+    // One row per box, then the footer's row: each box's actions stay
+    // together.
+    expect(keyboard).toHaveLength(3);
     // The online box: its tap link rides the Open button, and the Pair
     // button asks for the pairing URL.
     expect(keyboard?.[0][0]).toMatchObject({ label: "🚀 Open home", link: "https://tap.example/?t=tok-1" });
     expect(keyboard?.[0][1]).toMatchObject({ tap: "pair:home" });
     expect(keyboard?.[0][1].label).toContain("Pair");
+    expect(keyboard?.[0][2]).toMatchObject({ tap: "box:home" });
     // The offline box is marked, not hidden — and it keeps no Open
     // button, because there is no tap link to carry.
-    expect(keyboard?.[1]).toHaveLength(1);
+    expect(keyboard?.[1]).toHaveLength(2);
     expect(keyboard?.[1][0]).toMatchObject({ tap: "pair:mac" });
+    expect(keyboard?.[2][0]).toMatchObject({ label: "🕘 History" });
   });
 
-  it("leaves a box whose mint failed at its Pair button", async () => {
+  it("leaves a box whose mint failed at its Pair and box buttons", async () => {
     const now = Math.floor(Date.now() / 1000);
     const { deps, telegram } = harness({
       boxes: [box({ id: "home", last_seen: now - 10 })],
@@ -315,15 +333,18 @@ describe("the keyboards", () => {
 
     // The board still renders: the extra failed, not the board.
     expect(telegram.sent[0].text).toContain("home");
-    expect(telegram.sent[0].buttons).toEqual([[{ label: "🔑 Pair home", tap: "pair:home" }]]);
+    expect(telegram.sent[0].buttons?.[0]).toEqual([
+      { label: "🔑 Pair home", tap: "pair:home" },
+      { label: "📦 home", tap: "box:home" },
+    ]);
   });
 
-  it("sends no keyboard when no box is enrolled", async () => {
+  it("sends only the footer when no box is enrolled", async () => {
     const { deps, telegram } = harness({ boxes: [] });
 
     await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
 
-    expect(telegram.sent[0].buttons).toBeUndefined();
+    expect(telegram.sent[0].buttons?.[0][0]).toMatchObject({ label: "🕘 History" });
   });
 
   // The board's label and the fleet's text read one clock and one rule,
@@ -1042,5 +1063,270 @@ describe("the Durable Object's dispatch", () => {
 
     expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].text).toContain("No audit rows");
+  });
+});
+
+describe("the box view", () => {
+  // Tapping a box edits the board into that box's view: its state line,
+  // its Open and Pair buttons, its Status and Revoke buttons, and the
+  // Back button that returns to the board. An edit, not a follow-up —
+  // the chat stays clean.
+  it("edits the board into the box's view", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram, calls } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 10 })],
+    });
+
+    await runCommand({ name: "box", args: ["home"], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(telegram.answered).toEqual(["cb-1"]);
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    const view = telegram.replaced[0];
+    expect(view.chatId).toBe(7);
+    expect(view.messageId).toBe(42);
+    expect(view.text).toContain("home");
+    expect(view.text).toContain("ok");
+    const buttons = view.buttons ?? [];
+    expect(buttons[0][0]).toMatchObject({ label: "🚀 Open home", link: "https://tap.example/?t=tok-1" });
+    expect(buttons[0][1]).toMatchObject({ tap: "pair:home" });
+    expect(buttons[1][0]).toMatchObject({ tap: "status:home" });
+    expect(buttons[1][1]).toMatchObject({ tap: "rask:home" });
+    expect(buttons[2]).toEqual([{ label: "‹ Back", tap: "board:" }]);
+    // The Open link is pre-minted with the board's stable key, like the
+    // board's own Open buttons.
+    expect(calls.mintKeys[0]).toBeDefined();
+  });
+
+  it("says the box's view when the tap carries no message to edit", async () => {
+    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "box", args: ["home"], chatId: 7, callbackId: "cb-2" }, deps);
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("home");
+    expect(telegram.replaced).toEqual([]);
+  });
+
+  it("edits an unknown box back into the board, never stranded", async () => {
+    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "box", args: ["gone"], chatId: 7, callbackId: "cb-3", messageId: 42 }, deps);
+
+    // A stale button for a box that is gone: the board again, with its
+    // footer — the message keeps working.
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    expect(telegram.replaced[0].text).toContain("home");
+    expect(telegram.replaced[0].buttons?.at(-1)?.[0]).toMatchObject({ label: "🕘 History" });
+  });
+
+  it("stays silent when the tap names no box", async () => {
+    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "box", args: [], chatId: 7, callbackId: "cb-4", messageId: 42 }, deps);
+
+    expect(telegram.answered).toEqual(["cb-4"]);
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toEqual([]);
+  });
+});
+
+describe("Back navigation", () => {
+  // The Back button edits the box view into the board again: the board
+  // is never stranded on a box.
+  it("edits the view back into the board with its footer", async () => {
+    const { deps, telegram } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "board", args: [], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    expect(telegram.replaced[0].messageId).toBe(42);
+    expect(telegram.replaced[0].text).toContain("home");
+    expect(telegram.replaced[0].buttons?.at(-1)?.[0]).toMatchObject({ label: "🕘 History" });
+  });
+});
+
+describe("the footer's follow-ups", () => {
+  // History and Help post follow-up messages: the board stays where it
+  // is, and the answer reads below it.
+  it("posts History as the fleet's audit, the same content as /faudit", async () => {
+    const { deps, telegram, calls } = harness({ auditRows: [AUDIT_ROW] });
+
+    await runCommand({ name: "audit", args: [], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(calls.audit).toEqual([{ boxId: "", limit: 10 }]);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("Audit");
+    expect(telegram.sent[0].text).toContain("home");
+  });
+
+  it("posts Help as the command list", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "help", args: [], chatId: 7, callbackId: "cb-2", messageId: 42 }, deps);
+
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("/fleet");
+    expect(telegram.sent[0].text).toContain("/enrollcode");
+  });
+
+  // +Box asks for the name and arms the prompt: the owner's next
+  // message names the box.
+  it("asks for the box name and arms the prompt", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "enroll", args: [], chatId: 7, callbackId: "cb-3", messageId: 42 }, deps);
+
+    expect(calls.enrollPrompted).toEqual([7]);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("box name");
+    expect(telegram.sent[0].buttons).toEqual([[{ label: "Cancel", tap: "encancel:" }]]);
+  });
+
+  it("cancels the prompt on Cancel", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "encancel", args: [], chatId: 7, callbackId: "cb-4", messageId: 43 }, deps);
+
+    expect(calls.enrollCancelled).toEqual([7]);
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    expect(telegram.replaced[0].text).toContain("cancelled");
+  });
+});
+
+describe("the button confirms", () => {
+  // The nuke tap edits the board into a confirm view: YES runs the
+  // existing nuke path as a follow-up, Cancel edits back to the board.
+  it("edits the board into the nuke confirm", async () => {
+    const { deps, telegram, calls } = harness({ boxes: [box({ id: "home" })] });
+
+    await runCommand({ name: "nuke", args: [], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(calls.revokeAll).toBe(0);
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    expect(telegram.replaced[0].text).toContain("Nuke the whole fleet?");
+    expect(telegram.replaced[0].buttons).toEqual([
+      [
+        { label: "YES", tap: "nukeyes:" },
+        { label: "Cancel", tap: "board:" },
+      ],
+    ]);
+  });
+
+  it("runs the nuke from YES as a follow-up", async () => {
+    const { deps, telegram, calls } = harness({
+      revokeAllResults: [{ id: "home", status: "revoked", epoch: 2 }],
+    });
+
+    await runCommand({ name: "nukeyes", args: [], chatId: 7, callbackId: "cb-2", messageId: 42 }, deps);
+
+    expect(calls.revokeAll).toBe(1);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("1 revoked");
+  });
+
+  // The Revoke button edits the box into a confirm view: YES runs the
+  // existing per-box revoke as a follow-up, Cancel edits back to the
+  // box.
+  it("edits the box into the revoke confirm", async () => {
+    const { deps, telegram, calls } = harness({ boxes: [box({ id: "mac" })] });
+
+    await runCommand({ name: "rask", args: ["mac"], chatId: 7, callbackId: "cb-3", messageId: 42 }, deps);
+
+    expect(calls.revoke).toEqual([]);
+    expect(telegram.sent).toEqual([]);
+    expect(telegram.replaced).toHaveLength(1);
+    expect(telegram.replaced[0].text).toContain("mac");
+    expect(telegram.replaced[0].text).toContain("Revoke box");
+    expect(telegram.replaced[0].buttons).toEqual([
+      [
+        { label: "YES", tap: "ryes:mac" },
+        { label: "Cancel", tap: "box:mac" },
+      ],
+    ]);
+  });
+
+  it("runs the revoke from YES as a follow-up", async () => {
+    const { deps, telegram, calls } = harness({
+      revokeResult: { id: "mac", status: "revoked", epoch: 2 },
+    });
+
+    await runCommand({ name: "ryes", args: ["mac"], chatId: 7, callbackId: "cb-4", messageId: 42 }, deps);
+
+    expect(calls.revoke).toEqual(["mac"]);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("mac");
+    expect(telegram.sent[0].text).toContain("revoked");
+  });
+
+  it("stays silent when the revoke YES names no box", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "ryes", args: [], chatId: 7, callbackId: "cb-5", messageId: 42 }, deps);
+
+    expect(calls.revoke).toEqual([]);
+    expect(telegram.sent).toEqual([]);
+  });
+});
+
+describe("the Status tap", () => {
+  // The box view's Status button relays that box's status as a
+  // follow-up — the typed /status still reads the primary box.
+  it("relays that box's status as a follow-up", async () => {
+    const { deps, telegram, calls } = harness({ boxes: [box({ id: "mac" })], primaryBox: "home" });
+
+    await runCommand({ name: "status", args: ["mac"], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(calls.boxStatus).toEqual(["mac"]);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("service=http://127.0.0.1:49374");
+    expect(telegram.sent[0].buttons).toBeUndefined();
+  });
+
+  it("explains an offline box instead of asking it", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, telegram, calls } = harness({ boxes: [box({ id: "mac", last_seen: now - 3600 })] });
+
+    await runCommand({ name: "status", args: ["mac"], chatId: 7, callbackId: "cb-2", messageId: 42 }, deps);
+
+    expect(calls.boxStatus).toEqual([]);
+    expect(telegram.sent[0].text).toContain("offline");
+  });
+
+  it("stays silent when the tap names no box", async () => {
+    const { deps, telegram, calls } = harness();
+
+    await runCommand({ name: "status", args: [], chatId: 7, callbackId: "cb-3", messageId: 42 }, deps);
+
+    expect(calls.boxStatus).toEqual([]);
+    expect(telegram.sent).toEqual([]);
+  });
+});
+
+describe("Pair from the box view", () => {
+  // The Pair button is the same tap in the box view as on the board:
+  // the pairing URL arrives as a follow-up message, the same contract
+  // as today — never an edit of the view.
+  it("posts the pairing URL as a follow-up, never an edit", async () => {
+    const { deps, telegram, calls, order } = harness({ boxes: [box({ id: "mac" })] });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-1", messageId: 42 }, deps);
+
+    expect(order).toEqual(["tap:cb-1", "mint:mac", "resolve:mac", "say"]);
+    expect(calls.mintLink).toEqual(["mac"]);
+    expect(telegram.replaced).toEqual([]);
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].text).toContain("<code>https://oc.home.buyallmemes.com/pair/abc123</code>");
+    expect(telegram.sent[0].text).toContain("5 minutes");
   });
 });

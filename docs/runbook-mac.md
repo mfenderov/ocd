@@ -76,5 +76,6 @@ sudo systemsetup -setcomputersleep Never   # on adapter, lid open
 ## Checking it
 
 - `/fleet` in the bot's DM (the brain's bot, the only one) lists every box
-  with live state, plus Open and Pair buttons per box.
+  with live state, plus Open, Pair and per-box buttons per row and the
+  History/Box/Nuke/Help footer. Tapping a box opens its view.
 - On the Mac: `curl -s https://oc-tap-<box>.buyallmemes.com/healthz` → `ok`.

@@ -78,10 +78,12 @@ fi
 
 echo "brain-webhook: Telegram now points at $webhook_url"
 
-# The menu: the commands Telegram offers in the chat. The brain answers
-# the typed commands in worker/src/botcommands.ts (/help there is the
-# text of record); these one-liners must say the same thing in fewer
-# words.
+# The menu: the two commands Telegram offers in the chat. The fleet
+# board (/fleet) is the only menu: every box opens into its actions
+# from there, and the board's footer holds the global actions (History,
+# Box, Nuke, Help). Everything else stays typed and working — muscle
+# memory, scripts — but unlisted. /start keeps working, unlisted: the
+# Start button sends it regardless.
 #
 # The menu is set on TWO scopes, and that is deliberate, not redundant:
 # Telegram shows a DM the most specific scope that has commands, and an
@@ -90,13 +92,7 @@ echo "brain-webhook: Telegram now points at $webhook_url"
 # explain it. Both scopes carry the same list, so no scope can disagree.
 # The group scope is deleted outright: the bot talks to exactly one
 # chat — the owner's — and a group menu would be a lie.
-#
-# The menu is smaller than the command list on purpose: /start is what
-# the Start button sends (it works whether or not it is listed), /audit
-# is /faudit under its old name, and typed /revoke answers with its
-# retirement notice. All three still work when typed; none of them needs
-# a menu row.
-menu='{"commands":[{"command":"help","description":"List what the fleet bot can do"},{"command":"fleet","description":"Every box, its state and last sync, with Open and Pair buttons"},{"command":"devices","description":"The clients that tapped in"},{"command":"faudit","description":"The fleet'"'"'s history, newest first"},{"command":"frevoke","description":"Revoke one box (confirm with YES)"},{"command":"fnuke","description":"Revoke every box (confirm with YES)"},{"command":"enrollcode","description":"A one-time code for a new box"},{"command":"status","description":"The primary box'"'"'s service status"}]}'
+menu='{"commands":[{"command":"fleet","description":"The fleet board: every box, the footer holds the rest"},{"command":"help","description":"List what the fleet bot can do"}]}'
 
 # One scope's menu: the body goes in on stdin, as above. Nothing secret
 # rides here, but the shape stays the same so the calls cannot drift

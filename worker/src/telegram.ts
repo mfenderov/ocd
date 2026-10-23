@@ -146,13 +146,18 @@ export function createTelegramClient(token: string, fetcher: typeof fetch = fetc
       return { id: messageId };
     },
 
-    async replace(chatId, messageId, text) {
-      const result = await call<unknown>("editMessageText", {
+    async replace(chatId, messageId, text, buttons) {
+      const body: Record<string, unknown> = {
         chat_id: chatId,
         message_id: messageId,
         text,
         ...RENDER_OPTS,
-      });
+      };
+      const markup = replyMarkup(buttons);
+      if (markup !== undefined) {
+        body["reply_markup"] = markup;
+      }
+      const result = await call<unknown>("editMessageText", body);
       // Telegram answers a chat edit with the edited Message, and an
       // inline-message edit with `true`. This method only ever issues a
       // chat edit, but both shapes mean the edit landed — the Go client
