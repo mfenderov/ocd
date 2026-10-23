@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.23.3 - 2026-10-23
+#### Bug Fixes
+- (**worker**) the presence probe does not trust the edge's error pages - (0c6dccd) - mfenderov
+- (**worker**) the presence probe does not trust the edge's error pages - (94553bc) - mfenderov
+
+- - -
+
 ## v0.23.2 - 2026-10-22
 #### Bug Fixes
 - (**ci**) the CRAP gate scans the Go sources, not the repo - (02c10f7) - mfenderov
