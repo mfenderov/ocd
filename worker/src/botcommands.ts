@@ -79,7 +79,10 @@ export interface LinkRecord {
 export interface CommandDeps {
   telegram: OwnerChat;
   listBoxes: () => BoxPublic[];
-  mintLink: (boxId: string) => Promise<string>;   // the tap URL
+  // The tap URL. The key decides the dedup: the board passes its stable
+  // per-box key so re-renders reuse the live token, every tap passes
+  // nothing so the box mints a fresh token per tap.
+  mintLink: (boxId: string, idempotencyKey?: string) => Promise<string>;   // the tap URL
   // The pairing URL out of a tap's own answer: a server-side GET of the
   // tap URL that reads the printed link without following the redirect.
   // Following it would spend the single use in a browser the owner
@@ -292,9 +295,25 @@ async function boardReply(deps: CommandDeps): Promise<Reply> {
   return { text: fleetText(boxes, now), keyboard: fleetBoard(boxes, await mintOpenLinks(boxes, now, deps)) };
 }
 
-// One tap link per box the clock calls online, all at once. A mint that
-// fails is not the board's failure: the box keeps its Pair button, and
-// the tap says what went wrong when asked.
+// One tap link per box the clock calls online, all at once. The board
+// pre-mints with one stable key per box per window, so a re-render
+// reuses the live token through the box's claim path instead of running
+// another exec and leaving another idem row. A mint that fails is not
+// the board's failure: the box keeps its Pair button, and the tap says
+// what went wrong when asked.
+//
+// The window is half the tap-token TTL: a reused token always has at
+// least that long left, so an Open link served from dedup never lands
+// the owner on a token about to die.
+const BOARD_KEY_WINDOW_SEC = 300;
+
+// The board's idempotency key: the box, in the window the render falls
+// in. The next window mints fresh, so a reused token is never older
+// than one window.
+export function boardIdempotencyKey(boxId: string, now: number): string {
+  return `fleet-board:${boxId}:${Math.floor(now / BOARD_KEY_WINDOW_SEC)}`;
+}
+
 async function mintOpenLinks(
   boxes: BoxPublic[],
   now: number,
@@ -307,7 +326,7 @@ async function mintOpenLinks(
         return;
       }
       try {
-        links.set(box.id, await deps.mintLink(box.id));
+        links.set(box.id, await deps.mintLink(box.id, boardIdempotencyKey(box.id, now)));
       } catch {
         // The Pair tap says what went wrong; the board still renders.
       }
@@ -333,6 +352,9 @@ async function tapLinkCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply
   }
   let url: string;
   try {
+    // No key: every tap mints a fresh token. The tap's reply URL is
+    // recorded and gets its spent edit, so sharing one token across
+    // taps would edit the wrong message.
     url = await deps.mintLink(box);
   } catch (err) {
     // The Go's callback answer when the mint fails: the link failed,
@@ -368,6 +390,8 @@ async function pairCommand(cmd: BotCommand, deps: CommandDeps): Promise<Reply | 
   }
   let tapUrl: string;
   try {
+    // No key: every Pair tap mints a fresh token. The resolve spends it
+    // server-side, so a reused token would already be spent.
     tapUrl = await deps.mintLink(box);
   } catch (err) {
     return { text: pairFailedText(err) };
@@ -577,6 +601,7 @@ function helpText(): string {
     "/start — this list",
     "/help — this list",
     "/fleet — every box, its state and last sync, with Open and Pair buttons",
+    "Open links expire — a fresh /fleet mints new ones",
     "/devices — the clients that tapped in",
     "/faudit [box] [n] — the fleet's history, newest first",
     "/audit [box] [n] — the same history",

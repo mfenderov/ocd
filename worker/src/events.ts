@@ -418,7 +418,7 @@ function usedText(at: number, ip: string, ua: string): string {
 // The message of a dead link, ported from the Go sweeper: "⌛️ <b>Expired</b>
 // · never tapped".
 function expiredText(): string {
-  return "⌛️ <b>Expired</b> · never tapped\n/login for a fresh one";
+  return "⌛️ <b>Expired</b> · never tapped\n/fleet for a fresh one";
 }
 
 // The time of the tap: the Go's "15:04:05". The Go reads the box's local

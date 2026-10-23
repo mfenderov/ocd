@@ -16,8 +16,8 @@ const SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 //      here, silently, before any command runs.
 //
 //   2. The dedup — Telegram retries a webhook it thinks failed. The
-//      brain records the update ids it handled, so a retried /link
-//      cannot mint two links.
+//      brain records the update ids it handled, so a retried /fleet
+//      cannot mint two boards' links.
 //
 // The router answers one thing itself: a tap it drops. Telegram spins
 // the button until the answer comes, so a tap the brain cannot act on —
@@ -43,7 +43,7 @@ export interface BotStore {
 // ...) with the box id in args: the command layer maps the action to a
 // command and answers the tap.
 export interface BotCommand {
-  name: string;         // "/fleet", "/flink", ...
+  name: string;         // "/fleet", "/status", ...
   args: string[];
   chatId: number;
   messageId?: number;

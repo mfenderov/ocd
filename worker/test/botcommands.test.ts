@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { runCommand, type AuditRow, type CommandDeps, type DeviceRow, type LinkRecord } from "../src/botcommands";
+import { boardIdempotencyKey, runCommand, type AuditRow, type CommandDeps, type DeviceRow, type LinkRecord } from "../src/botcommands";
 import type { BoxPublic, BoxRow } from "../src/boxes";
 import type { AuditRow as EventAuditRow } from "../src/events";
 import type { RevokeResult } from "../src/revoke";
@@ -60,6 +60,9 @@ class RecordingTelegram implements OwnerChat {
 // recorded, so a test can assert what the command asked for.
 interface Calls {
   mintLink: string[];
+  // The idempotency key each mint carried: the board's stable key, or
+  // nothing when the tap minted fresh.
+  mintKeys: Array<string | undefined>;
   resolvePair: Array<{ boxId: string; tapUrl: string }>;
   audit: Array<{ boxId: string; limit: number }>;
   devices: number;
@@ -116,6 +119,7 @@ function harness(options: HarnessOptions = {}): {
   };
   const calls: Calls = {
     mintLink: [],
+    mintKeys: [],
     resolvePair: [],
     audit: [],
     devices: 0,
@@ -133,9 +137,10 @@ function harness(options: HarnessOptions = {}): {
       }
       return options.boxes ?? [];
     },
-    mintLink: (boxId) => {
+    mintLink: (boxId, key?) => {
       order.push(`mint:${boxId}`);
       calls.mintLink.push(boxId);
+      calls.mintKeys.push(key);
       if (options.mintFails) {
         return Promise.reject(options.mintFails);
       }
@@ -375,6 +380,14 @@ describe("/start and /help", () => {
     for (const gone of ["/link", "/flink", "/login"]) {
       expect(text).not.toContain(gone);
     }
+  });
+
+  it("says the Open links expire and a fresh /fleet mints new ones", async () => {
+    const { deps, telegram } = harness();
+
+    await runCommand({ name: "/help", args: [], chatId: 7 }, deps);
+
+    expect(telegram.sent[0].text).toContain("Open links expire");
   });
 });
 
@@ -680,6 +693,54 @@ describe("/status", () => {
     expect(telegram.sent[0].text).toBe(
       "📊 <b>Status</b>\n• <code>service=up remote=? devices=2 mints24h=5</code>",
     );
+  });
+});
+
+describe("the board's idempotency", () => {
+  it("pre-mints every render with one stable key per box, so re-renders dedup", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const { deps, calls } = harness({
+      boxes: [box({ id: "home", last_seen: now - 10 }), box({ id: "mac", last_seen: now - 10 })],
+    });
+
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+    await runCommand({ name: "/fleet", args: [], chatId: 7 }, deps);
+
+    expect(calls.mintLink).toEqual(["home", "mac", "home", "mac"]);
+    // One stable key per box: the second render reuses the first one's.
+    expect(calls.mintKeys[0]).toBeDefined();
+    expect(calls.mintKeys[2]).toBe(calls.mintKeys[0]);
+    expect(calls.mintKeys[3]).toBe(calls.mintKeys[1]);
+    // ... and the key names the box it mints for.
+    expect(calls.mintKeys[0]).not.toBe(calls.mintKeys[1]);
+  });
+
+  it("mints the Pair tap fresh every time, never reused", async () => {
+    const { deps, calls } = harness({ boxes: [box({ id: "mac" })] });
+
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
+    await runCommand({ name: "pair", args: ["mac"], chatId: 7, callbackId: "cb-2" }, deps);
+
+    // No stable key: the box mints a fresh token per tap, because the
+    // resolve spends it — a reused key would serve a spent token.
+    expect(calls.mintLink).toEqual(["mac", "mac"]);
+    expect(calls.mintKeys).toEqual([undefined, undefined]);
+  });
+
+  it("mints the link tap fresh, never reused", async () => {
+    const { deps, calls } = harness();
+
+    await runCommand({ name: "link", args: ["mac"], chatId: 7, callbackId: "cb-1" }, deps);
+
+    expect(calls.mintLink).toEqual(["mac"]);
+    expect(calls.mintKeys).toEqual([undefined]);
+  });
+
+  it("keys the board per box per window, and rotates each window", () => {
+    // One window is 300 seconds: half the tap-token TTL.
+    expect(boardIdempotencyKey("home", 600)).toBe(boardIdempotencyKey("home", 899));
+    expect(boardIdempotencyKey("home", 899)).not.toBe(boardIdempotencyKey("home", 900));
+    expect(boardIdempotencyKey("home", 600)).not.toBe(boardIdempotencyKey("mac", 600));
   });
 });
 
