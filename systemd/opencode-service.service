@@ -1,0 +1,14 @@
+[Unit]
+Description=opencode background service (editor UI on 49374)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/home/mfenderov/.opencode/bin:/home/mfenderov/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/mfenderov/.opencode/bin/opencode service start
+ExecStop=/home/mfenderov/.opencode/bin/opencode service stop
+
+[Install]
+WantedBy=default.target
